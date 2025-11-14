@@ -37,49 +37,73 @@
 - **검증 기준**: 결정 사항을 문서화하고 P1 착수 체크리스트 승인.
 
 ### P1. 모델·데이터 자산 확보 (`storage/` v2.0.0)
-- **목표**  
-  - Meta `7B_1T_4` 번들, Rho-1 reference, 소형 테스트 모델을 `storage/models_v2/` 표준 구조로 정리한다.  
-  - CodeContests/MBPP/HumanEval raw 자산을 `datasets_v2/`에 수집하고 SHA256 기록을 남긴다.
-- **주요 활동**  
-  1. Hugging Face에서 `consolidated.pth`, `params.json`, `tokenizer.model` 다운로드 → `raw/` 저장.  
-  2. safetensors 변환, `configs/params.json` 복사, `meta_adapter.yaml` 작성, `metadata.json` 갱신.  
-  3. CodeContests raw JSONL 정리(`instruction/input/output/task_id/test_cases/is_correct/full_text` 유지), SHA256 계산.  
+- **목표**
+  - Meta `7B_1T_4` 번들, Rho-1 reference, 소형 테스트 모델을 `storage/models_v2/` 표준 구조로 정리한다.
+  - CodeContests/MBPP/HumanEval raw 자산을 `storage/datasets_v2/`에 수집하고 SHA256 기록을 남긴다.
+- **주요 활동**
+  1. Hugging Face에서 `consolidated.pth`, `params.json`, `tokenizer.model` 다운로드 → `raw/` 저장.
+  2. safetensors 변환, `configs/params.json` 복사, `meta_adapter.yaml` 작성, `metadata.json` 갱신.
+  3. CodeContests correct/incorrect solutions 통합 JSONL 생성 (`instruction/input/output/task_id/is_correct/metadata` 포함), SHA256 계산.
   4. `storage/README.md` 업데이트.
-- **산출물**: `models_v2/` 및 `datasets_v2/` 디렉터리, SHA256 로그, 업데이트된 README.  
+- **실제 성과** (2025-11-14):
+  - **모델**: 5개 모델 (meta-llama-mtp 6.7B, ref-sheared-llama-2.7b, starling-rm-7b 13.3B, micro-mtp, micro-ref)
+  - **데이터**: CodeContests **3.7M samples** (train 3.69M, valid 14.7K, test 14.8K), MBPP 964, HumanEval 164
+  - **Split**: train/valid/test (HuggingFace 원본 "valid" split 사용)
+- **산출물**: `models_v2/` 및 `datasets_v2/` 디렉터리, SHA256 로그, 업데이트된 README.
 - **검증 기준**: dtype(float16) 유지, 토크나이저 공유 여부 기재, split 누락 없음, 체크리스트 서명.
 
 ### P2. 코드 스켈레톤 & 벤더 정리
 - **목표**  
   - `vendor/meta_llama/`에 Meta 레퍼런스 코드( `llama/*.py` )를 옮기고, `src/` 모듈 골격을 생성한다.
 - **주요 활동**  
-  - vendor 패키지 초기화(`__init__.py`), mypy-friendly type stub 정리.  
-  - `src/` 하위 디렉터리/`__init__.py` 생성, 인터페이스 스텁 작성.  
-  - `pyproject.toml`, `ruff.toml`, pre-commit 훅 구성.  
+  - vendor 패키지 초기화(`__init__.py`), mypy-friendly type stub 정리.
+  - `src/` 하위 디렉터리/`__init__.py` 생성, 인터페이스 스텁 작성.
+  - `pyproject.toml`, `ruff.toml`, pre-commit 훅 구성.
   - `configs/defaults.yaml`, recipe 초안 마련(값은 placeholder 가능).
-- **산출물**: 스켈레톤 코드, vendor 패키지, 기본 설정 파일.  
+- **실제 성과** (2025-11-14):
+  - HuggingFace에서 Meta 레퍼런스 코드 다운로드 → `vendor/meta_llama/` 배치
+  - 8개 src 모듈 스켈레톤, CLI --dry-run 동작, 7개 unit test 통과
+- **산출물**: 스켈레톤 코드, vendor 패키지, 기본 설정 파일.
 - **검증 기준**: `uv run python -c "from vendor.meta_llama import Transformer"` 성공, lint/format 통과.
 
 ### P3. 데이터 파이프라인 구현
 - **목표**
-  - HuggingFace 데이터셋을 직접 로드하여 Alpaca 형식으로 변환하고, correct/incorrect solutions를 통합 처리한다.
-  - **Loss masking 구현**: instruction/input 토큰은 학습 제외, output 토큰만 학습 대상
+  - 전처리된 JSONL을 학습용 PyTorch Dataset으로 로딩한다.
+  - **Loss masking collator 구현**: instruction/input 토큰은 학습 제외, output 토큰만 학습 대상
+  - **Stage별 샘플링 전략**: Stage 1/2에 맞는 데이터 효율적 로딩
 - **주요 활동**
-  - `src/data/prepare.py`: HF datasets 로드 → Alpaca 스타일 변환 (instruction/input/output, top-level is_correct)
+  - `src/data/datasets.py`: JSONL → HuggingFace Dataset 로딩 + **Stage별 샘플링**
+    - `storage/datasets_v2/*/processed/*.jsonl` 읽기
+    - train/valid/test split 로딩 (CodeContests는 "valid" split 사용)
+    - is_correct, **difficulty** 필드 파싱 (CodeContests만 해당)
+    - **Stage 1 샘플링**: `is_correct` 균형 (50:50), 전체 난이도, n_samples=10K~50K
+    - **Stage 2 샘플링**: Curriculum Learning (difficulty 기반 점진적 증가), n_samples=100K~500K
+      - 초반 epoch (0~30%): low (1-3) 70%, medium (4-7) 30%, high (8-11) 0%
+      - 중반 epoch (30~70%): low 30%, medium 60%, high 10%
+      - 후반 epoch (70~100%): low 10%, medium 50%, high 40%
+    - DatasetDict 구성
   - `src/data/collators.py`: **Instruction/Input masking collator** 구현
-    - Instruction 길이 추적 → labels에 -100 설정
+    - Alpaca 형식 (instruction/input/output) 파싱
+    - Tokenizer로 instruction 길이 추적 → labels에 -100 설정
     - Input 길이 추적 → labels에 -100 설정
-    - Output만 실제 token ID 유지 (loss 계산)
-    - attention_mask는 모든 토큰 유지 (context로 활용)
-  - **Correct + Incorrect 통합**: 단일 JSONL에 is_correct 필드로 구분, task_id 접미사 추가
-  - 토큰 필터링: SentencePieceProcessor로 2048 토큰 초과 샘플 제거
-  - `scripts/validate_datasets.py`: 스키마, 토큰 길이, SHA256 체크
-  - `datasets_local_small/` 자동 생성 스크립트
-- **산출물**: 변환 스크립트, collator 모듈, 검증 스크립트, stats JSON
-- **검증 기준**:
-  - top-level is_correct 필드 존재
-  - Collator가 instruction/input 토큰을 -100으로 마스킹
+    - Output만 실제 token ID 유지 (loss 계산 대상)
+    - attention_mask는 모든 토큰 포함 (전체 context 활용)
+    - n_future_tokens 대응 (MTP 헤드용)
+  - `src/data/transforms.py`: 런타임 변환
+    - Padding, truncation (max_length=2048, 토큰 필터링 이미 적용됨)
+    - Batching utilities
+  - DataLoader 통합 및 테스트
+- **데이터셋 규모** (실제):
+  - CodeContests: train 3.69M, valid 14.7K, test 14.8K (correct + incorrect 통합)
+  - **Difficulty 분포**: diff=7 (86.7%), diff=2 (6.4%), diff=1 (4.4%), diff=11 (2.1%), diff=6 (0.4%)
+  - MBPP: train 374, validation 90, test 500
+  - HumanEval: test 164
+- **산출물**: src/data/ 모듈 (datasets.py, collators.py, transforms.py), unit tests
+- **검증 기준**
+  - JSONL 로딩 및 DatasetDict 생성 성공
+  - Collator가 instruction/input을 -100으로 마스킹 (unit test)
   - Output 토큰만 loss 계산 확인
-  - 2048 토큰 초과 없음, schema 검증 통과
+  - DataLoader 배치 생성 및 shape 검증 통과
 
 ### P4. Meta Adapter 통합
 - **목표**  

@@ -81,9 +81,39 @@ w_{t,k} = 1.0 (모든 k)
 데이터셋의 검증 가능한 레이블(is_correct)을 reward signal로 사용하여 TD error 기반 토큰 가중치를 산출한다.
 
 ```
-w_{t,k} ∝ |δ_{t,k}|
-δ_{t,k} = r_t + γ V(s_{t+k}) - V(s_t)  (TD error)
+토큰 x_k의 가중치: w_k = exp(δ_k / β)  (β=0.9)
+
+TD error (표준 Temporal Difference):
+  # Intermediate tokens (k < T): Bootstrapping
+  δ_k = r_k + γV(s_k) - V(s_{k-1})
+      = 0 + γV(s_k) - V(s_{k-1})        # r_k = 0 (중간 토큰은 보상 없음)
+      = γV(s_k) - V(s_{k-1})            ✅
+
+  # Terminal token (k = T): Direct reward
+  δ_T = r_T + γV(terminal) - V(s_{T-1})
+      = R + 0 - V(s_{T-1})              # V(terminal) = 0
+      = R - V(s_{T-1})                  ✅
 ```
+
+**TD Error 공식 설명 (표준 RL)**:
+- **MTP 시나리오**: 시점 t에서 미래 토큰 x_{t+1}, ..., x_{t+H} 예측
+- **표준 TD Learning 적용**:
+  - 토큰 x_k의 상태: `s_{k-1} = (x_0, ..., x_{k-1})` (토큰 x_k 생성 **전**)
+  - 생성 후 상태: `s_k = (x_0, ..., x_k)` (토큰 x_k 생성 **후**)
+- **Intermediate tokens (k < T)**:
+  - `δ_k = γV(s_k) - V(s_{k-1})` (Bootstrapping)
+  - 다음 상태의 가치 함수로 현재 토큰의 기여도 추정
+  - 분산 감소 효과 (GAE의 기반)
+- **Terminal token (k = T)**:
+  - `δ_T = R - V(s_{T-1})` (Direct reward)
+  - 실제 보상 R을 직접 사용 (bootstrapping 불필요)
+- **R (reward)**: Terminal 누적 보상 (LLM에서 = 최종 보상, binary: 0 or 1)
+- **γ (gamma)**: 할인 계수 (일반적으로 0.99, LLM에서는 1.0 가능)
+- **직관**: δ_k는 "토큰 x_k를 선택한 것의 marginal value"
+- **이론적 근거**:
+  - Sutton & Barto "RL: An Introduction" - 표준 TD(0) 공식
+  - TDRM (2024): Intermediate bootstrapping + Terminal direct reward
+  - Policy Gradient Theorem (Sutton et al. 1999)
 
 **핵심 특징**:
 - **Reward 소스**: 데이터셋 레이블 (코드 실행 결과, 수학 정답)

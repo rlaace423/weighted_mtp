@@ -22,14 +22,16 @@
 
 **데이터셋** (storage/datasets_v2/):
 - ✅ HumanEval: 164 test samples (avg 450/180 chars)
-- ✅ MBPP: 374 train + 90 val + 500 test (avg 78/178 chars)
+- ✅ MBPP: 374 train + 90 validation + 500 test (avg 78/178 chars)
 - ✅ CodeContests (correct + incorrect 통합):
-  - **재처리 진행 중**: correct solutions + incorrect solutions 포함
-  - **예상 샘플 수**: Train ~15,000-20,000 (기존 10,489의 1.5-2배)
+  - **완료**: correct solutions + incorrect solutions 완전 통합
+  - **실제 샘플 수**: Train **3,691,981** (correct 1,754,404 / incorrect 1,937,577)
+  - **Valid**: 14,725 samples (correct 8,184 / incorrect 6,541)
+  - **Test**: 14,851 samples (correct 8,038 / incorrect 6,813)
   - **top-level is_correct 필드** 포함 (true/false)
   - task_id 접미사: `_correct_N` / `_incorrect_N`
   - 토큰 필터링: instruction+input+output ≤2048 tokens
-- ✅ Small 버전: 각 데이터셋당 100 train + 32 val/test (storage/datasets_local_small/)
+- ✅ Small 버전: 각 데이터셋당 100 train + 32 valid/test (storage/datasets_local_small/)
 
 **인프라**:
 - ✅ 3개 통합 스크립트: setup_models.py, setup_datasets.py, verify_storage.py
@@ -123,7 +125,11 @@ uv run python scripts/verify_storage.py --check models
 
 # 데이터셋 검증 (valid split 포함)
 find storage/datasets_v2/codecontests/processed -name "*.jsonl"
-# train.jsonl, valid.jsonl, test.jsonl 확인
+# 예상 출력: train.jsonl, valid.jsonl, test.jsonl 확인
+
+# 샘플 수 확인
+wc -l storage/datasets_v2/codecontests/processed/*.jsonl
+# train: 3,691,981 / valid: 14,725 / test: 14,851
 ```
 
 ---
@@ -1194,11 +1200,12 @@ uv run pytest tests/unit/ -v
 5. tests/unit/test_data.py: 데이터 로딩 테스트
 
 **Phase 1 발견사항 반영**:
-- **Correct + Incorrect solutions 통합 처리**: 단일 JSONL에 모두 저장
+- **Correct + Incorrect solutions 통합 처리**: 단일 JSONL에 모두 저장 (3.7M samples)
 - **Top-level is_correct 필드**: true/false로 솔루션 정답 여부 표시
 - **Task ID 접미사**: `_correct_N` / `_incorrect_N`으로 구분
 - **토큰 필터링**: instruction+input+output ≤2048 tokens (SentencePieceProcessor 사용)
 - **HuggingFace 직접 로드**: Parquet → Alpaca JSONL 변환 (raw/ 중간 저장 불필요)
+- **Split 명명**: HuggingFace 원본 "valid" split 사용 (train/valid/test)
 - **Loss Masking**: instruction/input 토큰은 labels=-100으로 마스킹, output만 학습
 - metadata 보존 (source, difficulty, has_tests) → MLflow 로깅
 

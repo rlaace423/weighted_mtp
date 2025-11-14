@@ -149,7 +149,7 @@
 - **실제 구현**: `scripts/setup_datasets.py`에 다운로드, 변환, 통계 생성을 통합 구현
 - **주요 특징**:
   - ✓ HuggingFace 데이터셋을 Parquet 형식으로 직접 로드
-  - ✓ CodeContests validation split은 "valid"로 명명됨
+  - ✓ CodeContests validation split은 "valid"로 명명됨 (HuggingFace 원본 split 이름 사용)
   - ✓ **Correct와 incorrect solutions를 모두 처리하여 단일 JSONL에 통합**
   - ✓ **Top-level `is_correct` 필드로 솔루션 정답 여부 표시**
   - ✓ 토큰 길이 필터링 (max_tokens=2048, instruction+input+output 합산)
@@ -176,10 +176,10 @@
          - task_id: `"{name}_incorrect_{idx}"` (예: `"brcktsrm_incorrect_0"`)
          - is_correct: `false`
        - 필터링: Python only (언어 코드 1 또는 3), 토큰 길이 ≤2048
-       - **예상 샘플 수** (토큰 필터링 후):
-         - Train: ~15,000-20,000 samples (correct + incorrect 통합)
-         - Valid: ~120-150 samples
-         - Test: ~150-200 samples
+       - **실제 샘플 수** (2025-11-14, 토큰 필터링 후):
+         - Train: **3,691,981 samples** (correct: 1,754,404 / incorrect: 1,937,577)
+         - Valid: **14,725 samples** (correct: 8,184 / incorrect: 6,541)
+         - Test: **14,851 samples** (correct: 8,038 / incorrect: 6,813)
      - **MBPP**:
        - Parquet → Alpaca (text → instruction, code → output)
        - 374 train + 90 validation + 500 test
@@ -261,22 +261,25 @@
 ## Step 완료 체크리스트 (요약)
 - [x] Step 0: 기존 자산 삭제, 환경 정비 ✓
 - [x] Step 1: v2 디렉터리 구조 생성 ✓
-- [🔄] Step 2: Meta 7B_1T_4 & Sheared 2.7B raw 다운로드 (백그라운드 실행 중)
-- [ ] Step 3: Meta 모델 safetensors/metadata 구성, 검증 통과 (Step 2 완료 후)
-- [ ] Step 4: Reference 모델 변환 & 검증 (Step 2 완료 후)
-- [ ] Step 5: Micro 모델 생성 & 테스트 통과 (Step 3, 4 완료 후)
+- [x] Step 2: Meta 7B_1T_4 & Sheared 2.7B raw 다운로드 ✓
+- [x] Step 3: Meta 모델 safetensors/metadata 구성, 검증 통과 ✓
+- [x] Step 4: Reference 모델 변환 & 검증 ✓
+- [x] Step 5: Micro 모델 생성 & 테스트 통과 ✓
 - [x] Step 6-8 (통합): 데이터셋 다운로드 및 전처리 완료 ✓
   - [x] HumanEval: 164 test samples ✓
-  - [x] MBPP: 374 train + 90 val + 500 test ✓
-  - [x] CodeContests: 10,489 train + 122 test (Python only) ✓
+  - [x] MBPP: 374 train + 90 validation + 500 test ✓
+  - [x] CodeContests: **3.7M samples** (train 3.69M + valid 14.7K + test 14.8K) ✓
   - [x] processed/ JSONL, schema.json, stats/ 생성 완료 ✓
-  - [x] datasets_local_small/ 생성 완료 ✓
-- [ ] Step 9: 모델·데이터 무결성 검증 완료 (모델 작업 완료 후)
-- [🔄] Step 10: 문서(README, reports) 업데이트 (진행 중)
-- [ ] Step 11: 체크리스트 및 승인 완료
+  - [x] datasets_local_small/ 생성 완료 (train≤100, val/test≤32) ✓
+- [x] Step 9: 모델·데이터 무결성 검증 완료 ✓
+- [x] Step 10: 문서(README, reports) 업데이트 ✓
+- [x] Step 11: 체크리스트 및 승인 완료 ✓
 
-**Phase 1 데이터셋 파트 완료**: `storage/datasets_v2/`와 `storage/datasets_local_small/`가 v2.0.0 기준을 만족합니다.
-**진행 중**: 모델 다운로드 및 변환 작업 (백그라운드 실행 중)
+**Phase 1 완료** (2025-11-14):
+- **모델**: 5개 모델 safetensors 변환 완료 (meta-llama-mtp, ref-sheared-llama-2.7b, starling-rm-7b, micro-mtp, micro-ref)
+- **데이터**: CodeContests 3.7M (correct+incorrect 완전 통합), MBPP 964, HumanEval 164
+- **Split**: train/valid/test (HuggingFace 원본 "valid" split 사용)
+- **검증**: SHA256 기록, metadata.json 완비, 토큰 필터링 적용
 # Phase 1: storage 자산 변환 상세 실행 계획
 
 본 문서는 `implementation_plan.md`의 Phase 1을 step별로 세분화한 실행 계획이다. 각 step은 **목표 → 선행조건 → 작업 항목 → 산출물 → 검증 기준**으로 구성되며, 순차적으로 수행하되 병렬 가능한 작업은 명시한다.
