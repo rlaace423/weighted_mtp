@@ -116,18 +116,20 @@ storage/
 ## 4. 데이터셋 준비 지침
 
 ### 4.1 공통 프로세스
-1. **원본 정리**  
-   - Hugging Face/내부 소스에서 받은 JSONL을 `datasets_v2/<name>/raw/`에 배치한다. CodeContests는 `instruction`, `input`, `output`, `task_id`, `test_cases`, `is_correct`, `full_text` 필드를 그대로 유지한다.  
-   - 필요 시 `.zst`로 압축 보관하고 SHA256 기록.
-2. **전처리 & 분할**  
-   - `src/data/prepare.py`를 사용해 raw → processed 변환을 수행한다.  
-   - 작업 내용:  
-     - `instruction/input`을 정규화하고 샘플 I/O 최대 2개를 요약.  
-     - Alpaca 스타일 프롬프트 생성 (`### Instruction`, `### Input`, `### Evaluation Notes`, `### Response`).  
-     - `response`에 정답 코드를 그대로 삽입하고 EOS 토큰을 붙인다.  
-     - 길이 필터: prompt+response 합산이 2048 토큰을 넘으면 설명 축약 또는 코드 truncate 후 재확인.  
-     - `metadata`에 `{"task_id": ..., "source": "...", "is_correct": true/false, "has_tests": true/false}` 작성.  
-   - `train/validation/test` split은 `task_id` 기준으로 disjoint하게 생성한다.
+1. **원본 다운로드**
+   - HuggingFace datasets 라이브러리를 사용해 Parquet 형식으로 직접 로드한다.
+   - CodeContests는 `name`, `description`, `public_tests`, `solutions`, `incorrect_solutions` 등의 필드를 포함한다.
+   - raw/ 디렉터리는 선택 사항 (HF에서 직접 로드하므로 중간 JSONL 저장 불필요).
+2. **전처리 & 변환** (`scripts/setup_datasets.py`)
+   - HuggingFace dataset → Alpaca 형식 JSONL 변환
+   - 작업 내용:
+     - `description` → `instruction`, `public_tests` → `input` (최대 2개 예시)
+     - `solutions` (correct) 및 `incorrect_solutions` 모두 처리
+     - 각 솔루션마다 별도 레코드 생성: `task_id`에 `_correct_N` 또는 `_incorrect_N` 접미사 추가
+     - **top-level `is_correct` 필드** 추가 (`true` 또는 `false`)
+     - 길이 필터: instruction + input + output 합산이 2048 토큰 초과 시 제외
+     - Python/Python3 솔루션만 포함 (언어 코드 1 또는 3)
+   - train/valid/test split은 HuggingFace 기본 split 사용
 3. **통계/무결성 기록**  
    - `stats/YYYY-MM-DD_summary.json`에 샘플 수, 평균 토큰 길이(`instruction`, `input`, `output`), `is_correct` 분포, 최대 길이 등을 기록.  
    - `scripts/validate_datasets.py`로 schema 검증, 2048 토큰 초과 여부 검사, SHA256 로그를 수행한다.
@@ -138,27 +140,42 @@ storage/
 ### 4.2 processed `schema.json` 예시
 ```json
 {
-  "prompt": "string",
-  "response": "string",
-  "metadata": {
+  "dataset": "codecontests",
+  "format": "alpaca",
+  "required_fields": ["instruction", "input", "output", "task_id", "is_correct"],
+  "optional_fields": ["metadata"],
+  "field_types": {
+    "instruction": "string",
+    "input": "string",
+    "output": "string",
     "task_id": "string",
-    "source": "string",
     "is_correct": "boolean",
-    "has_tests": "boolean"
-  }
+    "metadata": {
+      "source": "string",
+      "difficulty": "integer",
+      "has_tests": "boolean"
+    }
+  },
+  "description": "codecontests dataset in Alpaca format with correct and incorrect solutions",
+  "source": "deepmind/code_contests"
 }
 ```
 
 ### 4.3 전처리 실행 예시
 ```bash
-uv run python -m weighted_mtp.data.prepare \
-  --dataset codecontests \
-  --source-dir storage/datasets_v2/codecontests/raw \
-  --output-dir storage/datasets_v2/codecontests/processed \
-  --max-length 2048 \
-  --seed 42
+# 전체 데이터셋 일괄 처리 (다운로드 + 변환 + small + stats)
+uv run python scripts/setup_datasets.py --datasets all --steps all
+
+# 개별 데이터셋 처리
+uv run python scripts/setup_datasets.py --datasets codecontests --steps all
+uv run python scripts/setup_datasets.py --datasets mbpp --steps all
+uv run python scripts/setup_datasets.py --datasets humaneval --steps all
+
+# 단계별 실행
+uv run python scripts/setup_datasets.py --datasets codecontests --steps process
+uv run python scripts/setup_datasets.py --datasets codecontests --steps small,stats
 ```
-> `src/data/prepare.py` 내부에서 train/validation/test 및 stats 생성을 모두 처리한다.
+> `scripts/setup_datasets.py`가 HuggingFace에서 직접 로드하여 processed, small, stats를 모두 생성한다.
 
 ---
 

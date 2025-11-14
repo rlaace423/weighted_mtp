@@ -7,6 +7,10 @@ __pycache__/
 .venv/
 .uv/
 poetry.lock
+uv.lock
+*.egg-info/
+dist/
+build/
 
 # Editor & OS artifacts
 .DS_Store
@@ -21,6 +25,11 @@ poetry.lock
 *.log
 *.tmp
 *.bak
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
 
 # ML artifacts
 mlruns/

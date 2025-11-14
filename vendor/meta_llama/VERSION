@@ -1,0 +1,4 @@
+facebook/multi-token-prediction
+source: https://huggingface.co/facebook/multi-token-prediction
+downloaded: 2025-11-14
+files: llama/__init__.py, llama/model.py, llama/generation.py, llama/tokenizer.py

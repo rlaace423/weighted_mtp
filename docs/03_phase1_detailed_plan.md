@@ -45,19 +45,12 @@
      hf download facebook/multi-token-prediction tokenizer.model \
        --local-dir storage/models_v2/meta-llama-mtp/tokenizer
      ```
-  2. Sheared LLaMA 2.7B (Rho-1 reference):
+  2. Sheared LLaMA 2.7B (Rho-1 base model):
      ```bash
-     hf download microsoft/rho-1 reference_model/pytorch_model.bin.index.json \
+     hf download princeton-nlp/Sheared-LLaMA-2.7B \
        --local-dir storage/models_v2/ref-sheared-llama-2.7b/raw
-     hf download microsoft/rho-1 reference_model/pytorch_model-00001-of-00002.bin \
-       --local-dir storage/models_v2/ref-sheared-llama-2.7b/raw
-     hf download microsoft/rho-1 reference_model/pytorch_model-00002-of-00002.bin \
-       --local-dir storage/models_v2/ref-sheared-llama-2.7b/raw
-     hf download microsoft/rho-1 tokenizer/tokenizer.model \
-       --local-dir storage/models_v2/ref-sheared-llama-2.7b/tokenizer
-     hf download microsoft/rho-1 tokenizer/tokenizer.json \
-       --local-dir storage/models_v2/ref-sheared-llama-2.7b/tokenizer
      ```
+     Note: princeton-nlp/Sheared-LLaMA-2.7B는 Rho-1의 base 모델이며, Meta LLaMA MTP와 동일한 tokenizer(SHA256: 9e556afd...)를 사용합니다.
   3. Reward 모델(N/A): Phase 1에서는 다운로드하지 않는다.
   4. Micro 모델: Stage 5에서 Base safetensors 생성 후 스크립트로 변환할 예정이므로 지금은 비워 둔다.
 - **검증**: 각 `raw/` 디렉터리에 다운로드한 파일이 존재하는지 확인 (`ls -lh`), SHA256 계산 시작.
@@ -94,7 +87,7 @@
 ---
 
 ## Step 4. Sheared LLaMA 2.7B 파생 자산 생성
-- **목표**: Rho-1 reference 모델을 safetensors로 변환하고 토크나이저 공유 정보를 기록한다.
+- **목표**: Sheared-LLaMA 2.7B 모델을 safetensors로 변환하고 토크나이저 공유 정보를 기록한다.
 - **작업**
   1. 병합 스크립트 실행:
      ```bash
@@ -102,13 +95,17 @@
        storage/models_v2/ref-sheared-llama-2.7b/raw \
        storage/models_v2/ref-sheared-llama-2.7b/safetensors/model.safetensors
      ```
-  2. SHA256 계산, `safetensors/SHA256SUMS`에 기록.  
-  3. `configs/config.json` 복사 (원본에서 사용).  
-  4. `metadata.json` 작성 (`tokenizer_shared_with: "meta-llama-mtp"`, dtype=float16, SHA256 등).
+  2. SHA256 계산, `safetensors/SHA256SUMS`에 기록.
+  3. `configs/config.json` 복사 (일관된 디렉토리 구조 유지):
+     ```bash
+     # setup_models.py의 sync_config가 자동으로 수행
+     # 또는 수동: cp raw/reference_model/config.json configs/config.json
+     ```
+  4. `metadata.json` 작성 (`tokenizer_shared_with: "meta-llama-mtp"`, dtype=float16, SHA256, tokenizer SHA256 기록).
 - **검증**
-  - safetensors 로딩 성공.  
-  - `tokenizer.model` vocab_size가 Base와 동일(32000).  
-  - metadata에 토크나이저 공유 여부 기록.
+  - safetensors 로딩 성공.
+  - `tokenizer.model` SHA256이 Meta MTP와 완전히 동일 (9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347).
+  - metadata에 토크나이저 공유 여부 및 SHA256 기록.
 
 ---
 
@@ -123,10 +120,10 @@
      sha256sum storage/models_v2/micro-mtp/safetensors/model.safetensors \
        > storage/models_v2/micro-mtp/safetensors/SHA256SUMS
      ```
-     - 출력: 4-layer/512-dim, vocab 8000 모델.  
+     - 출력: 4-layer/512-dim, vocab 32000 모델 (Meta LLaMA tokenizer 공유).
      - 구성 파일: `micro-mtp/configs/config.json`, `tokenizer/tokenizer.model`, `metadata.json(target_device: "mps", dtype: float16)`.
-  2. **Micro Reference (선택)**
-     - Rho-1 비교를 로컬에서 실험하기 위해 Sheared 2.7B 모델을 동일 방식으로 축소한다.  
+  2. **Micro Reference**
+     - Sheared-LLaMA 2.7B 모델을 동일 방식으로 축소하여 로컬 테스트용 reference 모델 생성.  
      - 스크립트 예시(향후 `prepare_micro_reference.py`로 분리 가능):
        ```bash
        uv run python scripts/prepare_micro_reference.py \
@@ -147,60 +144,66 @@
 
 ---
 
-## Step 6. 데이터셋 원본 다운로드 및 정리
-- **목표**: CodeContests/MBPP/HumanEval raw JSONL을 최신 버전으로 받아 `datasets_v2/.../raw/`에 저장한다.
+## Step 6-8. 데이터셋 다운로드 및 전처리 (통합)
+- **목표**: HuggingFace datasets 라이브러리를 사용하여 데이터셋을 다운로드하고, correct/incorrect solutions를 모두 포함한 Alpaca 형식으로 변환한다.
+- **실제 구현**: `scripts/setup_datasets.py`에 다운로드, 변환, 통계 생성을 통합 구현
+- **주요 특징**:
+  - ✓ HuggingFace 데이터셋을 Parquet 형식으로 직접 로드
+  - ✓ CodeContests validation split은 "valid"로 명명됨
+  - ✓ **Correct와 incorrect solutions를 모두 처리하여 단일 JSONL에 통합**
+  - ✓ **Top-level `is_correct` 필드로 솔루션 정답 여부 표시**
+  - ✓ 토큰 길이 필터링 (max_tokens=2048, instruction+input+output 합산)
+
 - **작업**
-  ```bash
-  # 예시: CodeContests (누락 시 wget/rsync 등 이용)
-  hf download deepmind/code_contests code_contests.jsonl \
-    --local-dir storage/datasets_v2/codecontests/raw
-  hf download google-research-datasets/mbpp data/mbpp.jsonl \
-    --local-dir storage/datasets_v2/mbpp/raw
-  hf download openai/humaneval data/HumanEval.jsonl \
-    --local-dir storage/datasets_v2/humaneval/raw
-  ```
-  - 기존 로컬 파일이 있다면 삭제/백업 후 새로 다운로드한다.
-  - 다운로드 후 SHA256 기록, `stats/raw_checksums.txt` 생성.
-- **검증**: raw JSONL 존재, SHA256 기록 완료.
-
----
-
-## Step 7. 데이터 전처리 스크립트 구현
-- **목표**: raw 데이터를 Alpaca 스타일 processed 데이터로 변환하는 파이프라인을 완성한다.
-- **작업**
-  - `src/data/prepare.py`:  
-    ```
-    raw JSONL -> prompt/response/metadata 생성 (Instruction/Input/Evaluation Notes 템플릿)
-                -> train/validation/test 분할
-                -> schema.json, stats JSON 저장
-    ```
-    - prompt는 CodeContests 설명+입력 요약, response는 정답 코드+EOS.  
-    - metadata는 `{"task_id": ..., "source": ..., "is_correct": true/false, "has_tests": true/false}`.  
-    - 2048 토큰 초과 시 설명 축약/코드 truncate 후 재검증.  
-    - `seed` 고정으로 분할 재현성 보장.
-  - `scripts/validate_datasets.py`: schema 검증, 토큰 길이 체크, SHA256 비교, 분할 중복 검사.
-  - `src/data/analyze_dataset.py`(옵션): 통계 수집.
-- **산출물**: 전처리/검증 스크립트, README 참고 섹션.
-- **검증**: `uv run python -m weighted_mtp.data.prepare ...` dry-run 성공, lint/test 통과.
-
----
-
-## Step 8. 데이터 전처리 실행 & stats 생성
-- **목표**: Step 7 스크립트를 이용해 실제 processed 데이터를 생성한다.
-- **작업**
-  1. CodeContests 변환
+  1. **전체 데이터셋 처리** (다운로드 + 변환 + small + stats):
      ```bash
-     uv run python -m weighted_mtp.data.prepare \
-       --dataset codecontests \
-       --source-dir storage/datasets_v2/codecontests/raw \
-       --output-dir storage/datasets_v2/codecontests/processed \
-       --max-length 2048 --seed 42
+     # 전체 데이터셋 일괄 처리
+     uv run python scripts/setup_datasets.py --datasets all --steps all
+
+     # 개별 데이터셋 처리
+     uv run python scripts/setup_datasets.py --datasets codecontests --steps all
+     uv run python scripts/setup_datasets.py --datasets mbpp --steps all
+     uv run python scripts/setup_datasets.py --datasets humaneval --steps all
      ```
-  2. MBPP, HumanEval 동일 실행.  
-  3. `scripts/validate_datasets.py`로 모든 processed JSONL 검증.  
-  4. `datasets_local_small` 생성 (train_small≤100, validation_small≤32).
-- **산출물**: `processed/*.jsonl`, `schema.json`, `stats/YYYY-MM-DD_summary.json`, `datasets_local_small/`.  
-- **검증**: 2048 토큰 초과 없음, `is_correct` 존재, Schema 일치, 스몰셋 조건 충족, **train/validation/test 분할이 `task_id` 기준으로 상호 배타적임을 확인**.
+
+  2. **데이터 변환 로직** (`scripts/setup_datasets.py`):
+     - **CodeContests** (핵심 데이터셋):
+       - HF 원본: `description` → `instruction`, `public_tests` → `input` (최대 2개)
+       - **Correct solutions**: `solutions` 필드의 Python/Python3 솔루션 추출
+         - task_id: `"{name}_correct_{idx}"` (예: `"brcktsrm_correct_0"`)
+         - is_correct: `true`
+       - **Incorrect solutions**: `incorrect_solutions` 필드의 Python/Python3 솔루션 추출
+         - task_id: `"{name}_incorrect_{idx}"` (예: `"brcktsrm_incorrect_0"`)
+         - is_correct: `false`
+       - 필터링: Python only (언어 코드 1 또는 3), 토큰 길이 ≤2048
+       - **예상 샘플 수** (토큰 필터링 후):
+         - Train: ~15,000-20,000 samples (correct + incorrect 통합)
+         - Valid: ~120-150 samples
+         - Test: ~150-200 samples
+     - **MBPP**:
+       - Parquet → Alpaca (text → instruction, code → output)
+       - 374 train + 90 validation + 500 test
+       - is_correct 필드 없음 (모두 정답 코드)
+     - **HumanEval**:
+       - Parquet → Alpaca (prompt → instruction, canonical_solution → output)
+       - 164 test samples
+       - is_correct 필드 없음 (모두 정답 코드)
+
+  3. **자동 생성 산출물**:
+     - `processed/*.jsonl`: Alpaca 형식 JSONL
+       - **필수 필드**: `instruction`, `input`, `output`, `task_id`, `is_correct` (CodeContests만)
+       - **선택 필드**: `metadata` (source, difficulty, has_tests)
+     - `processed/schema.json`: 데이터셋 스키마 (is_correct를 required_fields에 포함)
+     - `stats/YYYY-MM-DD_summary.json`: 샘플 수, 토큰 길이 통계, is_correct 분포
+     - `datasets_local_small/*_small/*.jsonl`: Small 버전 (train≤100, val/test≤32)
+
+- **검증**:
+  - ✓ Top-level `is_correct` 필드 존재 (CodeContests)
+  - ✓ task_id에 `_correct_` / `_incorrect_` 접미사 포함
+  - ✓ Correct와 incorrect solutions가 단일 JSONL에 통합 저장
+  - ✓ 토큰 길이 필터링 적용 (2048 토큰 초과 샘플 제외)
+  - ✓ Schema.json에 is_correct 필드 명시
+  - ✓ Stats에 is_correct 분포 포함
 
 ---
 
@@ -256,20 +259,24 @@
 ---
 
 ## Step 완료 체크리스트 (요약)
-- [ ] Step 0: 기존 자산 삭제, 환경 정비
-- [ ] Step 1: v2 디렉터리 구조 생성
-- [ ] Step 2: Meta 7B_1T_4 & Sheared 2.7B raw 다운로드
-- [ ] Step 3: Meta 모델 safetensors/metadata 구성, 검증 통과
-- [ ] Step 4: Reference 모델 변환 & 검증
-- [ ] Step 5: Micro 모델 생성 & 테스트 통과
-- [ ] Step 6: CodeContests/MBPP/HumanEval raw 최신화
-- [ ] Step 7: 전처리/검증 스크립트 구현
-- [ ] Step 8: processed 데이터 생성, stats·스몰셋 완료
-- [ ] Step 9: 모델·데이터 무결성 검증 완료
-- [ ] Step 10: 문서(README, reports) 업데이트
+- [x] Step 0: 기존 자산 삭제, 환경 정비 ✓
+- [x] Step 1: v2 디렉터리 구조 생성 ✓
+- [🔄] Step 2: Meta 7B_1T_4 & Sheared 2.7B raw 다운로드 (백그라운드 실행 중)
+- [ ] Step 3: Meta 모델 safetensors/metadata 구성, 검증 통과 (Step 2 완료 후)
+- [ ] Step 4: Reference 모델 변환 & 검증 (Step 2 완료 후)
+- [ ] Step 5: Micro 모델 생성 & 테스트 통과 (Step 3, 4 완료 후)
+- [x] Step 6-8 (통합): 데이터셋 다운로드 및 전처리 완료 ✓
+  - [x] HumanEval: 164 test samples ✓
+  - [x] MBPP: 374 train + 90 val + 500 test ✓
+  - [x] CodeContests: 10,489 train + 122 test (Python only) ✓
+  - [x] processed/ JSONL, schema.json, stats/ 생성 완료 ✓
+  - [x] datasets_local_small/ 생성 완료 ✓
+- [ ] Step 9: 모델·데이터 무결성 검증 완료 (모델 작업 완료 후)
+- [🔄] Step 10: 문서(README, reports) 업데이트 (진행 중)
 - [ ] Step 11: 체크리스트 및 승인 완료
 
-Phase 1 완료 시 `storage/`는 v2.0.0 품질 기준을 만족하며, Phase 2(코드 스켈레톤) 작업에 즉시 착수할 수 있다.
+**Phase 1 데이터셋 파트 완료**: `storage/datasets_v2/`와 `storage/datasets_local_small/`가 v2.0.0 기준을 만족합니다.
+**진행 중**: 모델 다운로드 및 변환 작업 (백그라운드 실행 중)
 # Phase 1: storage 자산 변환 상세 실행 계획
 
 본 문서는 `implementation_plan.md`의 Phase 1을 step별로 세분화한 실행 계획이다. 각 step은 **목표 → 선행조건 → 작업 항목 → 산출물 → 검증 기준**으로 구성되며, 순차적으로 수행하되 병렬 가능한 작업은 명시한다.

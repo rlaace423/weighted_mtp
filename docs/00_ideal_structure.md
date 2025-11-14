@@ -18,13 +18,20 @@ WMTP 리팩토링 프로젝트는 `wmtp_research_proposal.md`에 정의된 목�
 
 - **TD error 안정화**: GAE(γ=0.99, λ=0.95) + Z-score 정규화 + 클리핑을 적용해 TD error 분산을 낮추고 outlier를 제어한다.
 - **가중치 정규화**: softmax/temperature, entropy 최소값, weight clipping을 통해 토큰 가중치 집중도를 관리한다.
-- **Value Head 품질 관리**:  
-  - Meta 모델 hidden state는 `norm` 적용 후 Value Head에 전달한다.  
+- **Value Head 품질 관리**:
+  - Meta 모델 hidden state는 `norm` 적용 후 Value Head에 전달한다.
   - Value loss 클리핑(`value_clip=0.2`)과 drift 방지용 EMA/anchor 손실을 병행한다.
 - **Reward/TD error 스케일링**: 샘플 단위 정규화(평균 0, 표준편차 1) 또는 reference-free shaping을 적용해 배치 간 분산을 줄인다.
+- **Critic Continual Learning** (PPO Best Practice):
+  - **Stage2에서 Value Loss를 Auxiliary Loss로 추가**: Policy 학습 중 critic도 지속 학습
+  - **Loss 구조**: `total_loss = weighted_ce_loss + value_coef * value_loss`
+  - **Value Coefficient**: 0.5 (Stable Baselines3 표준) 또는 1.0 (HuggingFace TRL)
+  - **Value Loss Clipping**: MSE 또는 Huber loss에 clipping 적용 (clip_range=0.2)
+  - **Monitoring**: Value explained variance 추적 (1.0에 가까울수록 이상적)
+  - **Gradient Clipping**: Global gradient norm clipping (max_grad_norm=0.5~1.0)
 - **추가 모니터링**: Critic drift 감시를 위해 KL 또는 cosine distance를 선택적으로 기록할 수 있다.
 - **최신 연구 참고**
-  - *AsyPPO*, *PSPO*, *DVPO*, *SFPO* 등은 다중 크리틱·소프트 클립핑·전역 가치 모델 등을 제안하며, TD error 계산/정규화 아이디어 측면에서 참고 가능하다.
+  - *AsyPPO*, *PSPO*, *DVPO*, *SFPO*, *VC-PPO* (Value-Calibrated PPO, 2025) 등은 다중 크리틱·소프트 클립핑·전역 가치 모델·value initialization 개선을 제안하며, TD error 계산/정규화 아이디어 측면에서 참고 가능하다.
   - Direct Preference Optimization(DPO), RLOO 등 critic-free 접근법은 향후 확장 연구로 문서화한다.
 
 ---
@@ -92,7 +99,7 @@ weighted_mtp/
 │   ├── data/
 │   │   ├── __init__.py
 │   │   ├── datasets.py                    # JSONL 로딩, HF Dataset 캐시
-│   │   ├── collators.py                   # MTP용 data collator
+│   │   ├── collators.py                   # MTP용 data collator (instruction/input masking)
 │   │   ├── transforms.py                  # 토큰 마스킹, truncation
 │   │   └── prepare.py                     # 데이터셋 전처리 (스키마 검증)
 │   ├── models/
@@ -210,50 +217,50 @@ weighted_mtp/
 
 ### 6.4 Micro MTP (로컬 테스트)
 - `scripts/prepare_local_small_model.py`로 Base safetensors에서 일부 레이어를 슬라이싱하여 생성.
-- `safetensors/model.safetensors`, `configs/config.json`(dim 512, layers 4, vocab 8000 등), `tokenizer/`, `metadata.json(target_device:"mps")`를 저장.
+- `safetensors/model.safetensors`, `configs/config.json`(dim 512, layers 4, vocab 32000 등), `tokenizer/`, `metadata.json(target_device:"mps")`를 저장.
 - 체크리스트: 파일 크기 <50MB, dtype float16 유지, `tests/unit/test_adapter.py -k micro` 통과.
 
 ---
 
 ## 7. 데이터셋 규격
 
-### 7.1 Raw CodeContests (storage/datasets_v2/codecontests/raw/*.jsonl)
-- **파일 포맷**: UTF-8 JSONL. 한 줄에 하나의 문제/정답 페어.
-- **필드**
-  - `instruction`: Codeforces/EDU 문제 설명(자연어). 예시 입력·출력 섹션을 포함한 장문 텍스트.
-  - `input`: 원문 예시 입력 블록. 개행·공백을 보존한 문자열.
-  - `output`: 정답 Python 코드. `is_correct=true`만 학습용으로 사용한다.
-  - `task_id`: `<round>_<letter>` 형태의 고유 식별자. 분할 재현성과 메타데이터 조인에 이용.
-  - `test_cases`: `{"input": [...], "output": [...]}` 구조. 평가 파이프라인용으로 보관하되 프롬프트에는 요약본만 사용.
-  - `is_correct`: 제출 정답 여부. `false` 레코드는 실패 사례 분석 및 critic 학습 전용 버킷으로 이동한다.
-  - `full_text`: instruction/input/output을 합친 원문. 프롬프트 생성 시 레퍼런스로 사용.
-- **길이 제약**: Meta LLaMA 토크나이저 기준 2048 토큰 이하. 초과 샘플은 `src/data/prepare.py`에서 문제 설명 축약 및 코드 truncation 후 재검증한다.
-- **분할**: `task_id` 단위로 `train/validation/test`를 분리. 동일 라운드가 여러 split에 중복되지 않도록 seed 고정 샘플링을 사용한다.
+### 7.1 Raw CodeContests (HuggingFace 원본: deepmind/code_contests)
+- **소스**: HuggingFace datasets 라이브러리를 통해 Parquet 형식으로 로드
+- **주요 필드**
+  - `name`: 문제 고유 식별자 (예: "brcktsrm")
+  - `description`: 문제 설명 (자연어). 예시 입력·출력, 제약조건 포함
+  - `public_tests`: `{"input": [...], "output": [...]}` 구조의 공개 테스트 케이스
+  - `private_tests`: 비공개 테스트 케이스 (평가용)
+  - `solutions`: `{"language": [...], "solution": [...]}` 구조의 정답 솔루션들
+  - `incorrect_solutions`: `{"language": [...], "solution": [...]}` 구조의 오답 솔루션들
+  - `difficulty`: 문제 난이도
+  - `source`: 출처 플랫폼 (Codeforces 등)
+  - 기타: `cf_contest_id`, `cf_rating`, `cf_tags` 등 메타데이터
+- **처리 방식**: `scripts/setup_datasets.py`가 HuggingFace에서 직접 로드하여 Alpaca 형식으로 변환
+- **길이 제약**: Meta LLaMA 토크나이저 기준 2048 토큰 이하로 필터링 (instruction + input + output 합산)
+- **분할**: train/valid/test (HuggingFace 기본 split 사용)
 
 ### 7.2 Alpaca 스타일 SFT 변환 (storage/datasets_v2/codecontests/processed/*.jsonl)
 - **필드**
-  - `prompt`: 아래 템플릿으로 생성. `input`이 비어 있으면 Input 블록을 생략한다.
-    ```
-    ### Instruction:
-    {instruction}
-
-    ### Input:
-    {normalized_input}
-
-    ### Evaluation Notes:
-    - Return Python source code that prints the required answer.
-    - Hidden tests are present; rely on the stated constraints rather than memorising samples.
-
-    ### Response:
-    ```
-    - `normalized_input`에는 문제 명세 중 입출력 형식, 제약조건, 예시 I/O 최대 2세트를 정규화해 삽입한다.
-    - 프롬프트 끝에 개행을 두어 모델이 바로 코드 생성을 시작하도록 한다.
-  - `response`: 정답 Python 코드 + 토크나이저 EOS(`</s>`). 마크다운 코드 블록은 사용하지 않는다.
-  - `metadata`: `{"task_id": ..., "source": "codecontests", "is_correct": true, "has_tests": true}`. MLflow 및 평가 스크립트에서 그대로 사용.
+  - `instruction`: 문제 설명 (HF `description` 필드에서 변환)
+  - `input`: 공개 테스트 케이스 예시 (최대 2개, `public_tests`에서 추출)
+  - `output`: Python 솔루션 코드 (correct 또는 incorrect)
+  - `task_id`: 문제명 + 솔루션 타입 접미사 (예: `"brcktsrm_correct_0"`, `"brcktsrm_incorrect_1"`)
+  - `is_correct`: **top-level 필드**로 솔루션 정답 여부 표시 (`true` 또는 `false`)
+  - `metadata`: `{"source": "code_contests", "difficulty": ..., "has_tests": true/false}`
+- **변환 로직** (`scripts/setup_datasets.py`)
+  - Correct solutions: `solutions` 필드의 Python/Python3 솔루션 추출 → `is_correct: true`
+  - Incorrect solutions: `incorrect_solutions` 필드의 Python/Python3 솔루션 추출 → `is_correct: false`
+  - 모든 솔루션을 **단일 JSONL 파일에 통합 저장** (`processed/train.jsonl` 등)
+  - task_id에 `_correct_N` / `_incorrect_N` 접미사로 구분
 - **추가 규칙**
-  - `is_correct=false` 샘플은 `processed_incorrect/`에 저장하여 critic 학습 또는 오류 분석에만 활용한다.
-  - Loss 계산은 `### Response:` 이후 토큰에만 적용(teacher forcing). 프롬프트 부분은 `attention_mask`만 유지한다.
-  - Prompt+response 합산 길이가 2048 토큰을 넘으면, 예시 입력을 재요약하거나 코드 일부를 제거해 제한에 맞춘다.
+  - 토큰 길이 필터링: instruction + input + output 합산이 2048 토큰 초과 시 제외
+  - Python/Python3 솔루션만 포함 (언어 코드 1 또는 3)
+  - **Loss Masking**: instruction/input 토큰은 labels에서 -100으로 마스킹하여 loss 계산 제외
+    - Instruction 토큰: labels = -100 (attention은 유지, loss만 제외)
+    - Input 토큰: labels = -100
+    - Output 토큰: 실제 token ID (loss 계산 대상)
+    - 구현: Data collator에서 instruction/input 길이를 추적하여 자동 마스킹
 
 ### 7.3 기타 데이터셋(MBPP, HumanEval 등)
 - 동일한 파이프라인(`src/data/prepare.py`)으로 `prompt/response/metadata`를 생성하되, CodeContests 전용 필드(`test_cases`, `is_correct`)가 없는 경우 빈 객체로 채운다.

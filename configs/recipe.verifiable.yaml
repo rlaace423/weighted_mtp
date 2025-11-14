@@ -1,0 +1,52 @@
+# 실험 2: Verifiable Critic WMTP
+
+experiment:
+  name: verifiable-critic-wmtp
+  description: "WMTP with TD error-based token weighting"
+
+dataset:
+  name: codecontests
+  split:
+    train: storage/datasets_v2/codecontests/processed/train.jsonl
+    validation: storage/datasets_v2/codecontests/processed/valid.jsonl
+    test: storage/datasets_v2/codecontests/processed/test.jsonl
+  max_length: 2048
+  use_small: false
+
+training:
+  stages:
+    - stage1_trunk_pretrain: true
+    - stage2_weighted_training: true
+
+  stage1:
+    num_epochs: 1
+    batch_size: 8
+    learning_rate: 5.0e-5
+
+  stage2:
+    use_weighting: true
+    batch_size: 4
+    gradient_accumulation_steps: 4
+    learning_rate: 1.0e-5
+    num_epochs: 3
+    warmup_steps: 100
+
+    # Critic Continual Learning (PPO Best Practice)
+    value_loss:
+      enabled: true
+      coefficient: 0.5
+      clip_range: 0.2
+
+    # TD error 안정화
+    value_weighting:
+      gae_gamma: 0.99
+      gae_lambda: 0.95
+      td_error_normalization: zscore
+      weight_temperature: 1.0
+      weight_clip_min: 0.1
+      weight_clip_max: 5.0
+      entropy_floor: 0.01
+
+evaluation:
+  metrics: [loss, perplexity, td_error_mean, td_error_std, weight_entropy, value_loss, value_explained_variance]
+  pass_at_k: [1, 5, 10]

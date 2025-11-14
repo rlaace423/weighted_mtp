@@ -60,15 +60,26 @@
 - **검증 기준**: `uv run python -c "from vendor.meta_llama import Transformer"` 성공, lint/format 통과.
 
 ### P3. 데이터 파이프라인 구현
-- **목표**  
-  - CodeContests raw→processed 변환, 통계 산출, 검증 유틸을 완성해 재현 가능한 SFT 데이터를 생성한다.
-- **주요 활동**  
-  - `src/data/prepare.py`: raw JSONL 읽기 → Alpaca 스타일 prompt/response/metadata 생성 → train/validation/test 분할.  
-  - `scripts/validate_datasets.py`: 스키마, 토큰 길이, SHA256 체크.  
-  - `datasets_local_small/` 자동 생성 스크립트.  
-  - Docstring과 예시 명령(`uv run python -m ...`) 작성.
-- **산출물**: 변환 스크립트, 검증 스크립트, 샘플 stats JSON.  
-- **검증 기준**: 2048 토큰 초과 데이터 없음, schema 검증 통과, seed 고정으로 반복 생성 동일.
+- **목표**
+  - HuggingFace 데이터셋을 직접 로드하여 Alpaca 형식으로 변환하고, correct/incorrect solutions를 통합 처리한다.
+  - **Loss masking 구현**: instruction/input 토큰은 학습 제외, output 토큰만 학습 대상
+- **주요 활동**
+  - `src/data/prepare.py`: HF datasets 로드 → Alpaca 스타일 변환 (instruction/input/output, top-level is_correct)
+  - `src/data/collators.py`: **Instruction/Input masking collator** 구현
+    - Instruction 길이 추적 → labels에 -100 설정
+    - Input 길이 추적 → labels에 -100 설정
+    - Output만 실제 token ID 유지 (loss 계산)
+    - attention_mask는 모든 토큰 유지 (context로 활용)
+  - **Correct + Incorrect 통합**: 단일 JSONL에 is_correct 필드로 구분, task_id 접미사 추가
+  - 토큰 필터링: SentencePieceProcessor로 2048 토큰 초과 샘플 제거
+  - `scripts/validate_datasets.py`: 스키마, 토큰 길이, SHA256 체크
+  - `datasets_local_small/` 자동 생성 스크립트
+- **산출물**: 변환 스크립트, collator 모듈, 검증 스크립트, stats JSON
+- **검증 기준**:
+  - top-level is_correct 필드 존재
+  - Collator가 instruction/input 토큰을 -100으로 마스킹
+  - Output 토큰만 loss 계산 확인
+  - 2048 토큰 초과 없음, schema 검증 통과
 
 ### P4. Meta Adapter 통합
 - **목표**  
@@ -94,15 +105,24 @@
 - **검증 기준**: 모든 unit test 통과, 수치 비교(참조 스크립트)에서 오차 허용 범위 내.
 
 ### P6. 학습 파이프라인 Stage 0~3
-- **목표**  
+- **목표**
   - Stage0(환경) → Stage1(trunk pretrain) → Stage2(weighted training) → Stage3(logging)을 오케스트레이션한다.
-- **주요 활동**  
-  - `pipelines/training.py`: 환경 초기화, 데이터 로더, Stage1/2 실행, MLflow 로깅, 체크포인트 저장.  
-  - `runtime/environment.py`: seed/device/dtype 설정.  
-  - `runtime/mlflow.py`: 실험 생성, 메트릭/아티팩트 기록.  
+  - **Stage2 Critic Continual Learning**: Value loss를 auxiliary loss로 추가하여 policy 학습 중 critic도 지속 학습
+- **주요 활동**
+  - `pipelines/training.py`: 환경 초기화, 데이터 로더, Stage1/2 실행, MLflow 로깅, 체크포인트 저장.
+  - **Stage2 Loss 구조 구현**:
+    - `total_loss = weighted_ce_loss + value_coef * value_loss`
+    - Value coefficient: 0.5 (기본) 또는 1.0 (recipe 설정)
+    - Value loss clipping: clip_range=0.2
+    - Gradient clipping: max_grad_norm=0.5~1.0
+  - `runtime/environment.py`: seed/device/dtype 설정.
+  - `runtime/mlflow.py`: 실험 생성, 메트릭/아티팩트 기록.
   - 통합 테스트: micro 모델 + small 데이터로 end-to-end smoke test.
-- **산출물**: 학습 파이프라인 코드, 통합 테스트(`tests/integration/test_stage*.py`).  
-- **검증 기준**: smoke test 성공, MLflow에 핵심 메트릭(TD error, weight entropy) 기록.
+- **산출물**: 학습 파이프라인 코드, 통합 테스트(`tests/integration/test_stage*.py`).
+- **검증 기준**:
+  - Smoke test 성공
+  - MLflow에 핵심 메트릭 기록: TD error, weight entropy, **value loss, value explained variance**
+  - Stage2에서 value loss가 auxiliary loss로 추가되어 critic 지속 학습 확인
 
 ### P7. 평가·분석 파이프라인
 - **목표**  

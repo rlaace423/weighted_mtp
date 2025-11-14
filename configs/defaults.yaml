@@ -1,0 +1,50 @@
+# 공통 설정 (장비, 스토리지, 모델 파라미터 스냅샷)
+
+project:
+  name: weighted-mtp
+  version: "2.0.0"
+
+storage:
+  root: storage
+  models_dir: storage/models_v2
+  datasets_dir: storage/datasets_v2
+  local_small_dir: storage/datasets_local_small
+
+models:
+  policy:
+    name: meta-llama-mtp
+    path: storage/models_v2/meta-llama-mtp
+    params:
+      dim: 4096
+      n_layers: 32
+      n_heads: 32
+      n_future_tokens: 4
+      intermediate_size: 11008
+      rope_theta: 10000.0
+      vocab_size: 32000
+    dtype: float16
+
+  reference:
+    name: ref-sheared-llama-2.7b
+    path: storage/models_v2/ref-sheared-llama-2.7b
+    dtype: float16
+    tokenizer_shared_with: meta-llama-mtp
+
+  reward:
+    name: starling-rm-7b
+    path: storage/models_v2/starling-rm-7b
+    dtype: bfloat16
+    status: optional
+
+runtime:
+  device: cuda
+  seed: 42
+  mixed_precision: true
+
+mlflow:
+  tracking_uri: file://./mlruns
+  experiment_name: wmtp-experiments
+
+logging:
+  level: INFO
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
