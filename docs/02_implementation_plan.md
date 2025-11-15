@@ -40,17 +40,22 @@
 - **목표**
   - Meta `7B_1T_4` 번들, Rho-1 reference, 소형 테스트 모델을 `storage/models_v2/` 표준 구조로 정리한다.
   - CodeContests/MBPP/HumanEval raw 자산을 `storage/datasets_v2/`에 수집하고 SHA256 기록을 남긴다.
+  - **메타데이터 추출**: 메모리 효율적 학습을 위해 `is_correct`, `difficulty` 정보만 별도 파일로 추출한다.
 - **주요 활동**
   1. Hugging Face에서 `consolidated.pth`, `params.json`, `tokenizer.model` 다운로드 → `raw/` 저장.
   2. safetensors 변환, `configs/params.json` 복사, `meta_adapter.yaml` 작성, `metadata.json` 갱신.
   3. CodeContests correct/incorrect solutions 통합 JSONL 생성 (`instruction/input/output/task_id/is_correct/metadata` 포함), SHA256 계산.
-  4. `storage/README.md` 업데이트.
+  4. **메타데이터 추출**: `scripts/extract_metadata.py`로 각 데이터셋의 `*_metadata.json` 생성 (is_correct, difficulty만 포함)
+  5. `storage/README.md` 업데이트.
 - **실제 성과** (2025-11-14):
   - **모델**: 5개 모델 (meta-llama-mtp 6.7B, ref-sheared-llama-2.7b, starling-rm-7b 13.3B, micro-mtp, micro-ref)
   - **데이터**: CodeContests **3.7M samples** (train 3.69M, valid 14.7K, test 14.8K), MBPP 964, HumanEval 164
   - **Split**: train/valid/test (HuggingFace 원본 "valid" split 사용)
-- **산출물**: `models_v2/` 및 `datasets_v2/` 디렉터리, SHA256 로그, 업데이트된 README.
-- **검증 기준**: dtype(float16) 유지, 토크나이저 공유 여부 기재, split 누락 없음, 체크리스트 서명.
+  - **메타데이터**: 10개 메타데이터 파일 생성 (codecontests, mbpp, humaneval - train/valid/test)
+    - 크기: 전체 데이터(~15GB) 대비 ~217MB (99% 메모리 절감)
+    - 구조: `{"metadata": [{"is_correct": bool, "difficulty": int}, ...], "stats": {...}}`
+- **산출물**: `models_v2/` 및 `datasets_v2/` 디렉터리, `*_metadata.json` 파일들, SHA256 로그, 업데이트된 README.
+- **검증 기준**: dtype(float16) 유지, 토크나이저 공유 여부 기재, split 누락 없음, 메타데이터 파일 검증 완료, 체크리스트 서명.
 
 ### P2. 코드 스켈레톤 & 벤더 정리
 - **목표**  
@@ -68,14 +73,18 @@
 
 ### P3. 데이터 파이프라인 구현
 - **목표**
-  - 전처리된 JSONL을 학습용 PyTorch Dataset으로 로딩한다.
+  - 전처리된 JSONL을 학습용 PyTorch Dataset으로 **메타데이터 기반 효율적 로딩**한다.
   - **Loss masking collator 구현**: instruction/input 토큰은 학습 제외, output 토큰만 학습 대상
-  - **Stage별 샘플링 전략**: Stage 1/2에 맞는 데이터 효율적 로딩
+  - **Stage별 샘플링 전략**: Stage 1/2에 맞는 데이터 효율적 로딩 (메모리 99% 절감)
+  - **분산학습 런타임 모듈**: A100 4-GPU 환경을 위한 분산학습 초기화 및 환경 설정
 - **주요 활동**
-  - `src/data/datasets.py`: JSONL → HuggingFace Dataset 로딩 + **Stage별 샘플링**
-    - `storage/datasets_v2/*/processed/*.jsonl` 읽기
-    - train/valid/test split 로딩 (CodeContests는 "valid" split 사용)
-    - is_correct, **difficulty** 필드 파싱 (CodeContests만 해당)
+  - `src/data/datasets.py`: **메타데이터 기반 JSONL → HuggingFace Dataset 로딩** + **Stage별 샘플링**
+    - **핵심 혁신 - 메타데이터 기반 로딩** (99% 메모리 절감):
+      1. `_load_metadata()`: `*_metadata.json` 로드 (is_correct, difficulty만 포함, ~217MB)
+      2. `_compute_sampling_indices_from_metadata()`: Config 기반으로 샘플링 인덱스 계산 (Stage별 전략 적용)
+      3. `_read_jsonl_by_indices()`: JSONL 파일에서 계산된 인덱스의 라인만 선택적으로 읽기
+      4. HuggingFace Dataset으로 변환
+    - 기존 함수 제거: `_sample_stage1()`, `_sample_stage2()`, `apply_stage_sampling()`, `use_small` 파라미터
     - **Stage 1 샘플링**: `is_correct` 균형 (50:50), 전체 난이도, n_samples=10K~50K
     - **Stage 2 샘플링**: Curriculum Learning (difficulty 기반 점진적 증가), n_samples=100K~500K
       - 초반 epoch (0~30%): low (1-3) 70%, medium (4-7) 30%, high (8-11) 0%
@@ -89,17 +98,47 @@
     - Output만 실제 token ID 유지 (loss 계산 대상)
     - attention_mask는 모든 토큰 포함 (전체 context 활용)
     - n_future_tokens 대응 (MTP 헤드용)
+  - `src/runtime/distributed.py`: **분산학습 초기화 및 유틸리티**
+    - torch.distributed 초기화 (NCCL backend)
+    - Rank/World size 조회 함수 (get_rank, get_world_size, get_local_rank)
+    - 분산 환경 확인 (is_distributed, is_main_process)
+    - DistributedSampler 생성 헬퍼 (create_distributed_sampler)
+    - 동기화 및 정리 (barrier, cleanup_distributed)
+    - FSDP 설정 헬퍼 (setup_fsdp_config, Phase 6에서 사용)
+  - `src/runtime/environment.py`: **Rank-aware 환경 설정**
+    - Rank별 독립 seed 설정 (base_seed + rank)
+    - GPU 디바이스 할당 (cuda:{rank}, mps, cpu)
+    - PyTorch backends 최적화 (cuDNN, TF32)
+    - 통합 환경 설정 함수 (setup_environment)
+    - GPU 메모리 모니터링 (get_gpu_memory_info)
 - **데이터셋 규모** (실제):
   - CodeContests: train 3.69M, valid 14.7K, test 14.8K (correct + incorrect 통합)
   - **Difficulty 분포**: diff=7 (86.7%), diff=2 (6.4%), diff=1 (4.4%), diff=11 (2.1%), diff=6 (0.4%)
   - MBPP: train 374, validation 90, test 500
   - HumanEval: test 164
-- **산출물**: src/data/ 모듈 (datasets.py, collators.py), unit tests, integration tests
+- **실제 성과** (2025-11-14):
+  - **datasets.py 완전 재작성**: 893 lines → 557 lines (38% 코드 감소)
+  - **메모리 효율**:
+    - Stage 1 (50K): 메타데이터(~217MB) + 샘플(~200MB) = **~417MB** (기존 15GB 대비 97% 절감)
+    - Stage 2 (200K): 메타데이터(~217MB) + 샘플(~800MB) = **~1GB** (기존 15GB 대비 93% 절감)
+  - **메타데이터 기반 로딩 함수**:
+    - `_load_metadata()`: 메타데이터 파일 로드
+    - `_compute_sampling_indices_from_metadata()`: 샘플링 인덱스 계산 (Stage별 전략)
+    - `_read_jsonl_by_indices()`: JSONL에서 해당 라인만 선택적 읽기
+  - **테스트 통과**: 33 passed, 3 skipped (호환성 100%)
+- **산출물**:
+  - src/data/ 모듈 (datasets.py, collators.py)
+  - src/runtime/ 모듈 (distributed.py, environment.py, __init__.py)
+  - unit tests (test_datasets.py, test_collators.py)
+  - integration tests (test_data_pipeline.py - DistributedSampler 사용 예시 포함)
 - **검증 기준**
-  - JSONL 로딩 및 DatasetDict 생성 성공
+  - 메타데이터 기반 JSONL 로딩 및 DatasetDict 생성 성공
   - Collator가 instruction/input을 -100으로 마스킹 (unit test)
   - Output 토큰만 loss 계산 확인
   - Stage별 샘플링 분포 검증 (integration test)
+  - 분산학습 모듈 import 성공 (로컬/분산 환경 자동 감지)
+  - DistributedSampler가 로컬에서는 None 반환, 분산 환경에서는 데이터 자동 분할
+  - 메모리 사용량 목표 달성 (<1GB for Stage 2)
 
 ### P4. Meta Adapter 통합
 - **목표**  
@@ -126,22 +165,35 @@
 
 ### P6. 학습 파이프라인 Stage 0~3
 - **목표**
-  - Stage0(환경) → Stage1(trunk pretrain) → Stage2(weighted training) → Stage3(logging)을 오케스트레이션한다.
+  - Stage0(환경 + 분산학습 초기화) → Stage1(trunk pretrain) → Stage2(weighted training) → Stage3(logging)을 오케스트레이션한다.
+  - **A100 4-GPU 분산학습**: FSDP 기반 모델 분산, DistributedSampler 기반 데이터 분산
   - **Stage2 Critic Continual Learning**: Value loss를 auxiliary loss로 추가하여 policy 학습 중 critic도 지속 학습
 - **주요 활동**
   - `pipelines/training.py`: 환경 초기화, 데이터 로더, Stage1/2 실행, MLflow 로깅, 체크포인트 저장.
+  - **Stage0 분산 환경 초기화** (P3에서 구현된 runtime 모듈 활용):
+    - `runtime.distributed.init_distributed()`: torch.distributed 초기화 (NCCL backend)
+    - `runtime.distributed.create_distributed_sampler()`: 데이터를 4-GPU로 균등 분할 (중복 없음)
+    - `runtime.environment.setup_environment()`: Rank별 seed, device, backends 설정
+    - FSDP wrapping: 모델을 4-GPU로 자동 샤딩 (FULL_SHARD 전략)
+    - Rank 0 전용 로직 (runtime.distributed.is_main_process()): MLflow 로깅, 체크포인트 저장
   - **Stage2 Loss 구조 구현**:
     - `total_loss = weighted_ce_loss + value_coef * value_loss`
     - Value coefficient: 0.5 (기본) 또는 1.0 (recipe 설정)
     - Value loss clipping: clip_range=0.2
     - Gradient clipping: max_grad_norm=0.5~1.0
-  - `runtime/environment.py`: seed/device/dtype 설정.
-  - `runtime/mlflow.py`: 실험 생성, 메트릭/아티팩트 기록.
-  - 통합 테스트: micro 모델 + small 데이터로 end-to-end smoke test.
-- **산출물**: 학습 파이프라인 코드, 통합 테스트(`tests/integration/test_stage*.py`).
+    - FSDP all-reduce로 gradient 자동 동기화
+  - `runtime/mlflow.py`: 실험 생성, 메트릭/아티팩트 기록 (Rank 0 전용).
+  - 통합 테스트: micro 모델 + small 데이터로 end-to-end smoke test (로컬 단일 GPU 모드).
+- **산출물**:
+  - 학습 파이프라인 코드 (pipelines/training.py)
+  - MLflow 모듈 (runtime/mlflow.py)
+  - 통합 테스트 (tests/integration/test_stage*.py)
 - **검증 기준**:
-  - Smoke test 성공
-  - MLflow에 핵심 메트릭 기록: TD error, weight entropy, **value loss, value explained variance**
+  - Smoke test 성공 (로컬 단일 GPU, runtime 모듈 자동 감지)
+  - VESSL A100 4-GPU 환경에서 torchrun 실행 성공
+  - DistributedSampler가 데이터를 4개 GPU로 중복 없이 분할 확인 (P3에서 구현됨)
+  - FSDP가 모델 파라미터를 4-GPU로 샤딩 확인
+  - MLflow에 핵심 메트릭 기록 (Rank 0만): TD error, weight entropy, value loss, value explained variance
   - Stage2에서 value loss가 auxiliary loss로 추가되어 critic 지속 학습 확인
 
 ### P7. 평가·분석 파이프라인

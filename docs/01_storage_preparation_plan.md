@@ -11,6 +11,7 @@
 3. **Meta 네이티브 존중**: Meta가 배포한 파이썬 소스는 코드베이스(`src/models/meta_mtp/`)에 두고, `storage/`에는 순수 weight/config/tokenizer/adapter 설정만 둔다.
 4. **TD error 기반 가중치 호환성**: value 추정, TD error 정규화, 토큰 가중치 계산에 필요한 메타데이터(토크나이저 ID, sequence length, reward/label 필드 등)를 JSON 스키마로 명시한다.
 5. **로컬 ↔ VESSL 가시성**: 업로드 스크립트(`scripts/sync_to_vessl_storage.py`)가 그대로 사용하는 경로 규약을 정의하고, 테스트용 경량 자산을 동일 구조에 포함한다.
+6. **A100 4-GPU 분산학습 호환성**: 모델 체크포인트는 FSDP(Fully Sharded Data Parallel) 형식을 지원하며, 데이터셋은 DistributedSampler를 통한 분산 로딩을 전제로 준비한다.
 
 ---
 
@@ -93,9 +94,15 @@ storage/
      "source": {
        "repo": "facebook/multi-token-prediction",
        "revision": "7B_1T_4"
+     },
+     "distributed": {
+       "fsdp_compatible": true,
+       "note": "단일 safetensors 파일로 저장, FSDP가 런타임에 4-GPU로 자동 샤딩"
      }
    }
    ```
+   - **분산학습 참고**: 초기 체크포인트는 단일 `model.safetensors` 파일로 저장하며, FSDP가 학습 시작 시 4개 GPU로 파라미터를 자동 분산한다.
+   - **체크포인트 저장**: 학습 중 저장되는 체크포인트는 FSDP `state_dict`를 통해 통합된 단일 파일로 저장 (Rank 0만 수행).
 
 4. **검증 포인트**
    - `model.safetensors` dtype이 float16인지 확인 (`safe_open(...).dtype`).
@@ -130,12 +137,50 @@ storage/
      - 길이 필터: instruction + input + output 합산이 2048 토큰 초과 시 제외
      - Python/Python3 솔루션만 포함 (언어 코드 1 또는 3)
    - train/valid/test split은 HuggingFace 기본 split 사용
-3. **통계/무결성 기록**  
-   - `stats/YYYY-MM-DD_summary.json`에 샘플 수, 평균 토큰 길이(`instruction`, `input`, `output`), `is_correct` 분포, 최대 길이 등을 기록.  
+3. **메타데이터 추출** (`scripts/extract_metadata.py`)
+   - **목적**: 메모리 효율적 학습을 위해 `is_correct`, `difficulty` 정보만 별도 파일로 추출
+   - **입력**: `processed/*.jsonl` (전체 데이터셋)
+   - **출력**: `processed/*_metadata.json`
+   - **구조**:
+     ```json
+     {
+       "metadata": [
+         {"is_correct": true, "difficulty": 7},
+         {"is_correct": false, "difficulty": 2},
+         ...
+       ],
+       "stats": {
+         "total": 3691981,
+         "correct": 1754404,
+         "incorrect": 1937577,
+         "difficulty_dist": {"0": 1519213, "1": 2701, ...}
+       }
+     }
+     ```
+   - **크기**: 전체 데이터(~15GB) 대비 ~217MB (99% 메모리 절감)
+   - **실행**: `python scripts/extract_metadata.py --dataset codecontests --split train`
+4. **통계/무결성 기록**
+   - `stats/YYYY-MM-DD_summary.json`에 샘플 수, 평균 토큰 길이(`instruction`, `input`, `output`), `is_correct` 분포, 최대 길이 등을 기록.
    - `scripts/validate_datasets.py`로 schema 검증, 2048 토큰 초과 여부 검사, SHA256 로그를 수행한다.
-4. **로컬 소형 세트**  
-   - `head` 기반으로 `datasets_local_small/<name>_small/{train_small.jsonl,validation_small.jsonl}` 생성(≤100 / ≤32).  
+5. **로컬 소형 세트**
+   - `head` 기반으로 `datasets_local_small/<name>_small/{train_small.jsonl,validation_small.jsonl}` 생성(≤100 / ≤32).
+   - 메타데이터 파일도 함께 생성: `*_small_metadata.json`
    - CLI에서 `--dataset-suffix small`로 선택 가능하도록 경로를 유지한다.
+6. **메모리 효율 학습 워크플로우**
+   - **메타데이터 기반 샘플링** (핵심 혁신):
+     1. 전체 데이터셋(3.7M, ~15GB)을 메모리에 로드하지 **않음**
+     2. 메타데이터 파일(`*_metadata.json`, ~217MB)만 로드
+     3. Config 기반으로 필요한 샘플 인덱스 계산 (Stage별 전략 적용)
+     4. JSONL 파일에서 계산된 인덱스의 라인만 선택적으로 읽기
+     5. HuggingFace Dataset으로 변환
+   - **메모리 절감 효과**:
+     - Stage 1 (50K 샘플): 메타데이터(~217MB) + 샘플(~200MB) = **~417MB** (기존 15GB 대비 97% 절감)
+     - Stage 2 (200K 샘플): 메타데이터(~217MB) + 샘플(~800MB) = **~1GB** (기존 15GB 대비 93% 절감)
+   - **분산학습 호환성**:
+     - 메타데이터 기반으로 선택된 샘플들을 `DistributedSampler`가 4개 GPU로 자동 분할
+     - Rank 0: `samples[0::4]`, Rank 1: `samples[1::4]`, Rank 2: `samples[2::4]`, Rank 3: `samples[3::4]`
+     - 각 GPU는 전체의 1/4만 처리 (중복 없음)
+     - Epoch 재현성: `sampler.set_epoch(epoch)` 호출
 
 ### 4.2 processed `schema.json` 예시
 ```json
@@ -163,7 +208,7 @@ storage/
 
 ### 4.3 전처리 실행 예시
 ```bash
-# 전체 데이터셋 일괄 처리 (다운로드 + 변환 + small + stats)
+# 전체 데이터셋 일괄 처리 (다운로드 + 변환 + 메타데이터 추출 + small + stats)
 uv run python scripts/setup_datasets.py --datasets all --steps all
 
 # 개별 데이터셋 처리
@@ -173,9 +218,15 @@ uv run python scripts/setup_datasets.py --datasets humaneval --steps all
 
 # 단계별 실행
 uv run python scripts/setup_datasets.py --datasets codecontests --steps process
+uv run python scripts/setup_datasets.py --datasets codecontests --steps metadata  # 메타데이터 추출
 uv run python scripts/setup_datasets.py --datasets codecontests --steps small,stats
+
+# 메타데이터만 별도 추출
+uv run python scripts/extract_metadata.py --dataset codecontests --split train
+uv run python scripts/extract_metadata.py --dataset codecontests --split valid
+uv run python scripts/extract_metadata.py --dataset codecontests --split test
 ```
-> `scripts/setup_datasets.py`가 HuggingFace에서 직접 로드하여 processed, small, stats를 모두 생성한다.
+> `scripts/setup_datasets.py`가 HuggingFace에서 직접 로드하여 processed, metadata, small, stats를 모두 생성한다.
 
 ---
 
@@ -232,16 +283,24 @@ uv run python scripts/setup_datasets.py --datasets codecontests --steps small,st
 - [ ] `tokenizer.model`과 Reference/Reward 모델 토크나이저의 vocab size가 동일하다.
 - [ ] `model.safetensors`의 dtype(float16)과 SHA256 해시를 기록 완료한다.
 - [ ] (선택) value head 존재 시 shape: `[hidden_size, 1]` 확인.
+- [ ] `metadata.json`에 `distributed.fsdp_compatible: true` 필드 포함 확인.
 
 ### 데이터
 - [ ] 각 processed JSONL이 2048 토큰 이하 데이터만 포함한다.
 - [ ] `is_correct` 필드가 없는 샘플이 있는 경우 Verifiable 실험에서 제외하도록 별도 태깅.
 - [ ] `schema.json`과 실제 샘플 구조가 일치한다.
 - [ ] 통계 파일이 최신 날짜로 업데이트되었다.
+- [ ] 전체 데이터셋 샘플 수가 4의 배수가 아니어도 DistributedSampler가 자동 처리하므로 문제없음을 확인.
 
 ### 스크립트
 - [ ] `scripts/prepare_local_small_model.py` 실행 후 Micro 모델 테스트 (`tests/unit/test_adapter.py`) 통과.
 - [ ] `scripts/sync_to_vessl_storage.py --dry-run`으로 업로드 시뮬레이션 성공.
+
+### 분산학습
+- [ ] FSDP wrapper가 단일 safetensors 파일을 올바르게 로드하고 4-GPU로 분산하는지 로컬 테스트 수행.
+- [ ] DistributedSampler가 데이터를 중복 없이 4개 GPU로 분할하는지 검증 (각 GPU별 샘플 수 확인).
+- [ ] Rank 0만 체크포인트 저장 및 MLflow 로깅을 수행하는지 확인.
+- [ ] torchrun으로 실행 시 모든 GPU가 동일한 `world_size=4`를 인식하는지 확인.
 
 ---
 

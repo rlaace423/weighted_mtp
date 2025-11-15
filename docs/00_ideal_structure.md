@@ -1,6 +1,6 @@
 # Weighted MTP 리팩토링 이상적 구조
 
-WMTP 리팩토링 프로젝트는 `wmtp_research_proposal.md`에 정의된 목표(간결한 3개 실험, Meta MTP 네이티브 활용, VESSL 전용 파이프라인, 로컬 M3 테스트 모드)를 달성하면서 최신 PPO/RLHF 베스트 프랙티스를 통합하는 것을 지향한다. 본 문서는 코드 스켈레톤, 디렉터리/파일 역할, 모델·데이터 아티팩트 규격을 한눈에 정리한다.
+WMTP 리팩토링 프로젝트는 `wmtp_research_proposal.md`에 정의된 목표(간결한 3개 실험, Meta MTP 네이티브 활용, VESSL A100 4-GPU 분산학습, 로컬 M3 테스트 모드)를 달성하면서 최신 PPO/RLHF 베스트 프랙티스를 통합하는 것을 지향한다. 본 문서는 코드 스켈레톤, 디렉터리/파일 역할, 모델·데이터 아티팩트 규격을 한눈에 정리한다.
 
 ---
 
@@ -8,8 +8,11 @@ WMTP 리팩토링 프로젝트는 `wmtp_research_proposal.md`에 정의된 목�
 
 - **간결한 실험 범위**: Baseline MTP, Verifiable Critic WMTP, Rho-1 Weighted 세 실험에 집중한다.
 - **Meta 네이티브 파이프라인**: Meta LLaMA MTP reference 구현을 직접 호출한다.
-- **VESSL 전용 배포**: storage → VESSL Storage (S3 미사용)로 정리하고, MLflow 서버 구성은 기존 WMTP와 동일하게 재사용한다.
-- **로컬 경량 모드**: M3 Mac + MPS 환경에서 tensor decoding layer를 축소한 초경량 모델을 CLI 플래그로 로드할 수 있도록 한다.
+- **VESSL A100 4-GPU 분산학습**: FSDP (Fully Sharded Data Parallel) 기반 효율적 멀티GPU 학습을 표준으로 한다.
+  - storage → VESSL Storage (S3 미사용), MLflow 서버 구성은 기존 WMTP와 동일하게 재사용
+  - 4-GPU 병렬 처리로 학습 시간 단축 및 대규모 배치 처리
+  - Gradient accumulation을 통한 효율적 메모리 활용
+- **로컬 경량 모드**: M3 Mac + MPS 환경에서 tensor decoding layer를 축소한 초경량 모델을 CLI 플래그로 로드할 수 있도록 한다 (개발/디버깅 전용).
 - **설정 단순화**: config YAML을 최소화하고 필수 실험 recipe만 유지한다.
 
 ---
@@ -73,25 +76,39 @@ WMTP 리팩토링 프로젝트는 `wmtp_research_proposal.md`에 정의된 목�
 ## 3. 시스템 아키텍처 개요
 
 ```
-CLI (uv run python -m weighted_mtp.cli.train)
+CLI (torchrun --nproc_per_node=4 -m weighted_mtp.cli.train)
     ↓
-Config Loader (yaml + .env)
+Distributed Init (torch.distributed, rank, world_size)
     ↓
-Runtime Context (seed, device, console, MLflow)
+Config Loader (yaml + .env) [Rank 0만 로깅]
     ↓
-Resource Loader
-    ├─ ModelBundleLoader (Meta MTP adapter, mini model)
-    ├─ DatasetRegistry (JSONL → HF Dataset)
+Runtime Context (seed, device:cuda:{rank}, console, MLflow)
+    ↓
+Resource Loader [각 GPU에서 병렬 실행]
+    ├─ ModelBundleLoader (Meta MTP adapter → FSDP wrapping)
+    ├─ DatasetRegistry (JSONL → HF Dataset → DistributedSampler)
     └─ TokenizerFactory
     ↓
-Pipeline Orchestrator
-    ├─ Stage 0: 모델 준비 (Adapter, Value Head init)
+Pipeline Orchestrator [FSDP 동기화]
+    ├─ Stage 0: 분산 환경 준비 (FSDP, DistributedSampler)
     ├─ Stage 1: Trunk Pretraining (선택, Verifiable 전용)
-    ├─ Stage 2: TD Error 기반 WMTP Training (value inference → weight builder → weighted loss)
-    └─ Stage 3: Eval & Artifact Upload
+    │   └─ Value Head도 FSDP로 분산 학습
+    ├─ Stage 2: TD Error 기반 WMTP Training
+    │   ├─ Value inference (FSDP forward)
+    │   ├─ Weight builder (각 GPU에서 독립 계산)
+    │   ├─ Weighted loss (FSDP backward, gradient sync)
+    │   └─ Gradient accumulation (effective batch size 증대)
+    └─ Stage 3: Eval & Artifact Upload [Rank 0만]
     ↓
-Reports (MLflow, console, checkpoints, logs)
+Reports (MLflow [Rank 0], console, checkpoints, logs)
 ```
+
+**분산학습 핵심 원칙**:
+- **데이터 병렬화**: DistributedSampler로 각 GPU가 다른 데이터 서브셋 처리 (중복 없음)
+- **모델 분산**: FSDP로 모델 파라미터를 4개 GPU에 분산 저장 (메모리 효율 4배)
+- **Gradient 동기화**: 각 GPU의 gradient를 all-reduce로 평균화
+- **Rank 0 책임**: 로깅, 체크포인트 저장, MLflow 업로드는 Rank 0만 수행
+- **재현성**: seed + rank 조합으로 각 GPU별 독립적이면서도 재현 가능한 난수 생성
 
 ---
 
@@ -132,7 +149,7 @@ weighted_mtp/
 │   │   └── registry.py                    # 가벼운 플러그인 맵
 │   ├── data/
 │   │   ├── __init__.py
-│   │   ├── datasets.py                    # JSONL 로딩, HF Dataset 캐시, Stage별 샘플링 전략
+│   │   ├── datasets.py                    # 메타데이터 기반 효율적 로딩 (99% 메모리 절감), Stage별 샘플링 전략
 │   │   ├── collators.py                   # MTP용 data collator (instruction/input masking, padding, truncation)
 │   │   └── prepare.py                     # 데이터셋 전처리 (스키마 검증)
 │   ├── models/
@@ -154,9 +171,14 @@ weighted_mtp/
 │   │   ├── training.py                    # run_training_pipeline 진입점
 │   │   └── evaluation.py                  # optional eval 파이프라인
 │   ├── runtime/
-│   │   ├── environment.py                 # seed, torch.backends 설정
-│   │   ├── distributed.py                 # FSDP/Deepspeed 옵션
-│   │   └── mlflow.py                      # MLflow 초기화 및 로깅
+│   │   ├── environment.py                 # seed, torch.backends 설정, rank별 device 할당
+│   │   ├── distributed.py                 # 분산학습 핵심 모듈
+│   │   │   # - init_distributed(): torch.distributed.init_process_group()
+│   │   │   # - setup_fsdp(): FSDP wrapping, sharding strategy
+│   │   │   # - get_rank(), get_world_size(), is_main_process()
+│   │   │   # - DistributedSampler 설정
+│   │   │   # - Gradient accumulation 로직
+│   │   └── mlflow.py                      # MLflow 초기화 및 로깅 (Rank 0 전용)
 │   └── utils/
 │       ├── timers.py
 │       ├── checkpointing.py
@@ -203,34 +225,64 @@ weighted_mtp/
 ```
 
 ### 디렉터리별 세부 역할
-- `configs/`: 환경 고정값(`defaults.yaml`) + 실험 recipe만 유지. recipe에는 dataset split, horizon, reward 설정 등 실험 차이만 명시한다. `defaults.yaml`에 모델 파라미터 스냅샷 및 **Stage별 데이터 샘플링 전략** 등록.
+- `configs/`: 환경 고정값(`defaults.yaml`) + 실험 recipe만 유지. recipe에는 dataset split, horizon, reward 설정 등 실험 차이만 명시한다. `defaults.yaml`에 모델 파라미터 스냅샷, **분산학습 설정**, **Stage별 데이터 샘플링 전략** 등록.
+  - **분산학습 config 예시** (`defaults.yaml`에 포함):
+    ```yaml
+    distributed:
+      enabled: true
+      backend: "nccl"  # GPU 분산학습 표준
+      world_size: 4    # A100 4-GPU
+
+      fsdp:
+        sharding_strategy: "FULL_SHARD"  # ZeRO-3 equivalent
+        cpu_offload: false               # A100 VRAM 충분
+        mixed_precision: "bf16"          # A100 native support
+        activation_checkpointing: true   # 메모리 절약
+
+      data:
+        batch_size_per_gpu: 2           # 각 GPU별 batch size
+        gradient_accumulation_steps: 4   # effective batch = 2 * 4 * 4 = 32
+        num_workers: 4                   # DataLoader workers per GPU
+        pin_memory: true
+        prefetch_factor: 2
+
+    training:
+      gradient_clipping: 1.0
+      seed: 42  # 각 rank는 seed + rank로 초기화
+    ```
   - **Stage별 샘플링 config 예시**:
     ```yaml
     data:
       sampling:
         stage1:
-          n_samples: 50000
+          n_samples: 50000               # 전체 샘플 수 (4 GPU로 분산)
           balance_correct: true
           correct_ratio: 0.5
-          difficulty_range: [1, 11]  # 전체 난이도
+          difficulty_range: [1, 11]
           seed: 42
         stage2:
-          n_samples: 200000
+          n_samples: 200000              # 전체 샘플 수 (4 GPU로 분산)
           curriculum_learning: true
           difficulty_schedule:
-            - epoch_range: [0.0, 0.3]    # 초반 30%
+            - epoch_range: [0.0, 0.3]
               difficulty_weights: {low: 0.7, medium: 0.3, high: 0.0}
-            - epoch_range: [0.3, 0.7]    # 중반 40%
+            - epoch_range: [0.3, 0.7]
               difficulty_weights: {low: 0.3, medium: 0.6, high: 0.1}
-            - epoch_range: [0.7, 1.0]    # 후반 30%
+            - epoch_range: [0.7, 1.0]
               difficulty_weights: {low: 0.1, medium: 0.5, high: 0.4}
           difficulty_bins: {low: [1, 3], medium: [4, 7], high: [8, 11]}
           seed: 42
+
+    # 참고: DistributedSampler가 자동으로 데이터를 4개 GPU에 분배
+    # - Rank 0: samples[0::4]
+    # - Rank 1: samples[1::4]
+    # - Rank 2: samples[2::4]
+    # - Rank 3: samples[3::4]
     ```
 - `vendor/meta_llama/`: Meta LLaMA reference 구현을 외부 의존성으로 명시. HuggingFace에서 직접 다운로드하여 배치. 업스트림 업데이트 시 이 디렉터리만 교체.
 - `src/models/meta_mtp/`: Meta reference를 래핑하는 adapter와 value head만 포함. `from vendor.meta_llama import Transformer`로 import.
-- `src/data/datasets.py`: **Stage별 샘플링 전략** 구현. JSONL에서 HuggingFace Dataset 로딩 시 `is_correct`, `difficulty` 기반 필터링/샘플링.
-- `src/data/prepare.py`: 데이터셋 전처리 및 스키마 검증 (instruction, input, output, is_correct, metadata).
+- `src/data/datasets.py`: **메타데이터 기반 효율적 로딩** 및 **Stage별 샘플링 전략** 구현. 전체 데이터를 메모리에 로드하지 않고 메타데이터(`is_correct`, `difficulty`)만 읽어 필요한 샘플 인덱스를 계산한 후, JSONL에서 해당 라인만 선택적으로 읽어 99% 메모리 절감.
+- `src/data/prepare.py`: 데이터셋 전처리 및 스키마 검증 (instruction, input, output, is_correct, metadata). 메타데이터 추출 기능 포함.
 - `src/value_weighting/`: TD error 기반 가중치 계산 로직을 기능 단위로 분할하여 테스트 가능하도록 구성.
 - `scripts/validate_datasets.py`: 데이터셋 무결성 검증 사용.
 - `storage/`: 로컬 실험 리소스 원천. `models_v2/`, `datasets_v2/`, `datasets_local_small/`로 구성. VESSL Storage 업로드 전에 이 구조를 그대로 동기화한다.
@@ -239,15 +291,18 @@ weighted_mtp/
 
 ## 5. 파이프라인 단계별 책임
 
-| 단계 | 모듈 | 주요 작업 | 입력 | 출력 |
-|------|------|-----------|------|------|
-| Stage 0 | `runtime.environment` | seed, dtype, device 설정 | Config | Torch 전역 상태 |
-|        | `models.meta_mtp.adapter` | Meta 모델 로딩 및 `MetaLlamaMTPAdapter` 초기화 | 모델 bundle | Adapter 인스턴스 |
-| Stage 1 (옵션) | `pipelines.training.TrunkPretrainer` | trunk_forward 기반 Value Head 사전학습 | Adapter, dataset | pretrain checkpoint |
-| Stage 2 | `value_weighting.td_error` | 표준 TD error 계산 (Intermediate: `γV(s_k)-V(s_{k-1})`, Terminal: `R-V(s_{T-1})`) | Adapter, dataset batch | TD error tensor |
-|        | `value_weighting.weight_builder` | TD error 기반 가중치 산출 (`exp(td_error/β)`, β=0.9, bootstrapping) | TD error tensor | token weights |
-|        | `trainer.wmtp` | 가중치 기반 MTP loss 계산 및 업데이트 | token weights, logits | loss, metrics |
-| Stage 3 | `pipelines.training` | 평가, 체크포인트, MLflow 로깅 | Trainer state | artifacts |
+| 단계 | 모듈 | 주요 작업 | 분산학습 고려사항 | 입력 | 출력 |
+|------|------|-----------|------------------|------|------|
+| Stage 0 | `runtime.distributed` | 분산 환경 초기화 | `torch.distributed.init_process_group(backend="nccl")` | Config | rank, world_size |
+|        | `runtime.environment` | seed, dtype, device 설정 | `device = cuda:{rank}`, `seed = base_seed + rank` | Config, rank | Torch 전역 상태 |
+|        | `models.meta_mtp.adapter` | Meta 모델 로딩 및 FSDP wrapping | 모델을 FSDP로 감싸 4-GPU 분산 저장 | 모델 bundle | FSDP-wrapped Adapter |
+|        | `data.datasets` | 메타데이터 기반 데이터셋 로딩 및 DistributedSampler 설정 | 메타데이터로 샘플 선택 후 DistributedSampler로 분할 (각 GPU는 samples[rank::world_size]) | JSONL + metadata, Config | Dataset, DistributedSampler |
+| Stage 1 (옵션) | `pipelines.training.TrunkPretrainer` | trunk_forward 기반 Value Head 사전학습 | FSDP forward/backward, all-reduce gradient sync | FSDP Adapter, distributed dataset | pretrain checkpoint (Rank 0만 저장) |
+| Stage 2 | `value_weighting.td_error` | 표준 TD error 계산 (Intermediate: `γV(s_k)-V(s_{k-1})`, Terminal: `R-V(s_{T-1})`) | FSDP forward로 각 GPU에서 독립 계산 | FSDP Adapter, batch | TD error tensor (per GPU) |
+|        | `value_weighting.weight_builder` | TD error 기반 가중치 산출 (`exp(td_error/β)`, β=0.9) | 각 GPU에서 독립적으로 weight 계산 | TD error tensor | token weights (per GPU) |
+|        | `trainer.wmtp` | 가중치 기반 MTP loss 계산 및 업데이트 | FSDP backward로 gradient 계산 후 all-reduce 자동 동기화 | weights, logits | loss, metrics (per GPU) |
+|        | `runtime.distributed` | Gradient accumulation 관리 | accumulation_steps마다 optimizer.step() 호출 | accumulated gradients | synchronized update |
+| Stage 3 | `pipelines.training` | 평가, 체크포인트, MLflow 로깅 | **Rank 0만** 실행: FSDP state_dict 저장, MLflow 업로드 | Trainer state | artifacts (Rank 0만) |
 
 ---
 
@@ -307,8 +362,8 @@ weighted_mtp/
 - **길이 제약**: Meta LLaMA 토크나이저 기준 2048 토큰 이하로 필터링 (instruction + input + output 합산)
 - **분할**: train/valid/test (HuggingFace 기본 split 사용)
 
-### 7.2 Alpaca 스타일 SFT 변환 (storage/datasets_v2/codecontests/processed/*.jsonl)
-- **필드**
+### 7.2 Alpaca 스타일 SFT 변환 (storage/datasets_v2/codecontests/processed/*.jsonl + *_metadata.json)
+- **JSONL 필드**
   - `instruction`: 문제 설명 (HF `description` 필드에서 변환)
   - `input`: 공개 테스트 케이스 예시 (최대 2개, `public_tests`에서 추출)
   - `output`: Python 솔루션 코드 (correct 또는 incorrect)
@@ -316,8 +371,29 @@ weighted_mtp/
   - `is_correct`: **top-level 필드**로 솔루션 정답 여부 표시 (`true` 또는 `false`)
   - `metadata`: `{"source": "code_contests", "difficulty": <int>, "has_tests": true/false}`
     - `difficulty`: Codeforces 난이도 등급 (1~11, 낮을수록 쉬움)
-    - **분포 (train 1000샘플)**: diff=7 (86.7%), diff=2 (6.4%), diff=1 (4.4%), diff=11 (2.1%), diff=6 (0.4%)
+    - **분포 (train 3.7M샘플)**: diff=0 (41%), diff=1/2 (0.2%), diff=3~11 (58.8%)
     - **활용**: Stage별 Curriculum Learning에서 난이도 기반 샘플링 전략에 사용
+- **메타데이터 파일** (`*_metadata.json` - 메모리 효율 학습의 핵심)
+  - **목적**: 전체 데이터를 로드하지 않고 `is_correct`, `difficulty` 정보만으로 샘플 선택
+  - **구조**:
+    ```json
+    {
+      "metadata": [
+        {"is_correct": true, "difficulty": 7},
+        {"is_correct": false, "difficulty": 2},
+        ...
+      ],
+      "stats": {
+        "total": 3691981,
+        "correct": 1754404,
+        "incorrect": 1937577,
+        "difficulty_dist": {"0": 1519213, "1": 2701, "2": 4612, ...}
+      }
+    }
+    ```
+  - **크기**: 전체 데이터(~15GB) 대비 ~217MB (99% 메모리 절감)
+  - **생성**: `scripts/extract_metadata.py`로 JSONL 전체 스캔 후 생성
+  - **활용**: 런타임에 메타데이터만 로드 → 샘플링 인덱스 계산 → JSONL에서 해당 라인만 읽기
 - **변환 로직** (`scripts/setup_datasets.py`)
   - Correct solutions: `solutions` 필드의 Python/Python3 솔루션 추출 → `is_correct: true`
   - Incorrect solutions: `incorrect_solutions` 필드의 Python/Python3 솔루션 추출 → `is_correct: false`
@@ -327,13 +403,20 @@ weighted_mtp/
   - **Train**: 3,691,981 samples (correct: 1,754,404 / incorrect: 1,937,577)
   - **Valid**: 14,725 samples (correct: 8,184 / incorrect: 6,541)
   - **Test**: 14,851 samples (correct: 8,038 / incorrect: 6,813)
-- **Stage별 샘플링 전략 (메모리 효율 학습)**
+- **Stage별 샘플링 전략 (메타데이터 기반 메모리 효율 학습)**
+  - **핵심 아이디어**: 전체 데이터(3.7M, ~15GB)를 메모리에 로드하지 않고, 메타데이터(~217MB)만으로 필요한 샘플 인덱스를 계산 후 JSONL에서 해당 라인만 읽기 → **99% 메모리 절감**
+  - **메타데이터 기반 로딩 프로세스**:
+    1. 메타데이터 파일(`train_metadata.json`) 로드 (is_correct, difficulty만 포함)
+    2. Config 기반으로 샘플링 인덱스 계산 (Stage별 전략 적용)
+    3. JSONL 파일에서 계산된 인덱스의 라인만 선택적으로 읽기
+    4. HuggingFace Dataset으로 변환
   - **Stage 1 (Value Head Pretrain)**:
     - `is_correct` 균형 샘플링: 50% correct, 50% incorrect
     - 샘플 크기: 10,000~50,000 (전체의 0.3~1.4%)
     - Difficulty 무관: 모든 난이도 균등 샘플링
     - 목적: Value head가 correct/incorrect 구분 학습
-    - 구현: `load_dataset(stage="stage1", balance_correct=True, correct_ratio=0.5, n_samples=50000)`
+    - 메모리 사용: 메타데이터(~217MB) + 샘플 50K(~200MB) = **~417MB** (기존 15GB 대비 97% 절감)
+    - 구현: `load_dataset("codecontests", stage="stage1", balance_correct=True, correct_ratio=0.5, n_samples=50000)`
   - **Stage 2 (Weighted Training)**:
     - Curriculum Learning: Difficulty 기반 점진적 증가
       - 초반 epoch (0~30%): low (1-3) 70%, medium (4-7) 30%, high (8-11) 0%
@@ -342,7 +425,8 @@ weighted_mtp/
     - 샘플 크기: 100,000~500,000 (전체의 2.7~13.5%)
     - `is_correct` 혼합: TD error weighting이 자동 필터링 (incorrect → 낮은 weight)
     - 목적: 쉬운 문제부터 학습하여 TD error 안정화, 점진적 난이도 증가
-    - 구현: `load_dataset(stage="stage2", curriculum_learning=True, difficulty_schedule=[...], n_samples=200000)`
+    - 메모리 사용: 메타데이터(~217MB) + 샘플 200K(~800MB) = **~1GB** (기존 15GB 대비 93% 절감)
+    - 구현: `load_dataset("codecontests", stage="stage2", curriculum_learning=True, difficulty_schedule=[...], n_samples=200000)`
 - **추가 규칙**
   - 토큰 길이 필터링: instruction + input + output 합산이 2048 토큰 초과 시 제외
   - Python/Python3 솔루션만 포함 (언어 코드 1 또는 3)
@@ -373,22 +457,39 @@ uv run python -m weighted_mtp.cli.train \
 ```
 - `--use-micro-model`: `storage/models_v2/micro-mtp/`를 로드.
 - `--preset local-light`: 배치 1, epoch 0.1, Stage 1만 실행 등 초경량 설정 적용.
+- 로컬 환경은 단일 GPU/MPS 모드로 실행 (분산학습 비활성화).
 
-### VESSL (A100 1~4장)
+### VESSL (A100 4-GPU 분산학습)
 ```bash
 vessl run create \
   --cluster vessl-gcp-oregon \
-  --resource a100-1gpu \
+  --resource a100-4gpu \
   --image ghcr.io/wooshikwon/weighted-mtp:latest \
   --name verifiable_critic_prod \
   --env-file .env.vessl \
-  --command "uv run python -m weighted_mtp.cli.train \
+  --command "torchrun \
+      --nproc_per_node=4 \
+      --nnodes=1 \
+      --node_rank=0 \
+      --master_addr=localhost \
+      --master_port=29500 \
+      -m weighted_mtp.cli.train \
       --config configs/defaults.yaml \
       --recipe configs/recipe.verifiable.yaml \
       --run-name verifiable_prod_001"
 ```
+- **분산학습 환경 변수** (자동 설정):
+  - `RANK`: 현재 프로세스의 global rank (0~3)
+  - `LOCAL_RANK`: 현재 노드 내 프로세스 rank (0~3)
+  - `WORLD_SIZE`: 전체 프로세스 수 (4)
+  - `MASTER_ADDR`, `MASTER_PORT`: 프로세스 그룹 통신 엔드포인트
+- **torchrun 파라미터**:
+  - `--nproc_per_node=4`: 노드당 GPU 수 (A100 4장)
+  - `--nnodes=1`: 노드 수 (단일 노드)
+  - `--master_port=29500`: 분산 통신 포트
 - `scripts/sync_to_vessl_storage.py`로 `storage/{models,datasets}` 업로드.
 - MLflow URI/인증 정보는 `.env.vessl`에 주입.
+- **Rank 0만** MLflow 로깅, 체크포인트 저장 수행.
 
 ---
 

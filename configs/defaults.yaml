@@ -68,6 +68,8 @@ data:
     # 근거: 100K × 3 epochs = 300K effective samples (SFT standard 충족)
     stage2:
       n_samples: 100000  # Effective: 300K samples (100K × 3 epochs)
+      balance_correct: true
+      correct_ratio: 0.5
       curriculum_learning: true
       difficulty_bins:
         low: [1, 3]      # 쉬운 문제 (7,951 available)
