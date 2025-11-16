@@ -180,7 +180,12 @@ weighted_mtp/
 │   │   │   # - get_rank(), get_world_size(), is_main_process()
 │   │   │   # - DistributedSampler 설정
 │   │   │   # - Gradient accumulation 로직
-│   │   └── mlflow.py                      # MLflow 초기화 및 로깅 (Rank 0 전용)
+│   │   └── mlflow.py                      # MLflow 실험 추적 (Rank 0 전용)
+│   │       # - MLflowManager: EC2 서버 연결, Basic Auth (.env 자동 로드)
+│   │       # - Experiment 생성/조회 (s3://wmtp/mlflow-artifacts)
+│   │       # - Run lifecycle: start_run() → log_params/metrics/artifact() → end_run()
+│   │       # - Config flatten (중첩 dict → 'stage1.learning_rate' 형태)
+│   │       # - S3 artifact 자동 업로드 (checkpoint → s3://wmtp/mlflow-artifacts/{exp_id}/{run_id}/artifacts/)
 │   └── utils/
 │       ├── timers.py
 │       ├── checkpointing.py
@@ -227,7 +232,14 @@ weighted_mtp/
 ```
 
 ### 디렉터리별 세부 역할
-- `configs/`: 환경 고정값(`defaults.yaml`) + 실험 recipe만 유지. recipe에는 dataset split, horizon, reward 설정 등 실험 차이만 명시한다. `defaults.yaml`에 모델 파라미터 스냅샷, **분산학습 설정**, **Stage별 데이터 샘플링 전략** 등록.
+- `configs/`: **환경 고정값**(`defaults.yaml`) + **실험 recipe**로 구성. **Deep merge 전략**을 사용하여 defaults + recipe를 재귀적으로 병합한다.
+  - **Deep merge 메커니즘**:
+    - `defaults.yaml`: 프로젝트 공통 설정 (MLflow, 모델 경로, 분산학습, Stage별 샘플링 등)
+    - `recipe.*.yaml`: 실험별 차이만 명시 (dataset, beta, value_coef 등)
+    - CLI에서 두 파일을 재귀적으로 병합하여 최종 config 생성
+    - Recipe 값이 defaults를 override (recipe 우선)
+    - Recipe에 없는 키는 defaults 값 유지
+  - `defaults.yaml`에 모델 파라미터 스냅샷, **분산학습 설정**, **Stage별 데이터 샘플링 전략**, **MLflow 설정** 등록.
   - **분산학습 config 예시** (`defaults.yaml`에 포함):
     ```yaml
     distributed:
@@ -249,8 +261,17 @@ weighted_mtp/
         prefetch_factor: 2
 
     training:
+      log_interval: 10        # 10 step마다 train loss 출력
+      eval_interval: 100      # 100 step마다 validation 평가
+      save_checkpoint_every: 1  # 1 epoch마다 checkpoint 저장
+      save_best_checkpoint: true  # Best validation loss checkpoint 저장
       gradient_clipping: 1.0
       seed: 42  # 각 rank는 seed + rank로 초기화
+
+    mlflow:
+      tracking_uri: "http://13.50.240.176"  # EC2 MLflow Server (Basic Auth via .env)
+      experiment: "weighted-mtp/production"  # Experiment 이름
+      s3_artifacts: "s3://wmtp/mlflow-artifacts"  # S3 Artifact Storage
     ```
   - **Stage별 샘플링 config 예시**:
     ```yaml
@@ -304,7 +325,11 @@ weighted_mtp/
 |        | `value_weighting.weight_builder` | TD error 기반 가중치 산출 (`exp(td_error/β)`, β=0.9) | 각 GPU에서 독립적으로 weight 계산 | TD error tensor | token weights (per GPU) |
 |        | `trainer.wmtp` | 가중치 기반 MTP loss 계산 및 업데이트 | FSDP backward로 gradient 계산 후 all-reduce 자동 동기화 | weights, logits | loss, metrics (per GPU) |
 |        | `runtime.distributed` | Gradient accumulation 관리 | accumulation_steps마다 optimizer.step() 호출 | accumulated gradients | synchronized update |
-| Stage 3 | `pipelines.training` | 평가, 체크포인트, MLflow 로깅 | **Rank 0만** 실행: FSDP state_dict 저장, MLflow 업로드 | Trainer state | artifacts (Rank 0만) |
+| Stage 3 | `pipelines.training` | **Validation 평가**, **Best checkpoint 저장**, MLflow 로깅 | **Rank 0만** 실행 | Trainer state | artifacts (Rank 0만) |
+|        | `pipelines.training.evaluate_stage()` | Validation loss 계산 (step interval 기반) | FSDP forward로 각 GPU 독립 계산 후 all-reduce 평균 | FSDP Adapter, val_dataloader | val_loss, val_metrics |
+|        | **Best checkpoint tracking** | val_loss 기준 best checkpoint 저장 | Rank 0만: `if val_loss < best_val_loss: save_checkpoint()` | val_metrics, best_val_loss | checkpoint_stage{N}_best.pt |
+|        | **Step 기반 logging/evaluation** | Global step 기반 주기적 logging 및 evaluation | log_interval=10 (train loss), eval_interval=100 (val eval) | global_step counter | console output, MLflow metrics |
+|        | `runtime.mlflow` | MLflow 실험 추적 및 S3 업로드 | Rank 0만: params/metrics 로깅, checkpoint S3 업로드 | config, metrics, checkpoint paths | MLflow run (EC2 + S3) |
 
 ---
 

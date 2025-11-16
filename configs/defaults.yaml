@@ -97,6 +97,15 @@ data:
             high: 0.4
       seed: 42
 
+  # Validation: 전체 split 사용 (샘플링 없음)
+  # 목적: 정확한 성능 평가
+  # 근거: Validation은 대표성 확보를 위해 전체 데이터 사용 (CodeContests valid 14.7K)
+  validation:
+    split: "validation"  # HuggingFace split name
+    use_full_split: true  # 샘플링 없이 전체 사용
+    # n_samples: 14,725 (CodeContests)
+    # Stage 1/2 모두 동일한 validation set 사용
+
 # 학습 파이프라인 설정 (Phase 5)
 training:
   # Logging & Evaluation Intervals (Step 단위)

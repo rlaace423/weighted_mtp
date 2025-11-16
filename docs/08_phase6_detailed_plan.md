@@ -174,31 +174,77 @@ def evaluate_stage(
 
 ### 2.3 Decision 2: Best Checkpoint 저장 전략
 
-**문제**: 모든 epoch checkpoint 저장하면 storage 낭비, best 선택 로직 없음
+**문제**: 모든 step checkpoint 저장하면 storage 낭비, 실시간 저장은 I/O 오버헤드 심각
 
-**해결책**: Validation loss 기반 best checkpoint만 저장
+**해결책**: Epoch 단위 checkpoint 저장 + 학습 완료 후 best 선택 (Meta MTP 2024 방식)
 
 **저장 정책**:
-1. **Periodic checkpoint**: Epoch마다 저장 (optional, `save_checkpoint_every`)
-2. **Best checkpoint**: Validation loss 개선 시에만 저장 (`checkpoint_{stage}_best.pt`)
+1. **Periodic checkpoint**: Epoch마다 저장 (`save_checkpoint_every: 1`)
+   - `checkpoint_stage1_epoch_0.5.pt` (Stage 1: 0.5 epoch)
+   - `checkpoint_stage2_epoch_1.pt`, `checkpoint_stage2_epoch_2.pt` (Stage 2: 2.5 epochs)
+   - 각 checkpoint에 validation loss 메타데이터 기록
+2. **Best checkpoint**: 학습 완료 후 선택 (`checkpoint_{stage}_best.pt`)
+   - 저장된 모든 epoch checkpoint의 validation loss 비교
+   - 최저 val_loss 가진 checkpoint를 `best.pt`로 복사/심볼릭 링크
 3. **Final checkpoint**: 학습 완료 후 최종 저장 (`checkpoint_{stage}_final.pt`)
 
-**Best checkpoint 기준**:
+**Best checkpoint 선택 기준**:
 - Stage 1: `val_loss` 최소화
 - Stage 2: `val_loss` 최소화 (total_loss = weighted_ce + value_coef * value_loss)
+
+**Meta MTP 2024 논문 방식**:
+> "Model checkpoints with maximal validation ROUGE-L F1 are selected separately for each model dataset and model type."
+- 학습 중 여러 checkpoint 저장 → 학습 완료 후 validation metric 기반 best 선택
+- 우리는 ROUGE-L 대신 validation loss 사용
 
 ### 2.4 Decision 3: Step 기반 Logging & Evaluation
 
 **문제**: Epoch 단위는 너무 coarse, 세밀한 제어 불가
 
-**해결책**: Global step 기반 interval
+**해결책**: Global step 기반 interval (모니터링 전용)
 
-**Interval 종류**:
+**Interval 역할 구분**:
 ```yaml
 training:
-  log_interval: 10      # 10 step마다 train loss 출력
-  eval_interval: 100    # 100 step마다 validation 평가
-  save_checkpoint_every: 1  # 1 epoch마다 checkpoint 저장 (기존 유지)
+  log_interval: 10      # 10 step마다 train loss 출력 (console/MLflow)
+  eval_interval: 100    # 100 step마다 validation 평가 (로깅만, checkpoint 저장 안 함)
+  save_checkpoint_every: 1  # 1 epoch마다 checkpoint 저장
+```
+
+**핵심 원칙**:
+- `eval_interval: 100` → **모니터링 전용**
+  - Validation loss 계산 → console/MLflow 로깅만
+  - Overfitting 조기 감지, 학습 진행 상황 추적
+  - **Checkpoint 저장 안 함** (I/O 오버헤드 방지)
+- `save_checkpoint_every: 1` → **Checkpoint 저장 전용**
+  - Epoch 끝날 때만 checkpoint 저장
+  - 각 checkpoint에 validation loss 메타데이터 기록
+- **학습 완료 후** → Best 선택
+  - 저장된 모든 checkpoint의 validation loss 비교
+  - 최저 val_loss 가진 checkpoint를 `best.pt`로 복사
+
+**흐름 예시** (Stage 2: 2.5 epochs, 1000 steps/epoch):
+```python
+# Step 100: validation → val_loss=2.5 (로깅만, 저장 안 함)
+# Step 200: validation → val_loss=2.3 (로깅만)
+# ...
+# Step 1000 (Epoch 1 끝):
+#   - validation → val_loss=2.1
+#   - checkpoint 저장 "epoch_1.pt" (val_loss=2.1 메타데이터 기록)
+
+# Step 1100: validation → val_loss=2.0 (로깅만)
+# Step 1200: validation → val_loss=1.9 (로깅만)
+# ...
+# Step 2000 (Epoch 2 끝):
+#   - validation → val_loss=1.8
+#   - checkpoint 저장 "epoch_2.pt" (val_loss=1.8 메타데이터 기록)
+
+# Step 2500 (Final):
+#   - validation → val_loss=1.85
+#   - checkpoint 저장 "final.pt" (val_loss=1.85 메타데이터 기록)
+
+# 학습 완료 후:
+# epoch_2.pt (val_loss=1.8)이 최저 → "best.pt"로 복사
 ```
 
 **Global step 계산**:
@@ -210,13 +256,19 @@ for epoch in range(n_epochs):
         ...
         global_step += 1
 
-        # Log
+        # Log (모니터링 전용)
         if global_step % log_interval == 0:
             logger.info(f"Step {global_step}, Loss: {loss:.4f}")
 
-        # Eval
+        # Eval (모니터링 전용, checkpoint 저장 안 함)
         if global_step % eval_interval == 0:
             val_metrics = evaluate_stage(...)
+            logger.info(f"Step {global_step}, Val Loss: {val_metrics['val_loss']:.4f}")
+            mlflow_manager.log_metrics({"val_loss": val_metrics["val_loss"]}, step=global_step)
+
+    # Epoch 끝: checkpoint 저장
+    val_metrics = evaluate_stage(...)
+    save_checkpoint(f"epoch_{epoch}.pt", metadata={"val_loss": val_metrics["val_loss"]})
 ```
 
 ### 2.5 Decision 4: Rank 0 Only Operations
@@ -244,23 +296,84 @@ if is_main_process():  # Rank 0 only
     mlflow_manager.log_metrics(...)
 ```
 
-### 2.6 Decision 5: Multi-head Loss 개별 + 평균 Logging
+### 2.6 Decision 5: Comprehensive Logging Metrics (LLM SFT/RLHF Best Practices 2024)
 
-**문제**: Phase 5는 4개 head loss를 평균만 출력, 디버깅 어려움
+**문제**: Loss만 기록하면 학습 상태 파악 어려움, 디버깅 불가
 
-**해결책**: 개별 head loss + 평균 모두 출력
+**해결책**: LLM SFT/PPO RLHF 표준 logging 항목 도입 (HuggingFace TRL, OpenRLHF, QLoRA 2024 기준)
 
-**Logging 형식**:
+**Logging 항목 (Stage별)**:
+
+#### Stage 1 & 2 공통 (Train Metrics)
+```yaml
+# 1. Loss Metrics
+train/loss: 2.1234            # Total loss
+train/mtp_loss: 1.9876        # MTP loss (Stage 2만)
+train/value_loss: 0.1358      # Value loss
+train/head_0_loss: 2.3456     # Individual head losses (디버깅용)
+train/head_1_loss: 2.4123
+train/head_2_loss: 2.5678
+train/head_3_loss: 2.3890
+
+# 2. Gradient & Optimization
+train/grad_norm: 0.8765       # Gradient norm (안정성 지표, QLoRA: max_grad_norm=0.3)
+train/learning_rate: 1.0e-5   # Current LR (scheduler 추적)
+
+# 3. Performance & Throughput
+train/samples_per_second: 4.2 # Throughput (분산학습 효율 측정)
+train/tokens_per_second: 8192 # Token throughput
+train/wall_time: 3600.5       # 누적 벽시계 시간 (초)
+train/epoch: 1.5              # Current epoch (소수점)
+train/global_step: 1500       # Global step counter
+
+# 4. GPU & Memory (분산학습 필수)
+system/gpu_memory_allocated_gb: 35.2  # 할당된 GPU 메모리 (GB)
+system/gpu_memory_reserved_gb: 40.0   # 예약된 GPU 메모리
+system/gpu_utilization_pct: 95.3     # GPU 활용률 (%)
+
+# 5. Stage 2 전용 (Weighted MTP + Value)
+train/td_error_mean: 0.0234   # TD error 평균 (weighting 품질)
+train/td_error_std: 0.1567    # TD error 표준편차
+train/weight_entropy: 2.3456  # Weight distribution entropy
+train/weight_mean: 1.0234     # Weight 평균
+train/weight_min: 0.1000      # Weight 최소값 (clip 확인)
+train/weight_max: 5.0000      # Weight 최대값 (clip 확인)
+train/value_explained_variance: 0.8234  # Value head 성능 (1.0에 가까울수록 이상적)
 ```
-Step 100, Stage 2:
-  Head 0 loss: 2.3456
-  Head 1 loss: 2.4123
-  Head 2 loss: 2.5678
-  Head 3 loss: 2.3890
-  Avg MTP loss: 2.4287
-  Value loss: 0.1234
-  Total loss: 1.2761
+
+#### Validation Metrics (100 step마다 + Epoch 끝)
+```yaml
+val/loss: 1.8765              # Validation total loss
+val/mtp_loss: 1.7432          # Validation MTP loss
+val/value_loss: 0.1333        # Validation value loss
+val/value_explained_variance: 0.8456
 ```
+
+**Logging 빈도**:
+- `log_interval: 10` → Train metrics (loss, grad_norm, LR, throughput)
+- `eval_interval: 100` → Validation metrics
+- Every step → GPU memory (lightweight)
+
+**Console 출력 형식** (간결화):
+```
+[Step 100/2500] [Epoch 0.04] [3.2 samples/s]
+  Train Loss: 2.1234 | Val Loss: 1.8765
+  Grad Norm: 0.8765 | LR: 1.0e-5
+  GPU Mem: 35.2/40.0 GB (95.3%)
+  MTP: 1.9876 | Value: 0.1358 | ExplVar: 0.8234
+```
+
+**MLflow 전체 로깅** (모든 항목 기록):
+- Train metrics → `mlflow.log_metrics(train_metrics, step=global_step)`
+- Validation metrics → `mlflow.log_metrics(val_metrics, step=global_step)`
+- System metrics → `mlflow.log_metrics(system_metrics, step=global_step)`
+
+**Best Practices 근거**:
+- **Gradient Norm**: Early-stage lower gradient norms → better final performance (SFT 2024)
+- **Learning Rate**: Standard 1e-4 for LoRA, 2e-4 for QLoRA (HuggingFace TRL)
+- **GPU Utilization**: OPPO 2024 - 1.4×-2.1× improvement target
+- **Throughput**: OpenRLHF 2024 - samples/tokens per second for bottleneck detection
+- **Value Explained Variance**: PPO RLHF 2024 - stability indicator (should not spike/NaN)
 
 ---
 
@@ -319,6 +432,11 @@ Model, Tokenizer, Datasets, Dataloaders를 로딩하여 `run_training_pipeline()
 - 역할: Stage 1 train, Stage 2 train, Validation dataset 로딩
 - Phase 3의 `load_dataset()` 재사용
 - 반환: `(stage1_train_dataset, stage2_train_dataset, val_dataset)`
+- **Validation dataset 로딩 방식**:
+  - `config["data"]["validation"]["split"]` 사용 (기본값: "validation")
+  - `use_full_split: true` → 샘플링 없이 전체 validation split 사용
+  - CodeContests: 14,725 samples (correct + incorrect 혼합)
+  - Stage 1/2 모두 동일한 validation set 사용 (일관성)
 
 **`_create_dataloaders(datasets: tuple, tokenizer, config) -> tuple[DataLoader, ...]`**
 - 역할: 4개 dataloader 생성
@@ -440,20 +558,39 @@ for epoch in range(n_epochs):
 #### 목표
 WMTP EC2 MLflow 서버에 실험 추적 정보 로깅
 
-#### MLflowManager 클래스 (`runtime/mlflow.py`)
+#### 구현 파일
+**`src/weighted_mtp/runtime/mlflow.py`** (신규 생성)
+
+#### MLflowManager 클래스 구현
+
+**역할**:
+- EC2 MLflow 서버 연결 관리
+- .env에서 Basic Auth 자동 로드
+- Experiment 생성/조회
+- Run lifecycle 관리 (start → log → end)
+- S3 artifact 업로드
 
 **핵심 메서드**:
-- `__init__(tracking_uri, experiment_name, s3_artifacts)`: EC2 서버 연결 + Basic Auth
-- `start_run(run_name, tags)`: Run 시작
-- `log_params(params: dict)`: Config flatten 후 params 로깅
-- `log_metrics(metrics: dict, step: int)`: Step 단위 metrics 로깅
-- `log_artifact(local_path, artifact_path)`: S3에 checkpoint 업로드
-- `end_run(status)`: Run 종료
+- `__init__(tracking_uri, experiment_name, s3_artifacts)`: EC2 서버 연결 초기화
+- `_inject_basic_auth(uri)`: .env에서 MLFLOW_TRACKING_USERNAME/PASSWORD 로드 후 URI에 주입
+- `start_run(run_name, tags)`: mlflow.start_run() 호출, run_id 반환
+- `log_params(params: dict)`: Config를 flatten하여 mlflow.log_params() 호출
+- `log_metrics(metrics: dict, step: int)`: mlflow.log_metrics() 호출
+- `log_artifact(local_path, artifact_path)`: mlflow.log_artifact() 호출 (S3 자동 업로드)
+- `end_run(status)`: mlflow.end_run() 호출
 
-**WMTP 재사용**:
-- `/Users/wesley/Desktop/wooshikwon/wmtp/src/utils/monitoring/mlflow.py`의 `MLflowManager` 클래스를 복사
-- Basic Auth 자동 주입 (`_maybe_inject_basic_auth()`)
-- S3 artifact location 자동 설정
+**구현 핵심 로직**:
+1. **Basic Auth 주입**:
+   - .env에서 `MLFLOW_TRACKING_USERNAME`, `MLFLOW_TRACKING_PASSWORD` 로드
+   - tracking_uri가 http://로 시작하면 `http://user:pass@host` 형태로 변환
+2. **Experiment 관리**:
+   - `mlflow.get_experiment_by_name()` → 없으면 `mlflow.create_experiment()` 호출
+   - artifact_location에 S3 경로 설정
+3. **Config flatten**:
+   - 중첩 dict를 `stage1.learning_rate` 형태로 평탄화
+   - mlflow.log_params()는 flat dict만 지원
+4. **Context manager 패턴**:
+   - `with mlflow_manager.run(run_name): ...` 형태 지원 권장
 
 #### CLI 통합 (`cli/train.py`)
 
@@ -823,7 +960,7 @@ def run_training_pipeline(
 | Resource loading 함수 | 3-4시간 | _load_model, _load_tokenizer, _load_datasets, _create_dataloaders |
 | Validation evaluation | 3-4시간 | evaluate_stage 함수 |
 | Best checkpoint 저장 | 2-3시간 | Best tracking 로직 |
-| MLflow 통합 | 3-4시간 | MLflowManager 복사 + CLI 통합 |
+| MLflow 통합 | 3-4시간 | MLflowManager 신규 구현 + CLI 통합 |
 | Step 기반 logging/eval | 2-3시간 | Global step tracking |
 | Multi-head logging | 1-2시간 | 개별 loss 출력 |
 | CLI main() 완성 | 3-4시간 | 전체 흐름 연결 |
@@ -907,4 +1044,3 @@ s3://wmtp/mlflow-artifacts/
 - `docs/07_phase5_detailed_plan.md`: Value Training 파이프라인
 - `docs/wmtp_research_proposal.md`: WMTP 연구 의도
 - `src/weighted_mtp/pipelines/training.py`: Phase 5 파이프라인 구현
-- `/Users/wesley/Desktop/wooshikwon/wmtp/src/utils/monitoring/mlflow.py`: MLflowManager 참고
