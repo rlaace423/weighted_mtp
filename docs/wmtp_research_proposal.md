@@ -127,10 +127,16 @@ weight_k = clamp(weight_k, min=0.1, max=5.0)
 - **Monitoring**: Value explained variance 추적 (1.0에 가까울수록 이상적)
 - **Gradient Clipping**: Global gradient norm clipping (max_grad_norm=0.5~1.0)
 
-**안정화 메커니즘**:
-- **Value drift 방지**: Value loss 클리핑 (value_clip=0.2), EMA/anchor 손실 병행
-- **Reward 스케일**: Binary reward [0,1] 고정 (정규화 불필요), TD error 자연 bounded
+**Value Function 학습 (Probabilistic Value Learning)**:
+- **Stage 1 목표**: V(s_t) = P(Success | s_t) 학습 (확률적 가치 학습)
+- **방법**: 모든 토큰에 R_terminal (0 or 1) 부여, γ=1.0 (undiscounted)
+- **원리**: 배치 학습을 통해 V(s_t) → E[R | s_t] = P(Success | s_t) 자동 수렴
+- **예시**: 동일 prefix가 correct/incorrect 샘플에서 다른 R → 확률 추정
 - **2단계 학습**: Stage 1 (Value Head Pretrain 0.5 epoch) + Stage 2 (Weighted Training 2.5 epoch)
+
+**안정화 메커니즘**:
+- **Value drift 방지**: Value loss 클리핑 (value_clip=0.2), Continual learning
+- **Reward 스케일**: Binary reward [0,1] 고정 (정규화 불필요), TD error 자연 bounded
 
 **실무적 이점**:
 - **Reward 소스**: 데이터셋 레이블 (코드 실행 결과, 수학 정답)
@@ -139,10 +145,11 @@ weight_k = clamp(weight_k, min=0.1, max=5.0)
 - **데이터**: 정답+오답 모두 학습 (negative signal 활용)
 
 **이론적 근거**:
-- **Sutton & Barto "RL: An Introduction"**: 표준 TD(0) 공식
-- **TDRM (2024)**: Intermediate bootstrapping + Terminal direct reward
+- **Sutton & Barto "RL: An Introduction"**: 표준 TD(0) 공식, Undiscounted episodic tasks
+- **Probabilistic Value Learning**: MSE loss 최적해 = E[R | s] = P(Success | s) (binary reward)
+- **T-PPO/EGAE (2025)**: Monte Carlo returns for unbiased value estimation
 - **Policy Gradient Theorem (Sutton et al. 1999)**: Advantage 기반 가중으로 분산 감소와 수렴 보장
-- **IQL/AWR**: Exponential weighting 방식 (`exp(advantage/β)`) 차용, Q function 없이 V function만 사용
+- **IQL/AWR**: Exponential weighting 방식 (`exp(td_error/β)`) 차용, Q function 없이 V function만 사용
 
 **적용 데이터셋**:
 - CodeContests (3.7M samples: correct 1.75M + incorrect 1.94M)

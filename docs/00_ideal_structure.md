@@ -53,12 +53,14 @@ WMTP 리팩토링 프로젝트는 `wmtp_research_proposal.md`에 정의된 목�
   - Binary reward 특성을 활용하여 whitening 없이 TD error 절대값 의미 유지
   - 각 토큰이 독립적으로 가중치를 받아 suboptimal data도 안전하게 학습 가능
   - 참고: TD error weighting (outcome-based reward for LLMs)
-- **Value Head 품질 관리**:
+- **Value Function 학습 (Probabilistic Value Learning)**:
+  - **Stage 1**: V(s_t) = P(Success | s_t) 학습 (γ=1.0, undiscounted Monte Carlo)
+  - **원리**: 모든 토큰에 R_terminal 부여, 배치 학습으로 E[R | s_t] = P(Success | s_t) 자동 수렴
+  - **이론**: MSE loss 최적해 = 조건부 기대값 (T-PPO/EGAE 2025, unbiased estimation)
   - Meta 모델 hidden state는 `norm` 적용 후 Value Head에 전달한다.
-  - Value loss 클리핑(`value_clip=0.2`)과 drift 방지용 EMA/anchor 손실을 병행한다.
 - **Reward 스케일**: Binary reward [0,1] 고정 (정규화 불필요). TD error 자연 bounded [-1,1]로 배치 간 안정성 확보.
 - **Critic Continual Learning** (PPO Best Practice):
-  - **Stage2에서 Value Loss를 Auxiliary Loss로 추가**: Policy 학습 중 critic도 지속 학습
+  - **Stage 2에서 Value Loss를 Auxiliary Loss로 추가**: Policy 학습 중 critic도 지속 학습
   - **Loss 구조**: `total_loss = weighted_ce_loss + value_coef * value_loss`
   - **Value Coefficient**: 0.5 (Stable Baselines3 표준) 또는 1.0 (HuggingFace TRL)
   - **Value Loss Clipping**: MSE 또는 Huber loss에 clipping 적용 (clip_range=0.2)
