@@ -435,8 +435,8 @@ def _create_dataloaders(
 
 **EC2 MLflow Tracking Server**:
 - URI: `http://13.50.240.176` (Port 80, Basic Auth)
-- 인증: `MLFLOW_TRACKING_USERNAME=wmtp_admin`, `MLFLOW_TRACKING_PASSWORD=wmtp_secure_2025`
-- 위치: `.env.example` 참고
+- 인증: 환경변수 `MLFLOW_TRACKING_USERNAME`, `MLFLOW_TRACKING_PASSWORD` 필요
+- 설정: 프로젝트 루트의 `.env` 파일에 설정 (`.env.example` 참고)
 
 **S3 Artifact Storage**:
 - Bucket: `s3://wmtp/mlflow-artifacts`
@@ -694,18 +694,27 @@ mlflow:
   s3_artifacts: "s3://wmtp/mlflow-artifacts"  # S3 Artifact Storage
 ```
 
-#### 환경변수 설정 (.env 파일)
+#### 환경변수 설정
+
+프로젝트 루트에 `.env` 파일을 생성하고 다음 환경변수를 설정합니다:
 
 ```bash
-# AWS S3 Credentials
-AWS_ACCESS_KEY_ID=<your-key>
-AWS_SECRET_ACCESS_KEY=<your-secret>
+# .env 파일 예시 (.env.example 참고)
+
+# AWS S3 Credentials (MLflow Artifact Storage)
+AWS_ACCESS_KEY_ID=your_aws_access_key_id
+AWS_SECRET_ACCESS_KEY=your_aws_secret_access_key
 AWS_DEFAULT_REGION=us-west-2
 
-# MLflow EC2 Server Authentication
-MLFLOW_TRACKING_USERNAME=wmtp_admin
-MLFLOW_TRACKING_PASSWORD=wmtp_secure_2025
+# MLflow EC2 Server Authentication (Basic Auth)
+MLFLOW_TRACKING_USERNAME=your_mlflow_username
+MLFLOW_TRACKING_PASSWORD=your_mlflow_password
+
+# Hugging Face 인증 (모델 다운로드용)
+HF_TOKEN=your_huggingface_token_here
 ```
+
+**주의**: `.env` 파일은 `.gitignore`에 포함되어 Git에 커밋되지 않습니다. 실제 credential 값은 `.env.example`을 복사하여 `.env`에 설정하세요.
 
 #### 검증 기준
 - [ ] MLflow EC2 서버 연결 성공 (Basic Auth)
