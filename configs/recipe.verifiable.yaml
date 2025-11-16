@@ -31,21 +31,15 @@ training:
     num_epochs: 3
     warmup_steps: 100
 
-    # Critic Continual Learning (PPO Best Practice)
-    value_loss:
-      enabled: true
-      coefficient: 0.5
-      clip_range: 0.2
+    # Weighted MTP 설정
+    beta: 0.9  # Exponential weighting temperature (IQL/AWR 방식)
+    value_coef: 0.5  # Value loss coefficient (Critic Continual Learning)
+    max_grad_norm: 0.5  # Gradient clipping
+    loss_type: mse  # Value loss type (mse or huber)
 
-    # TD error 안정화
-    value_weighting:
-      gae_gamma: 0.99
-      gae_lambda: 0.95
-      td_error_normalization: zscore
-      weight_temperature: 1.0
-      weight_clip_min: 0.1
-      weight_clip_max: 5.0
-      entropy_floor: 0.01
+    # Weight clipping 범위
+    weight_clip_min: 0.1
+    weight_clip_max: 5.0
 
 evaluation:
   metrics: [loss, perplexity, td_error_mean, td_error_std, weight_entropy, value_loss, value_explained_variance]

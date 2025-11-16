@@ -18,12 +18,16 @@ override:
 
   training:
     stage1:
-      num_epochs: 0.1
+      n_epochs: 0.1
+      learning_rate: 1.0e-4
       batch_size: 1
     stage2:
-      num_epochs: 0.1
+      n_epochs: 0.2
+      learning_rate: 1.0e-5
       batch_size: 1
       gradient_accumulation_steps: 1
+      beta: 0.9
+      value_coef: 0.5
 
   runtime:
     device: mps

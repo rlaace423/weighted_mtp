@@ -99,19 +99,21 @@ class AlpacaDataCollator:
         """배치를 토큰화하고 loss masking 적용
 
         Args:
-            batch: 샘플 리스트, 각 샘플은 instruction, input, output 키 포함
+            batch: 샘플 리스트, 각 샘플은 instruction, input, output, is_correct 키 포함
 
         Returns:
-            토큰화된 배치 (input_ids, attention_mask, labels)
+            토큰화된 배치 (input_ids, attention_mask, labels, is_correct)
         """
         batch_input_ids = []
         batch_attention_mask = []
         batch_labels = []
+        batch_is_correct = []
 
         for sample in batch:
             instruction = sample["instruction"]
             input_text = sample.get("input", "")
             output = sample["output"]
+            is_correct = sample.get("is_correct", True)  # 기본값 True (backward compatibility)
 
             # 1. Instruction + Input 부분만 토큰화 (output 및 "### Response:" 제외)
             # 이를 통해 prompt 길이를 정확히 계산
@@ -153,10 +155,12 @@ class AlpacaDataCollator:
             batch_input_ids.append(input_ids)
             batch_attention_mask.append(attention_mask)
             batch_labels.append(labels)
+            batch_is_correct.append(1.0 if is_correct else 0.0)
 
         # 4. 배치로 묶기
         return {
             "input_ids": torch.stack(batch_input_ids),  # (batch_size, seq_len)
             "attention_mask": torch.stack(batch_attention_mask),  # (batch_size, seq_len)
             "labels": torch.stack(batch_labels),  # (batch_size, seq_len)
+            "is_correct": torch.tensor(batch_is_correct, dtype=torch.float32),  # (batch_size,)
         }

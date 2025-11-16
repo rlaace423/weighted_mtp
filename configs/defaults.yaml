@@ -95,3 +95,29 @@ data:
             medium: 0.5
             high: 0.4
       seed: 42
+
+# 학습 파이프라인 설정 (Phase 5)
+training:
+  # Stage 1: Value Head Pretrain
+  stage1:
+    n_epochs: 0.5
+    learning_rate: 1.0e-4
+    loss_type: mse  # mse or huber
+
+  # Stage 2: Weighted Training with Critic Continual Learning
+  stage2:
+    n_epochs: 2.5
+    learning_rate: 1.0e-5
+
+    # Weighted MTP 핵심 인자 (IQL/AWR 방식)
+    beta: 0.9  # Exponential weighting temperature (낮을수록 집중도 높음)
+    value_coef: 0.5  # Value loss coefficient (Critic Continual Learning)
+    max_grad_norm: 0.5  # Gradient clipping (안정성)
+    loss_type: mse  # Value loss type (mse or huber)
+
+    # Weight clipping (보수적 안정화)
+    weight_clip_min: 0.1
+    weight_clip_max: 5.0
+
+  # Checkpoint 저장
+  save_checkpoint_every: 1  # epoch마다 저장

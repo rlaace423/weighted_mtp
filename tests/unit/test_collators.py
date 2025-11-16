@@ -95,6 +95,7 @@ class TestAlpacaDataCollator:
             "instruction": "Add two numbers.",
             "input": "",
             "output": "def add(a,b): return a+b",
+            "is_correct": True,
         }
 
         batch = collator([sample])
@@ -103,6 +104,10 @@ class TestAlpacaDataCollator:
         assert batch["input_ids"].shape == (1, 512)
         assert batch["attention_mask"].shape == (1, 512)
         assert batch["labels"].shape == (1, 512)
+        assert batch["is_correct"].shape == (1,)
+
+        # is_correct 값 검증
+        assert batch["is_correct"][0] == 1.0
 
         labels = batch["labels"][0]
 
@@ -152,16 +157,19 @@ class TestAlpacaDataCollator:
                 "instruction": "Add two numbers.",
                 "input": "",
                 "output": "def add(a,b): return a+b",
+                "is_correct": True,
             },
             {
                 "instruction": "Multiply two numbers.",
                 "input": "Example: 2 * 3 = 6",
                 "output": "def mul(a,b): return a*b",
+                "is_correct": False,
             },
             {
                 "instruction": "Check if number is even.",
                 "input": "",
                 "output": "def is_even(n): return n % 2 == 0",
+                "is_correct": True,
             },
         ]
 
@@ -171,6 +179,12 @@ class TestAlpacaDataCollator:
         assert batch["input_ids"].shape == (3, 256)
         assert batch["attention_mask"].shape == (3, 256)
         assert batch["labels"].shape == (3, 256)
+        assert batch["is_correct"].shape == (3,)
+
+        # is_correct 값 검증
+        assert batch["is_correct"][0] == 1.0
+        assert batch["is_correct"][1] == 0.0
+        assert batch["is_correct"][2] == 1.0
 
         # 각 샘플이 독립적으로 마스킹되었는지 확인
         for i in range(3):
@@ -236,6 +250,7 @@ class TestMaskingConsistency:
             "instruction": "Task",
             "input": "Input",
             "output": "Output",
+            "is_correct": True,
         }
 
         batch = collator([sample])
@@ -253,6 +268,7 @@ class TestMaskingConsistency:
             "instruction": "Test",
             "input": "",
             "output": "Result",
+            "is_correct": True,
         }
 
         batch1 = collator([sample])
@@ -262,3 +278,20 @@ class TestMaskingConsistency:
         assert torch.equal(batch1["input_ids"], batch2["input_ids"])
         assert torch.equal(batch1["attention_mask"], batch2["attention_mask"])
         assert torch.equal(batch1["labels"], batch2["labels"])
+        assert torch.equal(batch1["is_correct"], batch2["is_correct"])
+
+    def test_is_correct_backward_compatibility(self, tokenizer):
+        """is_correct 필드가 없을 때 기본값 True 검증"""
+        collator = AlpacaDataCollator(tokenizer, max_length=256)
+
+        sample = {
+            "instruction": "Test",
+            "input": "",
+            "output": "Result",
+            # is_correct 생략
+        }
+
+        batch = collator([sample])
+
+        # 기본값 True (1.0)
+        assert batch["is_correct"][0] == 1.0
