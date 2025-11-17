@@ -1,0 +1,76 @@
+name: weighted-mtp-verifiable-4gpu
+description: Verifiable WMTP A100 4-GPU 프로덕션 학습 (TD Error Weighting)
+tags:
+  - weighted-mtp
+  - verifiable
+  - td-weighting
+  - a100
+  - 4gpu
+  - production
+resources:
+  cluster: vessl-gcp-oregon
+  preset: gpu-a100-large-spot
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+import:
+  /workspace:
+    git:
+      url: github.com/wooshikwon/weighted_mtp.git
+      ref: main
+  /workspace/storage/models_v2: volume://weighted-mtp-models
+  /workspace/storage/datasets_v2: volume://weighted-mtp-datasets
+  /workspace/storage/checkpoints: volume://weighted-mtp-checkpoints
+env:
+  MLFLOW_TRACKING_USERNAME: "{{MLFLOW_TRACKING_USERNAME}}"
+  MLFLOW_TRACKING_PASSWORD: "{{MLFLOW_TRACKING_PASSWORD}}"
+  AWS_ACCESS_KEY_ID: "{{AWS_ACCESS_KEY_ID}}"
+  AWS_SECRET_ACCESS_KEY: "{{AWS_SECRET_ACCESS_KEY}}"
+  AWS_DEFAULT_REGION: "{{AWS_DEFAULT_REGION}}"
+  HF_TOKEN: "{{HF_TOKEN}}"
+  PYTHONUNBUFFERED: "1"
+  TOKENIZERS_PARALLELISM: "false"
+  NCCL_DEBUG: "INFO"
+  CRITIC_CHECKPOINT: "{{CRITIC_CHECKPOINT}}"
+run:
+  - workdir: /workspace
+    command: |
+      set -e
+
+      echo "=== 시스템 패키지 설치 ==="
+      apt-get update && apt-get install -y curl git
+
+      echo "=== uv 설치 ==="
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      export PATH="$HOME/.local/bin:$PATH"
+      uv --version
+
+      echo "=== Python 의존성 설치 ==="
+      uv sync --frozen
+
+      echo "=== GPU 정보 확인 ==="
+      nvidia-smi
+
+      echo "=== Storage Volume 확인 ==="
+      echo "Models:"
+      ls -lh /workspace/storage/models_v2/ | head -10
+      echo "Datasets:"
+      ls -lh /workspace/storage/datasets_v2/ | head -10
+      echo "Checkpoints:"
+      ls -lh /workspace/storage/checkpoints/ | head -10
+
+      echo "=== Critic Checkpoint 확인 ==="
+      if [ -z "$CRITIC_CHECKPOINT" ]; then
+        echo "경고: CRITIC_CHECKPOINT 환경변수가 설정되지 않았습니다"
+        echo "기본값 사용: storage/checkpoints/critic/critic-pretrain/checkpoint_best.pt"
+        CRITIC_CHECKPOINT="storage/checkpoints/critic/critic-pretrain/checkpoint_best.pt"
+      fi
+      echo "Critic checkpoint: $CRITIC_CHECKPOINT"
+      ls -lh "$CRITIC_CHECKPOINT" || echo "경고: Checkpoint 파일이 존재하지 않습니다"
+
+      echo "=== Verifiable WMTP 학습 시작 (4-GPU Distributed) ==="
+      torchrun \
+        --nproc_per_node=4 \
+        --nnodes=1 \
+        --node_rank=0 \
+        -m weighted_mtp train \
+        --config configs/verifiable/verifiable.yaml \
+        --override experiment.critic_checkpoint="$CRITIC_CHECKPOINT"
