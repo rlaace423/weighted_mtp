@@ -19,4 +19,4 @@ def storage_root(project_root: Path) -> Path:
 @pytest.fixture
 def micro_model_path(storage_root: Path) -> Path:
     """Micro MTP 모델 경로"""
-    return storage_root / "models_v2" / "micro-mtp"
+    return storage_root / "models/micro-mtp"

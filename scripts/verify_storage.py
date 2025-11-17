@@ -40,7 +40,7 @@ from safetensors import safe_open
 
 MODELS_TO_VERIFY = {
     "meta-llama-mtp": {
-        "base_dir": "storage/models_v2/meta-llama-mtp",
+        "base_dir": "storage/models/meta-llama-mtp",
         "required_files": [
             "safetensors/model.safetensors",
             "safetensors/SHA256SUMS",
@@ -55,7 +55,7 @@ MODELS_TO_VERIFY = {
         ],
     },
     "ref-sheared-llama-2.7b": {
-        "base_dir": "storage/models_v2/ref-sheared-llama-2.7b",
+        "base_dir": "storage/models/ref-sheared-llama-2.7b",
         "required_files": [
             "safetensors/model.safetensors",
             "safetensors/SHA256SUMS",
@@ -67,7 +67,7 @@ MODELS_TO_VERIFY = {
         ],
     },
     "micro-mtp": {
-        "base_dir": "storage/models_v2/micro-mtp",
+        "base_dir": "storage/models/micro-mtp",
         "required_files": [
             "safetensors/model.safetensors",
             "safetensors/SHA256SUMS",

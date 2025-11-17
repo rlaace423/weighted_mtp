@@ -136,7 +136,7 @@ def extract_dataset_metadata(
         dataset_dir = base_dir / f"{dataset_name}_small"
         suffix = "_small"
     else:
-        base_dir = Path("storage/datasets_v2")
+        base_dir = Path("storage/datasets")
         dataset_dir = base_dir / dataset_name / "processed"
         suffix = ""
 

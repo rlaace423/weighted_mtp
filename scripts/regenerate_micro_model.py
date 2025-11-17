@@ -19,7 +19,7 @@ from weighted_mtp.models.meta_mtp import ModelArgs, Transformer
 def regenerate_micro_model():
     """Micro 모델을 Pure PyTorch 구조로 재생성"""
 
-    micro_dir = Path("storage/models_v2/micro-mtp")
+    micro_dir = Path("storage/models/micro-mtp")
 
     print("=" * 60)
     print("Micro 모델 Pure PyTorch 구조 재생성")

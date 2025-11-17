@@ -23,7 +23,7 @@ def create_dummy_checkpoint(checkpoint_dir: Path) -> Path:
 
     # Micro 모델 로드
     model = MetaLlamaMTPAdapter.from_pretrained(
-        model_path="storage/models_v2/micro-mtp",
+        model_path="storage/models/micro-mtp",
         device=torch.device("cpu"),
         initialize_value_head=False,
     )
@@ -40,7 +40,7 @@ def create_dummy_checkpoint(checkpoint_dir: Path) -> Path:
         "val_metrics": {"val_loss": 2.8},
         "config": {
             "model": {
-                "path": "storage/models_v2/micro-mtp"
+                "path": "storage/models/micro-mtp"
             }
         },
     }
@@ -65,7 +65,7 @@ def test_evaluation_pipeline_micro_mtp():
     checkpoint_path = create_dummy_checkpoint(checkpoint_dir)
 
     # humaneval 데이터셋 존재 확인
-    dataset_path = Path("storage/datasets_v2/humaneval/processed/test.jsonl")
+    dataset_path = Path("storage/datasets/humaneval/processed/test.jsonl")
     if not dataset_path.exists():
         pytest.skip(f"Dataset not found: {dataset_path}")
 

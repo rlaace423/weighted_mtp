@@ -31,11 +31,17 @@ def load_dataset(
     difficulty_weights: Optional[dict] = None,
     difficulty_bins: Optional[dict] = None,
     seed: int = 42,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> Dataset:
-    """JSONL 파일을 메타데이터 기반으로 효율적 로딩
+    """JSONL 파일을 메타데이터 기반으로 효율적 로딩 (Rank-aware 분산)
 
     메타데이터 파일을 먼저 읽어 필요한 샘플의 인덱스를 계산한 후,
     JSONL 파일에서 해당 라인만 선택적으로 읽습니다.
+
+    분산 환경에서 각 GPU가 자기 담당 샘플만 로드합니다.
+    재현성을 위해 모든 rank가 동일한 시드로 전체 인덱스를 계산한 후,
+    rank::world_size 패턴으로 서브셋을 선택합니다.
 
     샘플링 전략은 Config 파라미터에 의해 자동 결정됩니다:
     - difficulty_weights가 있으면 → Difficulty-based curriculum learning
@@ -46,15 +52,17 @@ def load_dataset(
     Args:
         dataset_name: 데이터셋 이름 (codecontests, mbpp, humaneval)
         split: 데이터 스플릿 (train, validation, test)
-        n_samples: 샘플링할 샘플 수 (효율적 샘플링, 전체 데이터 로드 불필요)
+        n_samples: 샘플링할 샘플 수 (전체 크기, 분산 환경에서는 자동 분할)
         balance_correct: is_correct 균형 샘플링 여부
         correct_ratio: correct 샘플 비율 (기본 0.5)
         difficulty_weights: 난이도별 가중치 (Difficulty-based sampling용)
         difficulty_bins: 난이도 구간 정의 (Difficulty-based sampling용)
         seed: 랜덤 시드
+        rank: 현재 프로세스의 global rank (기본: 0)
+        world_size: 전체 프로세스 수 (기본: 1)
 
     Returns:
-        Dataset
+        Dataset (분산 환경에서는 1/world_size 크기)
 
     Examples:
         >>> # Critic: Balanced correct/incorrect (50:50)
@@ -101,8 +109,8 @@ def load_dataset(
 
     logger.info(f"메타데이터 기반 샘플링 시작: {dataset_name}/{split}")
 
-    # 1. 메타데이터로 인덱스 계산 (Config 파라미터 기반 자동 전략 결정)
-    indices = _compute_sampling_indices_from_metadata(
+    # 1. 전체 샘플링 인덱스 계산 (모든 rank 동일, 재현성 보장)
+    all_indices = _compute_sampling_indices_from_metadata(
         metadata=metadata,
         n_samples=n_samples,
         balance_correct=balance_correct,
@@ -112,7 +120,18 @@ def load_dataset(
         seed=seed,
     )
 
-    # 2. 해당 인덱스의 라인만 JSONL에서 읽기
+    # 2. Rank 담당 서브셋 필터링 (분산 학습)
+    if world_size > 1:
+        rank_indices = all_indices[rank::world_size]
+        logger.info(
+            f"[Rank {rank}/{world_size}] 전체 {len(all_indices):,} 샘플 중 "
+            f"{len(rank_indices):,} 샘플 로드 (분산 학습)"
+        )
+    else:
+        rank_indices = all_indices
+        logger.info(f"메타데이터 기반 샘플링 완료: {len(rank_indices):,} 인덱스 (로컬 환경)")
+
+    # 3. 해당 인덱스의 라인만 JSONL에서 읽기
     data_files = _get_dataset_paths(dataset_name)
     if split not in data_files:
         raise ValueError(
@@ -121,15 +140,12 @@ def load_dataset(
         )
 
     jsonl_path = Path(data_files[split])
-    samples = _read_jsonl_by_indices(jsonl_path, indices)
+    samples = _read_jsonl_by_indices(jsonl_path, rank_indices)
 
-    # 3. HuggingFace Dataset으로 변환
+    # 4. HuggingFace Dataset으로 변환
     dataset = Dataset.from_list(samples)
 
-    logger.info(
-        f"메타데이터 기반 로딩 완료: {len(dataset)} 샘플 "
-        f"(메모리 효율적)"
-    )
+    logger.info(f"데이터셋 로드 완료: {len(dataset):,} 샘플")
 
     return dataset
 
@@ -143,7 +159,7 @@ def _get_dataset_paths(dataset_name: str) -> dict[str, str]:
     Returns:
         스플릿별 JSONL 파일 경로 딕셔너리
     """
-    base_dir = Path("storage/datasets_v2")
+    base_dir = Path("storage/datasets")
     dataset_dir = base_dir / dataset_name / "processed"
 
     if not dataset_dir.exists():
@@ -184,7 +200,7 @@ def _load_metadata(
     Returns:
         메타데이터 리스트 또는 None (파일이 없는 경우)
     """
-    base_dir = Path("storage/datasets_v2")
+    base_dir = Path("storage/datasets")
     dataset_dir = base_dir / dataset_name / "processed"
 
     if not dataset_dir.exists():
@@ -659,7 +675,7 @@ def load_evaluation_dataset(
         dict_keys(['instruction', 'input', 'output', 'task_id', 'metadata'])
     """
     # 데이터셋 경로 구성
-    dataset_dir = Path("storage/datasets_v2") / dataset_name / "processed"
+    dataset_dir = Path("storage/datasets") / dataset_name / "processed"
     jsonl_path = dataset_dir / f"{split}.jsonl"
 
     if not jsonl_path.exists():

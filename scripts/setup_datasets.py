@@ -29,20 +29,20 @@ from datasets import load_dataset
 DATASET_CONFIGS = {
     "codecontests": {
         "repo": "deepmind/code_contests",
-        "base_dir": "storage/datasets_v2/codecontests",
+        "base_dir": "storage/datasets/codecontests",
         "splits": ["train", "valid", "test"],
         "small_sizes": {"train": 100, "valid": 32, "test": 32},
     },
     "mbpp": {
         "repo": "google-research-datasets/mbpp",
         "config": "full",  # "full" or "sanitized"
-        "base_dir": "storage/datasets_v2/mbpp",
+        "base_dir": "storage/datasets/mbpp",
         "splits": ["train", "validation", "test"],
         "small_sizes": {"train": 100, "validation": 32, "test": 32},
     },
     "humaneval": {
         "repo": "openai/openai_humaneval",
-        "base_dir": "storage/datasets_v2/humaneval",
+        "base_dir": "storage/datasets/humaneval",
         "splits": ["test"],  # HumanEval only has test split
         "small_sizes": {"test": 32},
     },
@@ -64,7 +64,7 @@ class DatasetSetup:
         self.max_tokens = max_tokens
 
         # Tokenizer 로딩
-        tokenizer_path = Path("storage/models_v2/meta-llama-mtp/tokenizer/tokenizer.model")
+        tokenizer_path = Path("storage/models/meta-llama-mtp/tokenizer/tokenizer.model")
         if tokenizer_path.exists():
             self.tokenizer = spm.SentencePieceProcessor()
             self.tokenizer.load(str(tokenizer_path))

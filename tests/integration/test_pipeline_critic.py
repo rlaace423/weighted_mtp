@@ -51,12 +51,18 @@ def test_critic_pipeline_micro_mtp():
         },
     }
 
+    # Config 로드 및 준비
+    defaults = OmegaConf.load("configs/defaults.yaml")
+    config = OmegaConf.load(config_path)
+    config = OmegaConf.merge(defaults, config)
+
+    # Overrides 적용
+    override_config = OmegaConf.create(override_params)
+    config = OmegaConf.merge(config, override_config)
+
     # 실행
     try:
-        final_metrics, best_checkpoint_path = run_critic_training(
-            config_path=config_path,
-            **override_params
-        )
+        final_metrics, best_checkpoint_path = run_critic_training(config)
 
         # 검증
         assert final_metrics is not None, "Final metrics should not be None"

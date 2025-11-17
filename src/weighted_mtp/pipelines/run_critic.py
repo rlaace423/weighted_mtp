@@ -13,12 +13,12 @@ from typing import Any
 import mlflow
 import torch
 from omegaconf import OmegaConf, DictConfig
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 from weighted_mtp.core.env import ensure_env_loaded
 from weighted_mtp.core.logging import setup_logging
-from weighted_mtp.data import AlpacaDataCollator, load_dataset
+from weighted_mtp.data.dataloader import create_dataloader
 from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
 from weighted_mtp.models.tokenizer_utils import load_tokenizer_from_config
 from weighted_mtp.utils import (
@@ -42,7 +42,6 @@ from weighted_mtp.runtime import (
     wrap_model_ddp,
     unwrap_model,
     all_reduce_scalar,
-    create_distributed_sampler,
     barrier,
 )
 
@@ -64,89 +63,6 @@ def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
     return adapter
 
 
-
-
-def create_dataloader(
-    dataset_path: str,
-    tokenizer: AutoTokenizer,
-    batch_size: int,
-    max_length: int,
-    n_samples: int | None,
-    balance_correct: bool,
-    correct_ratio: float,
-    difficulty_weights: dict | None,
-    difficulty_bins: dict | None,
-    seed: int,
-    shuffle: bool = True,
-) -> tuple[DataLoader, DistributedSampler | None]:
-    """DataLoader 생성 (분산 학습 지원)
-
-    Args:
-        dataset_path: 데이터셋 경로
-        tokenizer: Tokenizer
-        batch_size: 배치 크기
-        max_length: 최대 시퀀스 길이
-        n_samples: 샘플 수
-        balance_correct: is_correct 균형 여부
-        correct_ratio: correct 샘플 비율
-        difficulty_weights: 난이도 가중치 (None for Critic)
-        difficulty_bins: 난이도 구간 (None for Critic)
-        seed: 시드
-        shuffle: 셔플 여부
-
-    Returns:
-        (DataLoader, DistributedSampler or None)
-        분산 환경에서는 DistributedSampler 반환, 로컬 환경에서는 None 반환
-    """
-    # 데이터셋 이름 및 스플릿 추출
-    dataset_path_obj = Path(dataset_path)
-    dataset_name = dataset_path_obj.parent.parent.name
-    split_file = dataset_path_obj.name
-
-    if "train" in split_file:
-        split = "train"
-    elif "valid" in split_file or "validation" in split_file:
-        split = "validation"
-    else:
-        split = "test"
-
-    # 데이터셋 로드 (Config-driven 샘플링)
-    dataset = load_dataset(
-        dataset_name=dataset_name,
-        split=split,
-        n_samples=n_samples,
-        balance_correct=balance_correct,
-        correct_ratio=correct_ratio,
-        difficulty_weights=difficulty_weights,
-        difficulty_bins=difficulty_bins,
-        seed=seed,
-    )
-
-    # Collator 생성
-    collator = AlpacaDataCollator(
-        tokenizer=tokenizer,
-        max_length=max_length,
-    )
-
-    # DistributedSampler 생성 (분산 환경에서만)
-    sampler = create_distributed_sampler(
-        dataset,
-        shuffle=shuffle,
-        seed=seed,
-        drop_last=False,
-    )
-
-    # DataLoader 생성
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        sampler=sampler,
-        shuffle=(sampler is None),  # sampler 있으면 shuffle 비활성화
-        collate_fn=collator,
-        num_workers=0,
-    )
-
-    return dataloader, sampler
 
 
 def validate_critic(
@@ -430,7 +346,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         logger.info(f"Train: {config.dataset.train}")
         logger.info(f"Validation: {config.dataset.validation}")
 
-        train_loader, train_sampler = create_dataloader(
+        train_loader = create_dataloader(
             dataset_path=config.dataset.train,
             tokenizer=tokenizer,
             batch_size=config.training.batch_size,
@@ -447,7 +363,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         # Validation 샘플 수: train의 10% 또는 최소 100개
         val_n_samples = max(100, config.data_sampling.n_samples // 10)
 
-        val_loader, val_sampler = create_dataloader(
+        val_loader = create_dataloader(
             dataset_path=config.dataset.validation,
             tokenizer=tokenizer,
             batch_size=config.training.batch_size,
@@ -515,10 +431,6 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             batches_this_period = target_batches - batch_count
 
             logger.info(f"--- Training to epoch {target_epoch:.2f} ---")
-
-            # DistributedSampler epoch 설정 (재현성 유지하면서 shuffle)
-            if train_sampler is not None:
-                train_sampler.set_epoch(int(target_epoch))
 
             # Throughput tracking 시작
             throughput_tracker.start_epoch()
@@ -640,10 +552,6 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             # Validation 실행 (epoch 경계에서)
             logger.info(f"--- Validation at epoch {current_epoch:.2f} ---")
-
-            # Validation sampler epoch 설정
-            if val_sampler is not None:
-                val_sampler.set_epoch(int(current_epoch))
 
             val_metrics = validate_critic(
                 adapter=adapter,

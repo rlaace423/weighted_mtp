@@ -244,8 +244,8 @@ image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 ```
 /workspace/
   ├── storage/
-  │   ├── models_v2/      → volume://weighted-mtp-models
-  │   ├── datasets_v2/    → volume://weighted-mtp-datasets
+  │   ├── models/      → volume://weighted-mtp-models
+  │   ├── datasets/    → volume://weighted-mtp-datasets
   │   └── checkpoints/    → volume://weighted-mtp-checkpoints
   ├── configs/
   ├── src/
@@ -357,7 +357,7 @@ vessl volume delete weighted-mtp-models
 vessl volume create weighted-mtp-models
 
 # 개별 파일 업로드 (큰 파일 분리)
-cd storage/models_v2/meta-llama-mtp
+cd storage/models/meta-llama-mtp
 vessl volume upload weighted-mtp-models . meta-llama-mtp/
 ```
 
@@ -458,9 +458,9 @@ ls /workspace/storage/checkpoints/critic/critic-pretrain/
 
 ```yaml
 checkpoint:
-  save_checkpoint_every: 1.0  # 1 epoch마다 저장
+  save_checkpoint_every: 0.5  # 1 epoch마다 저장
   save_best: true             # Best checkpoint 자동 저장
-  save_total_limit: 3         # 최대 3개만 보관
+  save_total_limit: 2         # 최대 3개만 보관
 ```
 
 ### 실행 시간 제한

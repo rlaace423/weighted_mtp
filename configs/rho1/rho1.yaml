@@ -22,8 +22,8 @@ experiment:
 models:
   policy:
     name: meta-llama-mtp
-    path: storage/models_v2/meta-llama-mtp
-    tokenizer_path: storage/models_v2/meta-llama-mtp/tokenizer
+    path: storage/models/meta-llama-mtp
+    tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     params:
       dim: 4096
       n_layers: 32
@@ -37,26 +37,47 @@ models:
   # Rho-1 Reference model
   reference:
     name: ref-sheared-llama-2.7b
-    path: storage/models_v2/ref-sheared-llama-2.7b
+    path: storage/models/ref-sheared-llama-2.7b
     dtype: float16
 
 # 데이터셋 설정
 dataset:
   name: codecontests
-  train: storage/datasets_v2/codecontests/processed/train.jsonl
-  validation: storage/datasets_v2/codecontests/processed/valid.jsonl
+  train: storage/datasets/codecontests/processed/train.jsonl
+  validation: storage/datasets/codecontests/processed/valid.jsonl
   max_length: 2048
 
 # 데이터 샘플링
 data_sampling:
-  n_samples: 100000
+  n_samples: 150000
   balance_correct: false
   correct_ratio: 1.0  # Rho-1은 정답만 학습
+  curriculum_learning: true
+  difficulty_bins:
+    low: [1, 3]
+    medium: [4, 7]
+    high: [8, 11]
+  curriculum_schedule:
+    - epoch_range: [0.0, 0.3]
+      difficulty_weights:
+        low: 0.7
+        medium: 0.3
+        high: 0.0
+    - epoch_range: [0.3, 0.7]
+      difficulty_weights:
+        low: 0.3
+        medium: 0.6
+        high: 0.1
+    - epoch_range: [0.7, 1.0]
+      difficulty_weights:
+        low: 0.1
+        medium: 0.5
+        high: 0.4
   seed: 42
 
 # 학습 설정 (A100 4-GPU 최적화)
 training:
-  n_epochs: 2.5
+  n_epochs: 3.0
   batch_size: 4  # Per GPU (effective = 16 with 4 GPUs)
   gradient_accumulation_steps: 4  # Effective batch size = 64
   learning_rate: 1.0e-5
@@ -66,15 +87,15 @@ training:
   temperature: 1.0  # Rho-1 temperature
   k_percent: 0.6  # Top-k threshold
 
-  log_interval: 10
+  log_interval: 1
 
 # 체크포인트
 checkpoint:
   save_dir: storage/checkpoints/rho1/${experiment.name}
-  save_checkpoint_every: 1.0
+  save_checkpoint_every: 0.5
   save_best: true
   save_final: true
-  save_total_limit: 3
+  save_total_limit: 2
 
 # 런타임 설정
 runtime:
@@ -85,8 +106,8 @@ runtime:
 # 스토리지
 storage:
   root: storage
-  models_dir: storage/models_v2
-  datasets_dir: storage/datasets_v2
+  models_dir: storage/models
+  datasets_dir: storage/datasets
   checkpoints_dir: storage/checkpoints
 
 # MLflow 추적

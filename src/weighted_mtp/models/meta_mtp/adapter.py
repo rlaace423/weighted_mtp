@@ -47,7 +47,7 @@ class MetaLlamaMTPAdapter(nn.Module):
         """Pretrained 모델에서 Adapter 로드
 
         Args:
-            model_path: 모델 디렉터리 경로 (storage/models_v2/meta-llama-mtp 또는 micro-mtp)
+            model_path: 모델 디렉터리 경로 (storage/models/meta-llama-mtp 또는 micro-mtp)
             device: 디바이스 ("cuda", "mps", "cpu", "auto")
             dtype: 데이터 타입 ("float16", "bfloat16", None이면 safetensors 기본값 사용)
             initialize_value_head: Value head 초기화 여부

@@ -47,7 +47,7 @@ python -m weighted_mtp train \
 python -m weighted_mtp train \
   --config configs/baseline/baseline.yaml \
   --override experiment.name=test \
-  --override models.policy.path=storage/models_v2/micro-mtp \
+  --override models.policy.path=storage/models/micro-mtp \
   --override training.learning_rate=5e-5 \
   --override data_sampling.n_samples=1000
 ```
@@ -88,14 +88,14 @@ experiment:
 models:
   policy:
     name: meta-llama-mtp
-    path: storage/models_v2/meta-llama-mtp  # Policy 모델 경로
-    tokenizer_path: storage/models_v2/meta-llama-mtp/tokenizer
+    path: storage/models/meta-llama-mtp  # Policy 모델 경로
+    tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     dtype: float16
 
   # Rho-1 전용 (reference model)
   reference:
     name: ref-sheared-llama-2.7b
-    path: storage/models_v2/ref-sheared-llama-2.7b
+    path: storage/models/ref-sheared-llama-2.7b
     dtype: float16
 ```
 
@@ -108,8 +108,8 @@ models:
 ```yaml
 dataset:
   name: codecontests           # 데이터셋 이름
-  train: storage/datasets_v2/codecontests/processed/train.jsonl
-  validation: storage/datasets_v2/codecontests/processed/valid.jsonl
+  train: storage/datasets/codecontests/processed/train.jsonl
+  validation: storage/datasets/codecontests/processed/valid.jsonl
   max_length: 2048             # 최대 시퀀스 길이
 ```
 
@@ -155,7 +155,7 @@ training:
   gradient_accumulation_steps: 4  # Gradient accumulation
   learning_rate: 1.0e-5        # Learning rate
   max_grad_norm: 0.5           # Gradient clipping
-  log_interval: 10             # 로깅 간격 (steps)
+  log_interval: 1             # 로깅 간격 (steps)
 
   # Verifiable 전용 (TD error weighting)
   beta: 0.9                    # TD error temperature
@@ -184,10 +184,10 @@ training:
 ```yaml
 checkpoint:
   save_dir: storage/checkpoints/baseline/${experiment.name}
-  save_checkpoint_every: 1.0   # 저장 간격 (epochs)
+  save_checkpoint_every: 0.5   # 저장 간격 (epochs)
   save_best: true              # Best checkpoint 저장
   save_final: true             # Final checkpoint 저장
-  save_total_limit: 3          # 최대 보관 개수
+  save_total_limit: 2          # 최대 보관 개수
 ```
 
 ### 3.7 runtime (런타임 설정)
@@ -252,7 +252,7 @@ $ python -m weighted_mtp validate-config --config configs/baseline/baseline.yaml
 ✓ Config 검증 성공: configs/baseline/baseline.yaml
   - Experiment: baseline-mtp
   - Stage: baseline
-  - Model: storage/models_v2/meta-llama-mtp
+  - Model: storage/models/meta-llama-mtp
   - Dataset: codecontests
 ```
 
@@ -274,7 +274,7 @@ python -m weighted_mtp train \
 # 로컬 테스트용 micro 모델 사용
 python -m weighted_mtp train \
   --config configs/baseline/baseline_local.yaml \
-  --override models.policy.path=storage/models_v2/micro-mtp \
+  --override models.policy.path=storage/models/micro-mtp \
   --override data_sampling.n_samples=100
 ```
 
@@ -379,7 +379,7 @@ experiment:
 
 models:
   reference:
-    path: storage/models_v2/ref-sheared-llama-2.7b
+    path: storage/models/ref-sheared-llama-2.7b
 
 data_sampling:
   correct_ratio: 1.0           # 정답만 학습
@@ -408,10 +408,10 @@ python src/weighted_mtp/pipelines/run_rho1.py \
 2. 필수 필드가 config 파일에 존재하는지 확인
 3. 필요 시 다른 stage의 config 예시 참조
 
-**문제**: `경로가 존재하지 않음: storage/models_v2/...`
+**문제**: `경로가 존재하지 않음: storage/models/...`
 
 **해결**:
-1. `ls storage/models_v2/` 실행하여 경로 확인
+1. `ls storage/models/` 실행하여 경로 확인
 2. 모델 다운로드 필요 시 setup 스크립트 실행
 3. `--override models.policy.path=<존재하는_경로>`로 수정
 

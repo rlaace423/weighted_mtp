@@ -27,7 +27,7 @@ def load_tokenizer(model_path: str) -> AutoTokenizer:
     """Tokenizer 로드
 
     Args:
-        model_path: 모델 경로 (예: storage/models_v2/meta-llama-mtp)
+        model_path: 모델 경로 (예: storage/models/meta-llama-mtp)
 
     Returns:
         AutoTokenizer 인스턴스
@@ -35,7 +35,7 @@ def load_tokenizer(model_path: str) -> AutoTokenizer:
     # micro-mtp는 config.json이 RAG로 오인되므로 meta-llama-mtp tokenizer 사용
     model_path_obj = Path(model_path)
     if model_path_obj.name == "micro-mtp":
-        tokenizer_path = Path("storage/models_v2/meta-llama-mtp/tokenizer")
+        tokenizer_path = Path("storage/models/meta-llama-mtp/tokenizer")
     else:
         # Step 1 경험: tokenizer 서브디렉터리 사용
         tokenizer_path = model_path_obj / "tokenizer"

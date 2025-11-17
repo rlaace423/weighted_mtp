@@ -37,7 +37,7 @@ def load_meta_mtp_model(
     """Meta MTP 모델 통합 로딩
 
     Args:
-        model_dir: storage/models_v2/meta-llama-mtp/ 경로
+        model_dir: storage/models/meta-llama-mtp/ 경로
         device: "cuda", "mps", "cpu", "auto"
         dtype: torch.float16 등 (None이면 params.json 기준)
 

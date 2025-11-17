@@ -12,7 +12,7 @@ from weighted_mtp.utils.generation_utils import generate_with_mtp
 def micro_model():
     """Micro MTP 모델 로드"""
     model = MetaLlamaMTPAdapter.from_pretrained(
-        model_path="storage/models_v2/micro-mtp",
+        model_path="storage/models/micro-mtp",
         device="cpu",
         initialize_value_head=False,  # Generation에는 불필요
     )
@@ -25,7 +25,7 @@ def tokenizer():
     """Tokenizer 로드"""
     # SentencePiece 토크나이저 직접 로드
     tokenizer = AutoTokenizer.from_pretrained(
-        "storage/models_v2/meta-llama-mtp/tokenizer",
+        "storage/models/meta-llama-mtp/tokenizer",
         use_fast=False,  # SentencePiece는 slow tokenizer 사용
         legacy=False,
     )

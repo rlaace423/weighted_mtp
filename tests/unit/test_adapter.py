@@ -16,7 +16,7 @@ from weighted_mtp.models.meta_mtp import (
 @pytest.fixture
 def micro_model_dir():
     """Micro 모델 디렉터리"""
-    return Path("storage/models_v2/micro-mtp")
+    return Path("storage/models/micro-mtp")
 
 
 @pytest.fixture

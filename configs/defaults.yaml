@@ -1,0 +1,65 @@
+# 공통 설정 (장비, 스토리지, 모델 파라미터 스냅샷)
+# Stage 분리 파이프라인 아키텍처 기반
+
+project:
+  name: weighted-mtp
+  version: "2.0.0"
+
+storage:
+  root: storage
+  models_dir: storage/models
+  datasets_dir: storage/datasets
+  checkpoints_dir: storage/checkpoints
+
+models:
+  policy:
+    name: meta-llama-mtp
+    path: storage/models/meta-llama-mtp
+    tokenizer_path: storage/models/meta-llama-mtp/tokenizer
+    params:
+      dim: 4096
+      n_layers: 32
+      n_heads: 32
+      n_future_tokens: 4
+      intermediate_size: 11008
+      rope_theta: 10000.0
+      vocab_size: 32000
+    dtype: float16
+
+  reference:
+    name: ref-sheared-llama-2.7b
+    path: storage/models/ref-sheared-llama-2.7b
+    dtype: float16
+    # Tokenizer는 policy 모델(meta-llama-mtp)과 공유
+    tokenizer_shared_with: meta-llama-mtp
+
+  reward:
+    name: starling-rm-7b
+    path: storage/models/starling-rm-7b
+    dtype: bfloat16
+    status: optional
+    
+runtime:
+  device: cuda
+  seed: 42
+  mixed_precision: true
+
+training:
+  log_interval: 1
+  max_grad_norm: 0.5
+  k_percent: 0.6
+
+checkpoint:
+  save_checkpoint_every: 0.5
+  save_best: true
+  save_final: true
+  save_total_limit: 2
+
+mlflow:
+  tracking_uri: "http://13.50.240.176"
+  experiment: "weighted-mtp/production"
+  s3_artifacts: "s3://wmtp/mlflow-artifacts"
+
+logging:
+  level: INFO
+  format: "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"

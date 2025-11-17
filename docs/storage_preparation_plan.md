@@ -20,14 +20,14 @@
 
 ```
 storage/
-├── datasets_v2/
+├── datasets/
 │   ├── codecontests/
 │   │   ├── raw/            # huggingface 원본(JSONL)
 │   │   ├── processed/      # Alpaca 스타일 SFT JSONL
 │   │   └── stats/          # 길이·정확도 통계
 │   ├── mbpp/
 │   └── humaneval/
-├── models_v2/
+├── models/
 │   ├── meta-llama-mtp/
 │   │   ├── raw/            # 7B_1T_4/consolidated.pth, params.json
 │   │   ├── safetensors/    # 변환된 model.safetensors, value_head.safetensors(옵션)
@@ -50,11 +50,11 @@ storage/
 1. **원본 번들 다운로드 (raw/)**
    ```bash
    hf download facebook/multi-token-prediction 7B_1T_4/consolidated.pth \
-     --local-dir storage/models_v2/meta-llama-mtp/raw
+     --local-dir storage/models/meta-llama-mtp/raw
    hf download facebook/multi-token-prediction 7B_1T_4/params.json \
-     --local-dir storage/models_v2/meta-llama-mtp/raw
+     --local-dir storage/models/meta-llama-mtp/raw
    hf download facebook/multi-token-prediction tokenizer.model \
-     --local-dir storage/models_v2/meta-llama-mtp/tokenizer
+     --local-dir storage/models/meta-llama-mtp/tokenizer
    ```
    - `llama/*.py`는 **참고용으로만** `vendor/meta_llama/`에 복사 (아키텍처 검증용)
    - **실제 학습에는 사용하지 않음** (fairscale 의존성, @inference_mode 등 문제)
@@ -70,7 +70,7 @@ storage/
    from weighted_mtp.models.meta_mtp import ModelArgs, Transformer
 
    # params.json 읽기
-   with open("storage/models_v2/meta-llama-mtp/raw/7B_1T_4/params.json") as f:
+   with open("storage/models/meta-llama-mtp/raw/7B_1T_4/params.json") as f:
        params = json.load(f)
 
    # ModelArgs 생성
@@ -90,20 +90,20 @@ storage/
    transformer = Transformer(model_args)
 
    # Meta 원본 weights 로드 (선택적 - 있는 경우)
-   # state_dict = torch.load("storage/models_v2/meta-llama-mtp/raw/7B_1T_4/consolidated.pth", map_location="cpu")
+   # state_dict = torch.load("storage/models/meta-llama-mtp/raw/7B_1T_4/consolidated.pth", map_location="cpu")
    # transformer.load_state_dict(state_dict, strict=True)
 
    # Safetensors 저장 (freqs_cis는 자동 제외됨)
    save_file(
        transformer.state_dict(),
-       "storage/models_v2/meta-llama-mtp/safetensors/model.safetensors",
+       "storage/models/meta-llama-mtp/safetensors/model.safetensors",
        metadata={"dtype": "float16"}
    )
    PY
 
    # params.json 복사
-   cp storage/models_v2/meta-llama-mtp/raw/7B_1T_4/params.json \
-      storage/models_v2/meta-llama-mtp/configs/params.json
+   cp storage/models/meta-llama-mtp/raw/7B_1T_4/params.json \
+      storage/models/meta-llama-mtp/configs/params.json
    ```
 
    **핵심 구현 원칙**:
@@ -360,7 +360,7 @@ uv run python scripts/verify_storage.py --check all --generate-report
 ## 5. 변환 작업 절차
 
 ### 5.1 모델 (Pure PyTorch 기반)
-1. **원본 확보**: Hugging Face에서 `consolidated.pth`, `params.json`, `tokenizer.model`을 `models_v2/<model>/raw/`로 다운로드한다.
+1. **원본 확보**: Hugging Face에서 `consolidated.pth`, `params.json`, `tokenizer.model`을 `models/<model>/raw/`로 다운로드한다.
    - `vendor/meta_llama/`의 레퍼런스 코드는 **참고용**으로만 유지 (아키텍처 검증)
 2. **Pure PyTorch Transformer 생성 및 파생물**
    - Pure PyTorch Transformer 생성 (`src/models/meta_mtp/`)
@@ -486,7 +486,7 @@ uv run python scripts/verify_storage.py --check all --generate-report
 
 2. **파이프라인 연동 확인**:
    - `run_rho1.py`에서 `MetaLlamaMTPAdapter.from_pretrained()` 사용
-   - `configs/defaults.yaml`에서 `storage/models_v2`, `storage/datasets_v2` 경로 참조
+   - `configs/defaults.yaml`에서 `storage/models`, `storage/datasets` 경로 참조
    - `configs/rho1/rho1_local.yaml`에서 Micro 모델 경로 설정
 
 3. **검증 스크립트 구성**:
@@ -498,13 +498,13 @@ uv run python scripts/verify_storage.py --check all --generate-report
 ```
 storage/
 ├── checkpoints/         # 학습 체크포인트 (baseline, critic, rho1, verifiable)
-├── datasets_v2/
+├── datasets/
 │   ├── codecontests/
 │   │   ├── processed/  # train.jsonl, valid.jsonl, test.jsonl, *_metadata.json, schema.json
 │   │   └── stats/      # YYYY-MM-DD_summary.json
 │   ├── mbpp/
 │   └── humaneval/
-└── models_v2/
+└── models/
     ├── meta-llama-mtp/  # Policy model
     ├── ref-sheared-llama-2.7b/  # Reference model
     ├── micro-mtp/       # Local test model

@@ -22,10 +22,10 @@ def tokenizer():
     try:
         from transformers import AutoTokenizer
 
-        tokenizer_path = Path("storage/models_v2/meta-llama-mtp/tokenizer")
+        tokenizer_path = Path("storage/models/meta-llama-mtp/tokenizer")
 
         if not tokenizer_path.exists():
-            pytest.skip("Tokenizer not found: storage/models_v2/meta-llama-mtp/tokenizer")
+            pytest.skip("Tokenizer not found: storage/models/meta-llama-mtp/tokenizer")
 
         tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
 

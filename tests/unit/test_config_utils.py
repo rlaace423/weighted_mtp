@@ -47,11 +47,11 @@ class TestValidateConfigBasic:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "invalid_stage"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": 1,
@@ -73,11 +73,11 @@ class TestValidateConfigValueRanges:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "baseline"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": 1,
@@ -95,11 +95,11 @@ class TestValidateConfigValueRanges:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "baseline"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": 1,
@@ -117,11 +117,11 @@ class TestValidateConfigValueRanges:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "baseline"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": 1,
@@ -139,11 +139,11 @@ class TestValidateConfigValueRanges:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "baseline"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": -1,
@@ -165,11 +165,11 @@ class TestValidateConfigLogicalConsistency:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "baseline"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": 1,
@@ -192,11 +192,11 @@ class TestValidateStageSpecific:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "verifiable"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": 1,
@@ -215,11 +215,11 @@ class TestValidateStageSpecific:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "verifiable"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": 1,
@@ -242,11 +242,11 @@ class TestValidateStageSpecific:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "verifiable"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": 1,
@@ -271,12 +271,12 @@ class TestValidateStageSpecific:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "rho1"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 # reference 누락
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": 1,
@@ -296,11 +296,11 @@ class TestValidateStageSpecific:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "critic"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": 1,
@@ -357,8 +357,8 @@ class TestValidateConfigPathChecks:
                 "models": {"policy": {"path": "/nonexistent/model/path"}},
                 "dataset": {
                     "name": "codecontests",
-                    "train": "storage/datasets_v2/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets_v2/codecontests/processed/valid.jsonl",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
                 },
                 "training": {
                     "n_epochs": 1,
@@ -376,7 +376,7 @@ class TestValidateConfigPathChecks:
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "baseline"},
-                "models": {"policy": {"path": "storage/models_v2/micro-mtp"}},
+                "models": {"policy": {"path": "storage/models/micro-mtp"}},
                 "dataset": {
                     "name": "codecontests",
                     "train": "/nonexistent/train.jsonl",

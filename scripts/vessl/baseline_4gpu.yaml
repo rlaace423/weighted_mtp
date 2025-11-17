@@ -15,9 +15,9 @@ import:
     git:
       url: github.com/wooshikwon/weighted_mtp.git
       ref: main
-  /workspace/storage/models_v2: volume://weighted-mtp-models
-  /workspace/storage/datasets_v2: volume://weighted-mtp-datasets
-  /workspace/storage/checkpoints: volume://weighted-mtp-checkpoints
+  /workspace/storage/models: volume://vessl-storage/models
+  /workspace/storage/datasets: volume://vessl-storage/datasets
+  /workspace/storage/checkpoints: volume://vessl-storage/checkpoints
 env:
   MLFLOW_TRACKING_USERNAME: "{{MLFLOW_TRACKING_USERNAME}}"
   MLFLOW_TRACKING_PASSWORD: "{{MLFLOW_TRACKING_PASSWORD}}"
@@ -49,9 +49,9 @@ run:
 
       echo "=== Storage Volume 확인 ==="
       echo "Models:"
-      ls -lh /workspace/storage/models_v2/ | head -10
+      ls -lh /workspace/storage/models/ | head -10
       echo "Datasets:"
-      ls -lh /workspace/storage/datasets_v2/ | head -10
+      ls -lh /workspace/storage/datasets/ | head -10
 
       echo "=== Baseline MTP 학습 시작 (4-GPU Distributed) ==="
       torchrun \

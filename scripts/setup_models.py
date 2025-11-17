@@ -48,7 +48,7 @@ MODEL_CONFIGS = {
             "tokenizer.model",
         ],
         "format": "single_pth",
-        "base_dir": "storage/models_v2/meta-llama-mtp",
+        "base_dir": "storage/models/meta-llama-mtp",
         "config_source": "raw/7B_1T_4/params.json",
         "config_type": "mtp",
     },
@@ -63,7 +63,7 @@ MODEL_CONFIGS = {
             "tokenizer/tokenizer.json",
         ],
         "format": "sharded",
-        "base_dir": "storage/models_v2/ref-sheared-llama-2.7b",
+        "base_dir": "storage/models/ref-sheared-llama-2.7b",
         "config_source": "raw/reference_model/config.json",
         "config_type": "hf",
     },
@@ -71,7 +71,7 @@ MODEL_CONFIGS = {
         "repo": "berkeley-nest/Starling-RM-7B-alpha",
         "files": ["pytorch_model.bin", "config.json", "tokenizer.model"],
         "format": "single_bin",
-        "base_dir": "storage/models_v2/starling-rm-7b",
+        "base_dir": "storage/models/starling-rm-7b",
         "config_source": "raw/config.json",
         "config_type": "hf",
     },
@@ -465,7 +465,7 @@ class ModelSetup:
                 f"Please run conversion first."
             )
 
-        target_dir = Path(f"storage/models_v2/micro-{model_type}")
+        target_dir = Path(f"storage/models/micro-{model_type}")
         (target_dir / "safetensors").mkdir(parents=True, exist_ok=True)
         (target_dir / "configs").mkdir(parents=True, exist_ok=True)
 

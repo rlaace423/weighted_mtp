@@ -179,8 +179,8 @@ vessl run create \
 
 ## 8. Storage v2와 MLflow 연동 지침
 
-- `storage/models_v2/*`: 모델 버전 변경 시 MLflow run tag `model_version` 업데이트.
-- `storage/datasets_v2/*`: 데이터셋 버전과 checksum을 MLflow params에 로그.
+- `storage/models/*`: 모델 버전 변경 시 MLflow run tag `model_version` 업데이트.
+- `storage/datasets/*`: 데이터셋 버전과 checksum을 MLflow params에 로그.
 - `scripts/sync_to_vessl_storage.py` 실행 시:
   - 업로드 성공 후 MLflow run에 `storage_sync=True` 태그 남김.
   - 문제가 발생하면 run `status`를 `FAILED`로 종료하여 알람 근거 확보.

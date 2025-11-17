@@ -4,8 +4,14 @@
 """
 
 import logging
+import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import boto3
+import mlflow
+from mlflow.tracking import MlflowClient
 
 logger = logging.getLogger(__name__)
 
@@ -14,25 +20,49 @@ s3_upload_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="s3-up
 
 
 def upload_to_s3_async(checkpoint_path: Path, mlflow_enabled: bool) -> None:
-    """비동기로 S3에 checkpoint 업로드
+    """임시 복사본을 생성하여 S3에 안전하게 업로드
 
-    MLflow artifact store를 통해 S3에 업로드
-    학습 루프를 블로킹하지 않음
+    원본 파일을 임시 디렉터리에 복사한 후 업로드하여
+    업로드 중 원본 파일 삭제로 인한 race condition 방지
 
     Args:
         checkpoint_path: 업로드할 checkpoint 경로
         mlflow_enabled: MLflow 사용 여부
+
+    Note:
+        임시 복사본은 업로드 완료 후 자동 삭제
+        원본 파일과 완전히 독립적으로 동작
+        S3에는 원본 파일명으로 저장됨
     """
     if not mlflow_enabled:
         return
 
+    tmp_dir = None
     try:
-        import mlflow
+        # 임시 디렉터리 생성
+        tmp_dir = tempfile.TemporaryDirectory(prefix="checkpoint_upload_")
+        tmp_dir_path = Path(tmp_dir.name)
 
-        mlflow.log_artifact(str(checkpoint_path), "checkpoints")
+        # 원본 파일명 유지하여 복사
+        tmp_checkpoint = tmp_dir_path / checkpoint_path.name
+        shutil.copy2(checkpoint_path, tmp_checkpoint)
+        logger.debug(f"Created temp copy for upload: {tmp_checkpoint}")
+
+        # 임시 복사본을 S3로 업로드
+        mlflow.log_artifact(str(tmp_checkpoint), artifact_path="checkpoints")
+
         logger.info(f"S3 upload complete: {checkpoint_path.name}")
+
     except Exception as e:
         logger.error(f"S3 upload failed: {checkpoint_path.name} - {e}")
+
+    finally:
+        # 임시 디렉터리 정리
+        if tmp_dir is not None:
+            try:
+                tmp_dir.cleanup()
+            except Exception:
+                pass  # cleanup 실패는 무시
 
 
 def cleanup_s3_checkpoints(
@@ -51,9 +81,6 @@ def cleanup_s3_checkpoints(
         save_total_limit: 유지할 최대 개수
     """
     try:
-        import boto3
-        from mlflow.tracking import MlflowClient
-
         client = MlflowClient()
         s3 = boto3.client("s3")
 

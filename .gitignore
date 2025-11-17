@@ -42,9 +42,9 @@ mlflow/
 
 # Storage assets (keep README only)
 storage/models/
-storage/models_v2/
+storage/models/
 storage/datasets/
-storage/datasets_v2/
+storage/datasets/
 storage/datasets_local_small/
 !storage/README.md
 

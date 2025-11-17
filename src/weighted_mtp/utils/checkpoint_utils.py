@@ -193,7 +193,7 @@ def load_checkpoint_for_evaluation(
         # 기본 모델 경로 추정
         config_info = {
             "model": {
-                "path": "storage/models_v2/meta-llama-mtp"  # 기본값
+                "path": "storage/models/meta-llama-mtp"  # 기본값
             }
         }
         logger.warning(

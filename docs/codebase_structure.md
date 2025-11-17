@@ -172,7 +172,7 @@ scripts/
 
 ```
 storage/
-├── models_v2/
+├── models/
 │   ├── meta-llama-mtp/        # 25GB safetensors (Base MTP)
 │   │   ├── configs/
 │   │   │   └── params.json
@@ -187,7 +187,7 @@ storage/
 │   ├── micro-ref/             # 177MB (Rho-1 reference 테스트용)
 │   ├── ref-sheared-llama-2.7b/  # 10GB (Rho-1 reference)
 │   └── starling-rm-7b/        # 25GB (선택적 RM)
-├── datasets_v2/
+├── datasets/
 │   ├── codecontests/
 │   │   └── processed/
 │   │       ├── train.jsonl    # 3.7M samples
@@ -821,7 +821,7 @@ weighted_ce_loss = (ce_loss * weights).sum() / weights.sum()
 #### Meta LLaMA MTP (Base)
 
 ```
-storage/models_v2/meta-llama-mtp/
+storage/models/meta-llama-mtp/
 ├── configs/
 │   └── params.json          # dim=4096, n_layers=32, n_heads=32, n_future_tokens=4
 ├── safetensors/
@@ -844,7 +844,7 @@ storage/models_v2/meta-llama-mtp/
 #### Micro MTP (로컬 테스트)
 
 ```
-storage/models_v2/micro-mtp/
+storage/models/micro-mtp/
 ├── configs/
 │   └── params.json          # dim=512, n_layers=4, vocab=32000
 ├── safetensors/
@@ -862,7 +862,7 @@ storage/models_v2/micro-mtp/
 #### Reference Model (Rho-1)
 
 ```
-storage/models_v2/ref-sheared-llama-2.7b/
+storage/models/ref-sheared-llama-2.7b/
 ├── configs/
 │   └── config.json          # HuggingFace 표준 config
 ├── safetensors/
@@ -876,7 +876,7 @@ storage/models_v2/ref-sheared-llama-2.7b/
 # HuggingFace 표준 인터페이스 사용
 from transformers import AutoModelForCausalLM
 reference_model = AutoModelForCausalLM.from_pretrained(
-    "storage/models_v2/ref-sheared-llama-2.7b",
+    "storage/models/ref-sheared-llama-2.7b",
     torch_dtype=torch.float16,
 )
 ```
@@ -1001,7 +1001,7 @@ uv run python -m weighted_mtp.cli.train \
   --use-micro-model
 
 # 실행 예시
-# - 모델: storage/models_v2/micro-mtp/
+# - 모델: storage/models/micro-mtp/
 # - 배치: 1
 # - Epochs: 0.1
 # - 샘플: 100개

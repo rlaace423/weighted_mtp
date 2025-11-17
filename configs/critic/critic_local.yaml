@@ -17,14 +17,14 @@ experiment:
 models:
   policy:
     name: micro-mtp
-    path: storage/models_v2/micro-mtp
-    tokenizer_path: storage/models_v2/meta-llama-mtp/tokenizer
+    path: storage/models/micro-mtp
+    tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     dtype: float16
 
 dataset:
   name: codecontests
-  train: storage/datasets_v2/codecontests/processed/train.jsonl
-  validation: storage/datasets_v2/codecontests/processed/valid.jsonl
+  train: storage/datasets/codecontests/processed/train.jsonl
+  validation: storage/datasets/codecontests/processed/valid.jsonl
   max_length: 512
 
 data_sampling:
@@ -48,7 +48,7 @@ checkpoint:
   save_checkpoint_every: 0.1
   save_best: true
   save_final: true
-  save_total_limit: 3
+  save_total_limit: 2
 
 runtime:
   device: mps

@@ -6,12 +6,12 @@
 
 ```
 storage/
-├── models_v2/                        # v2 형식 모델 (Phase 1 완료)
+├── models/                        # v2 형식 모델 (Phase 1 완료)
 │   ├── meta-llama-mtp/              # Base model (25GB) ✅
 │   ├── ref-sheared-llama-2.7b/      # Reference model (10GB) ✅
 │   ├── starling-rm-7b/              # Reward model (25GB, optional) ✅
 │   └── micro-mtp/                   # 로컬 테스트용 경량 모델 (50MB) ✅
-├── datasets_v2/                      # v2 형식 데이터셋 ✅
+├── datasets/                      # v2 형식 데이터셋 ✅
 │   ├── codecontests/
 │   │   ├── raw/                     # 원본 JSONL ✅
 │   │   ├── processed/               # 전처리된 데이터 (schema.json 포함) ✅
@@ -24,7 +24,7 @@ storage/
     └── humaneval_small/             # ✅
 ```
 
-## 모델 자산 (models_v2)
+## 모델 자산 (models)
 
 ### meta-llama-mtp
 - **크기**: 25GB
@@ -50,7 +50,7 @@ storage/
 - **용도**: 선택적 Reward Model (Verifiable Critic 기본 사용 안 함)
 - **상태**: optional
 
-## 데이터셋 자산 (datasets_v2)
+## 데이터셋 자산 (datasets)
 
 ### codecontests
 - **샘플 수**: train 3.2M, validation 15K, test 8K
@@ -91,15 +91,15 @@ M3 Mac 등 로컬 환경에서 빠른 테스트를 위한 축소 버전:
 
 ```bash
 # meta-llama-mtp
-cd storage/models_v2/meta-llama-mtp/safetensors
+cd storage/models/meta-llama-mtp/safetensors
 sha256sum -c SHA256SUMS
 
 # ref-sheared-llama-2.7b
-cd storage/models_v2/ref-sheared-llama-2.7b/safetensors
+cd storage/models/ref-sheared-llama-2.7b/safetensors
 sha256sum -c SHA256SUMS
 
 # starling-rm-7b
-cd storage/models_v2/starling-rm-7b/safetensors
+cd storage/models/starling-rm-7b/safetensors
 sha256sum -c SHA256SUMS
 ```
 
@@ -117,7 +117,7 @@ uv run python scripts/sync_to_vessl_storage.py --include-local-small
 
 1. **storage/models/** (v1)는 원본 보관용으로 유지
 2. **storage/datasets/** (v1)는 원본 보관용으로 유지
-3. **Phase 2 이후 코드에서는 models_v2, datasets_v2만 참조**
+3. **Phase 2 이후 코드에서는 models, datasets만 참조**
 4. **Meta reference 코드 경로** (Phase 2에서 변경 예정):
    - 현재: `storage/models/llama-7b-mtp/llama/` (Phase 1 완료)
    - 이동 예정: `vendor/meta_llama/` (Phase 2에서 수행)
