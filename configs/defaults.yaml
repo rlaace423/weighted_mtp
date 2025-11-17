@@ -1,4 +1,5 @@
 # 공통 설정 (장비, 스토리지, 모델 파라미터 스냅샷)
+# Stage 분리 파이프라인 아키텍처 기반
 
 project:
   name: weighted-mtp
@@ -8,7 +9,7 @@ storage:
   root: storage
   models_dir: storage/models_v2
   datasets_dir: storage/datasets_v2
-  local_small_dir: storage/datasets_local_small
+  checkpoints_dir: storage/checkpoints
 
 models:
   policy:
@@ -42,97 +43,10 @@ runtime:
   mixed_precision: true
 
 mlflow:
-  tracking_uri: "http://13.50.240.176"  # EC2 MLflow Server (Basic Auth)
-  experiment: "weighted-mtp/production"  # Experiment 이름
-  s3_artifacts: "s3://wmtp/mlflow-artifacts"  # S3 Artifact Storage
+  tracking_uri: "http://13.50.240.176"
+  experiment: "weighted-mtp/production"
+  s3_artifacts: "s3://wmtp/mlflow-artifacts"
 
 logging:
   level: INFO
   format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-
-# Stage별 데이터 샘플링 전략
-# Best Practice 기반 샘플 크기 (Meta MTP 2024, AlphaCode 2022, SFT/PPO ICLR 2024)
-data:
-  sampling:
-    # Stage 1: Value Head Pretrain (is_correct 균형 샘플링)
-    # 목적: Binary classification (correct vs incorrect)
-    # 근거: AlphaCode 13K problems, SFT best practice 10K-50K, 1 epoch overfit 방지
-    stage1:
-      n_samples: 30000  # Effective: 30K samples (15K correct + 15K incorrect)
-      balance_correct: true
-      correct_ratio: 0.5
-      difficulty_range: [1, 11]  # 전체 난이도
-      seed: 42
-
-    # Stage 2: Weighted Training (Curriculum Learning)
-    # 목적: TD error 기반 난이도별 점진 학습
-    # 근거: 100K × 3 epochs = 300K effective samples (SFT standard 충족)
-    stage2:
-      n_samples: 100000  # Effective: 300K samples (100K × 3 epochs)
-      balance_correct: true
-      correct_ratio: 0.5
-      curriculum_learning: true
-      difficulty_bins:
-        low: [1, 3]      # 쉬운 문제 (7,951 available)
-        medium: [4, 7]   # 중간 문제 (1,148,171 available)
-        high: [8, 11]    # 어려운 문제 (980,237 available)
-      curriculum_schedule:
-        # 초반 30%: 쉬운 문제 집중 (TD error 안정화)
-        - epoch_range: [0.0, 0.3]
-          difficulty_weights:
-            low: 0.7
-            medium: 0.3
-            high: 0.0
-        # 중반 40%: 중간 난이도 증가 (점진적 난이도 상승)
-        - epoch_range: [0.3, 0.7]
-          difficulty_weights:
-            low: 0.3
-            medium: 0.6
-            high: 0.1
-        # 후반 30%: 어려운 문제 집중 (고난이도 학습)
-        - epoch_range: [0.7, 1.0]
-          difficulty_weights:
-            low: 0.1
-            medium: 0.5
-            high: 0.4
-      seed: 42
-
-  # Validation: 전체 split 사용 (샘플링 없음)
-  # 목적: 정확한 성능 평가
-  # 근거: Validation은 대표성 확보를 위해 전체 데이터 사용 (CodeContests valid 14.7K)
-  validation:
-    split: "validation"  # HuggingFace split name
-    use_full_split: true  # 샘플링 없이 전체 사용
-    # n_samples: 14,725 (CodeContests)
-    # Stage 1/2 모두 동일한 validation set 사용
-
-# 학습 파이프라인 설정 (Phase 5)
-training:
-  # Logging & Evaluation Intervals (Step 단위)
-  log_interval: 10    # 10 step마다 train loss 출력
-  eval_interval: 100  # 100 step마다 validation 평가
-
-  # Checkpoint 저장
-  save_checkpoint_every: 1  # 1 epoch마다 checkpoint 저장
-  save_best_checkpoint: true  # Best validation loss checkpoint 저장
-
-  # Stage 1: Value Head Pretrain
-  stage1:
-    n_epochs: 0.5
-    learning_rate: 1.0e-4
-    loss_type: mse  # mse or huber
-
-  # Stage 2: Weighted Training with Critic Continual Learning
-  stage2:
-    n_epochs: 2.5
-    learning_rate: 1.0e-5
-
-    # Weighted MTP 핵심 인자 (IQL/AWR 방식)
-    beta: 0.9  # Exponential weighting temperature (낮을수록 집중도 높음)
-    value_coef: 0.5  # Value loss coefficient (Critic Continual Learning)
-    max_grad_norm: 0.5  # Gradient clipping (안정성)
-    loss_type: mse  # Value loss type (mse or huber)
-
-    # Weight clipping (보수적 안정화)
-    weight_clip_min: 0.1
-    weight_clip_max: 5.0

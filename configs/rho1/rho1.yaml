@@ -1,0 +1,39 @@
+# Rho-1 WMTP (Reference-based Weighting)
+# Excess loss weighting with Reference model
+
+experiment:
+  name: rho1-wmtp
+  description: "Rho-1 Weighted MTP with Reference Model"
+  stage: rho1
+  tags:
+    - rho1
+    - wmtp
+    - reference-based
+
+dataset:
+  name: codecontests
+  train: storage/datasets_v2/codecontests/processed/train.jsonl
+  validation: storage/datasets_v2/codecontests/processed/valid.jsonl
+  max_length: 2048
+
+data_sampling:
+  n_samples: 100000
+  balance_correct: false
+  correct_ratio: 1.0
+  seed: 42
+
+training:
+  n_epochs: 2.5
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-5
+  temperature: 1.0
+  max_grad_norm: 0.5
+  log_interval: 10
+
+checkpoint:
+  save_dir: storage/checkpoints/rho1/${experiment.name}
+  save_checkpoint_every: 1.0
+  save_best: true
+  save_final: true
+  save_total_limit: 3

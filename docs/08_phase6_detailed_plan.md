@@ -1,12 +1,12 @@
-# Phase 6: CLI 파이프라인 연동 구현 가이드
+# Phase 6: DDP 분산 학습 인프라 통합 가이드
 
 ## 문서 개요
 
-본 문서는 **Phase 6: CLI 파이프라인 연동 구현**을 위한 실행 가이드입니다. Phase 5에서 구현된 학습 파이프라인을 사용자가 CLI로 실행할 수 있도록 연결하고, Validation evaluation, Best checkpoint 저장, MLflow 로깅 등 프로덕션 학습에 필수적인 기능을 추가합니다.
+본 문서는 **Phase 6: DDP 분산 학습 인프라 통합**을 위한 실행 가이드입니다. 기존 `runtime/distributed.py` + `runtime/environment.py` 인프라를 활용하여 3개 파이프라인 Runner(`run_critic.py`, `run_verifiable.py`, `run_rho1.py`)에 DDP(Distributed Data Parallel) 지원을 추가합니다.
 
-**버전**: v2.0 (2025-01-16)
-**선행 조건**: Phase 5 (Value Training 파이프라인) 완료
-**목표**: CLI → Config → Resource Loading → Training Pipeline → MLflow 전체 흐름 완성
+**버전**: v1.0 (2025-01-17) - DDP 통합 계획
+**선행 조건**: Phase 5 (Stage별 독립 실행 파이프라인) 완료
+**목표**: VESSL A100 4-GPU 환경 분산 학습 + M3 Mac MPS Local Test 호환
 
 ---
 
@@ -14,1033 +14,1499 @@
 
 ### 1.1 Phase 6의 위치와 목적
 
-Phase 6는 **사용자 진입점 → 파이프라인 실행** 연결의 핵심 구간입니다.
+Phase 6는 **분산 학습 인프라 통합**을 담당합니다.
 
 ```
-Phase 5 (pipeline)  →  [Phase 6 (CLI + Config + MLflow)]  →  실제 학습 실행
-  run_training_pipeline()      사용자 커맨드 → 실행             VESSL/로컬
+Phase 5 (Pipelines)  →  [Phase 6 (DDP 통합)]  →  Production Training
+ Stage별 독립 실행       4-GPU 분산 학습 지원      VESSL A100 4장 활용
 ```
 
-**핵심 질문**: 사용자가 `python -m weighted_mtp.cli.train --recipe configs/recipe.verifiable.yaml` 한 줄로 어떻게 전체 학습을 실행할 것인가?
+**핵심 질문**: 어떻게 기존 파이프라인을 최소한으로 수정하여 DDP 분산 학습을 지원하고, 로컬 MPS 환경에서도 테스트 가능하게 할 것인가?
 
-### 1.2 Phase 6의 핵심 기능
+### 1.2 DDP 통합의 필요성
 
-#### 기능 1: Config 시스템 (defaults + recipe deep merge)
+**현재 상황**:
+- Phase 5에서 3개 파이프라인 완성 (run_critic, run_verifiable, run_rho1)
+- `runtime/distributed.py` + `runtime/environment.py`에 우수한 DDP 인프라 이미 구현됨
+- **문제**: 파이프라인에서 DDP model wrapping 미적용 → 4-GPU 환경에서 1개만 사용
 
-**문제 인식**:
-- 모든 설정을 recipe에 반복 작성하면 유지보수 어려움
-- 실험마다 다른 부분(dataset, beta, value_coef)만 override하고 싶음
+**DDP 미적용 시 문제점**:
 
-**해결책**:
-```yaml
-# defaults.yaml (환경 고정값)
-project:
-  name: weighted-mtp
-mlflow:
-  tracking_uri: "http://13.50.240.176"
-  experiment: "weighted-mtp/production"
-training:
-  stage1:
-    n_epochs: 0.5
-    learning_rate: 1.0e-4
-  stage2:
-    beta: 0.9  # 기본값
-    value_coef: 0.5
+| 문제 | 영향 |
+|------|------|
+| **GPU 활용률** | 4-GPU 중 1개만 사용 (75% 낭비) |
+| **학습 속도** | 4x 속도 향상 기회 상실 |
+| **배치 크기** | 작은 배치 → 성능 저하 가능 |
+| **비용 효율** | VESSL 4-GPU 비용 동일하나 효과 1/4 |
 
-# recipe.verifiable.yaml (실험 차이만)
-experiment:
-  name: verifiable-critic-wmtp
-dataset:
-  name: codecontests
-training:
-  stage2:
-    beta: 1.2  # Override만 명시
-```
+**DDP 적용 시 장점**:
 
-**Deep merge 결과**:
-- defaults + recipe 재귀적 병합
-- recipe의 값이 defaults를 override
-- recipe에 없는 키는 defaults 유지
+| 장점 | 효과 |
+|------|------|
+| **4-GPU 활용** | Effective batch size 4x → ~4x 빠른 학습 |
+| **Gradient aggregation** | 4개 GPU gradient 평균 → 안정적 학습 |
+| **동일 코드** | MPS local test / 4-GPU VESSL 모두 동작 |
+| **최소 수정** | 기존 runtime/ 활용 → 3-5줄 추가/파일 |
 
-#### 기능 2: Resource Loading (model, tokenizer, datasets)
+### 1.3 기존 Runtime 인프라 분석
 
-**Phase 5 → Phase 6 연결**:
+**이미 구현된 것** (`src/weighted_mtp/runtime/distributed.py` 295줄):
+
 ```python
-# Phase 5에서 정의된 인터페이스
-def run_training_pipeline(
-    adapter: MetaLlamaMTPAdapter,
-    stage1_dataloader: DataLoader,
-    stage2_dataloader: DataLoader,
-    config: dict,
-    device: torch.device,
-    save_dir: Path | None,
-) -> dict[str, dict[str, float]]
+def init_distributed(backend="nccl") -> tuple[int, int]:
+    """torch.distributed 초기화 (torchrun 환경변수 기반)"""
+
+def is_main_process() -> bool:
+    """Rank 0 체크 (logging용)"""
+
+def create_distributed_sampler(dataset, shuffle=True, seed=42):
+    """DistributedSampler 자동 생성 (distributed 환경 감지)"""
+
+def setup_fsdp_config(...):
+    """FSDP config (미사용, DDP 기반 설계)"""
 ```
 
-**Phase 6의 역할**: 이 인터페이스에 맞는 resource를 로딩하여 전달
-- `adapter` ← `_load_model(config, device)`
-- `stage1_dataloader` ← `_create_dataloaders(stage1_dataset, ...)`
-- `config` ← `load_config()` + `_extract_training_config()`
+**이미 구현된 것** (`src/weighted_mtp/runtime/environment.py` 271줄):
 
-#### 기능 3: Validation Evaluation & Best Checkpoint
+```python
+def get_device(rank=None, force_cpu=False) -> torch.device:
+    """Auto-select: cuda:{rank}, mps (M3 Mac), cpu"""
+    if torch.cuda.is_available():
+        return torch.device(f"cuda:{rank}")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
-**문제 인식**:
-- Phase 5는 train loss만 출력, validation 평가 없음
-- Overfitting 감지 불가, best checkpoint 선택 로직 없음
+def setup_seed(base_seed, rank=None) -> int:
+    """Rank-aware seed: actual_seed = base_seed + rank"""
 
-**해결책**:
-1. **Validation dataloader 추가**: train/val 분리
-2. **Periodic evaluation**: Step interval마다 validation loss 계산
-3. **Best checkpoint 저장**: Validation loss 개선 시에만 저장
-4. **Early stopping 준비**: Validation loss가 개선되지 않으면 경고
+def setup_environment(base_seed=42) -> tuple[int, torch.device]:
+    """Unified setup: seed + device + backends"""
+```
 
-#### 기능 4: MLflow 실험 추적 (WMTP EC2 + S3 재사용)
+**없는 것 (Phase 6에서 추가 필요)**:
+- ❌ DDP model wrapping
+- ❌ Model unwrapping (checkpoint 저장 시)
+- ❌ Metric aggregation (all_reduce)
 
-**기존 인프라 재사용**:
-- EC2 Tracking Server: http://13.50.240.176 (Basic Auth)
-- S3 Artifact Storage: s3://wmtp/mlflow-artifacts
-- Experiment: weighted-mtp/production (ID: 8)
+**인프라 평가**: ✅ **95% 완성**, DDP wrapper utilities만 추가하면 즉시 사용 가능
 
-**Logging 항목**:
-- Config parameters (flatten)
-- Train/Validation metrics (step 단위)
-- Checkpoint artifact upload (S3)
+### 1.4 DDP vs FSDP 결정
 
-#### 기능 5: Distributed Training 지원
+**모델 크기 분석**:
+- Meta-Llama-MTP: ~7B parameters
+- FP16 precision: 7B × 2 bytes = 14GB (model weights)
+- Optimizer states (AdamW): ~2x model = 28GB
+- Gradients: 14GB
+- **Total**: ~56GB per GPU
 
-**분산학습 고려사항**:
-- **Checkpoint 저장**: Rank 0 only (storage 절약)
-- **Console logging**: Rank 0 only (깔끔한 출력)
-- **MLflow logging**: Rank 0 only (중복 방지)
-- **Metrics 평균**: All ranks에서 계산 → Rank 0에서 출력
+**A100 Memory**:
+- A100 40GB: ❌ 부족 (56GB > 40GB)
+- A100 80GB: ✅ 충분 (56GB < 80GB)
 
-### 1.3 기대 효과
+**결론: DDP 선택 (FSDP 불필요)**
 
-1. **사용 편의성**: 한 줄 커맨드로 실험 실행 (`--recipe` 전환만으로 3가지 실험)
-2. **재현성**: seed + config로 동일한 결과 보장
-3. **안정성**: Validation 기반 best checkpoint, overfitting 조기 감지
-4. **추적성**: MLflow로 모든 실험 기록, S3에 checkpoint 백업
+| 항목 | DDP | FSDP |
+|------|-----|------|
+| **적합 모델 크기** | <10B params (7B 적합) | >10B params (오버킬) |
+| **구현 복잡도** | 단순 (model wrapping) | 복잡 (sharding, gather/scatter) |
+| **성능** | 빠름 (통신 overhead 적음) | 느림 (sharding overhead) |
+| **메모리 효율** | 각 GPU에 전체 모델 | 모델 분산 저장 |
+| **기존 인프라** | ✅ 기구현 (distributed.py) | ⚠️ 미완성 (setup_fsdp_config만) |
+
+**VESSL 환경**: A100 80GB × 4장 → DDP로 충분
+
+### 1.5 PyTorch DDP Best Practice (2024)
+
+**표준 DDP 패턴**:
+
+```python
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+# 1. 초기화 (torchrun이 환경변수 설정)
+dist.init_process_group(backend="nccl")
+rank = dist.get_rank()
+
+# 2. Device 설정
+device = torch.device(f"cuda:{rank}")
+model = MyModel().to(device)
+
+# 3. DDP wrapping
+model = DDP(model, device_ids=[rank])
+
+# 4. DistributedSampler
+train_sampler = DistributedSampler(train_dataset, shuffle=True)
+train_loader = DataLoader(train_dataset, sampler=train_sampler, batch_size=32)
+
+# 5. Training loop
+for epoch in range(n_epochs):
+    train_sampler.set_epoch(epoch)  # Shuffle consistency
+
+    for batch in train_loader:
+        # Forward/backward (DDP auto-syncs gradients)
+        loss = model(batch)
+        loss.backward()
+        optimizer.step()
+
+# 6. Cleanup
+dist.destroy_process_group()
+```
+
+**핵심 원칙**:
+1. **Rank-aware device**: `cuda:{rank}` 할당
+2. **DDP wrapping**: `DistributedDataParallel(model, device_ids=[rank])`
+3. **DistributedSampler**: 각 GPU가 다른 데이터 샘플 처리
+4. **Gradient auto-sync**: DDP가 backward 시 자동 all_reduce
+5. **Rank 0 logging**: MLflow 등 I/O는 rank 0만 수행
+
+**HuggingFace Accelerate 비교**:
+
+| 항목 | Native DDP | HuggingFace Accelerate |
+|------|-----------|------------------------|
+| **의존성** | PyTorch 기본 | accelerate 패키지 추가 |
+| **기존 인프라 재사용** | ✅ 100% 재사용 | ❌ 중복 발생 |
+| **코드 변경** | 3-5줄/파일 | 2-3줄/파일 (유사) |
+| **제어력** | Full control | 추상화로 제한적 |
+| **개발원칙 준수** | ✅ 중복 없음 | ❌ runtime/ 인프라 무시 |
+
+**결론**: **Native DDP Wrapper 방식** 채택 (개발원칙 2 준수)
 
 ---
 
 ## Part 2: 핵심 설계 결정
 
-### 2.1 Decision 0: Phase 5 인터페이스 존중 (가장 중요한 결정)
+### 2.1 Decision 1: runtime/ddp.py 추가 (Minimal Utilities)
 
-**원칙 1, 2 준수**:
-- Phase 5의 `run_training_pipeline()` 인터페이스는 **변경하지 않음**
-- Phase 6는 이 인터페이스에 맞는 resource를 준비하는 역할만
+**문제 인식**: DDP model wrapping, unwrapping, metric aggregation 기능 필요
 
-**Rationale**:
-1. **역할 분리**: Phase 5 = 파이프라인 로직, Phase 6 = 진입점 + resource 준비
-2. **테스트 가능성**: Phase 5 unit test가 계속 동작
-3. **유지보수성**: 파이프라인 변경 시 Phase 6 수정 불필요
+**해결책**: `runtime/ddp.py` 생성 (3개 utility 함수만)
 
-### 2.2 Decision 1: Validation Evaluation 추가
+**설계 원칙**:
+- **최소주의**: 3개 함수만 추가 (wrap, unwrap, all_reduce)
+- **기존 인프라 재사용**: `distributed.py`의 `is_main_process()`, `init_distributed()` 활용
+- **자동 감지**: Distributed 환경 여부 자동 감지 (MPS local test 시 DDP skip)
 
-**문제**: Phase 5는 train loss만 출력, overfitting 감지 불가
+**구조**:
 
-**해결책**: Validation dataloader 추가 + periodic evaluation
+```
+src/weighted_mtp/runtime/
+├── distributed.py      # 기존 (init_distributed, is_main_process, DistributedSampler)
+├── environment.py      # 기존 (get_device, setup_seed, MPS/CUDA 자동 선택)
+└── ddp.py              # 신규 (wrap_model_ddp, unwrap_model, all_reduce_scalar)
+```
 
-**구현 위치**:
-- `pipelines/training.py`: `evaluate_stage()` 함수 추가
-- `cli/train.py`: validation dataloader 로딩
+**API 설계**:
 
-**Evaluation 시점**:
-- Step interval마다 (예: 100 steps)
-- Epoch 종료 시
-- 학습 완료 후 최종 평가
-
-**요구사항**:
 ```python
-def evaluate_stage(
-    adapter: MetaLlamaMTPAdapter,
-    dataloader: DataLoader,
-    config: dict,
+# runtime/ddp.py
+
+def wrap_model_ddp(
+    model: torch.nn.Module,
     device: torch.device,
-    stage: str,
-) -> dict[str, float]:
-    """Validation evaluation (no_grad)
+    find_unused_parameters: bool = False,
+) -> torch.nn.Module:
+    """DDP로 모델 래핑
+
+    Distributed 환경에서만 DDP 적용, MPS/CPU local test는 skip
+
+    Args:
+        model: 원본 모델
+        device: torch.device (cuda:rank, mps, cpu)
+        find_unused_parameters: Unused gradient 허용 (기본 False)
 
     Returns:
-        {
-            "val_loss": float,
-            "val_mtp_loss": float,  # Stage 2만
-            "val_value_loss": float,  # Stage 2만
-            "val_value_explained_variance": float,
-        }
+        DDP-wrapped model (또는 원본 model if not distributed)
+    """
+
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    """DDP wrapper 제거하여 원본 모델 추출
+
+    Checkpoint 저장 시 사용 (DDP wrapper 제외하고 state_dict 저장)
+
+    Args:
+        model: DDP-wrapped model (또는 원본 model)
+
+    Returns:
+        Original model
+    """
+
+def all_reduce_scalar(
+    value: float,
+    op: str = "mean",
+) -> float:
+    """GPU ranks 간 scalar 값 집계
+
+    Loss, accuracy 등 metric 평균/합계 계산
+
+    Args:
+        value: 현재 rank의 scalar 값
+        op: "mean" (평균) 또는 "sum" (합계)
+
+    Returns:
+        전체 ranks에서 집계된 값
     """
 ```
 
-### 2.3 Decision 2: Best Checkpoint 저장 전략
+**자동 전환 메커니즘**:
 
-**문제**: 모든 step checkpoint 저장하면 storage 낭비, 실시간 저장은 I/O 오버헤드 심각
+```python
+def wrap_model_ddp(model, device, find_unused_parameters=False):
+    if not dist.is_initialized():
+        # MPS/CPU local test - no wrapping
+        return model
 
-**해결책**: Epoch 단위 checkpoint 저장 + 학습 완료 후 best 선택 (Meta MTP 2024 방식)
-
-**저장 정책**:
-1. **Periodic checkpoint**: Epoch마다 저장 (`save_checkpoint_every: 1`)
-   - `checkpoint_stage1_epoch_0.5.pt` (Stage 1: 0.5 epoch)
-   - `checkpoint_stage2_epoch_1.pt`, `checkpoint_stage2_epoch_2.pt` (Stage 2: 2.5 epochs)
-   - 각 checkpoint에 validation loss 메타데이터 기록
-2. **Best checkpoint**: 학습 완료 후 선택 (`checkpoint_{stage}_best.pt`)
-   - 저장된 모든 epoch checkpoint의 validation loss 비교
-   - 최저 val_loss 가진 checkpoint를 `best.pt`로 복사/심볼릭 링크
-3. **Final checkpoint**: 학습 완료 후 최종 저장 (`checkpoint_{stage}_final.pt`)
-
-**Best checkpoint 선택 기준**:
-- Stage 1: `val_loss` 최소화
-- Stage 2: `val_loss` 최소화 (total_loss = weighted_ce + value_coef * value_loss)
-
-**Meta MTP 2024 논문 방식**:
-> "Model checkpoints with maximal validation ROUGE-L F1 are selected separately for each model dataset and model type."
-- 학습 중 여러 checkpoint 저장 → 학습 완료 후 validation metric 기반 best 선택
-- 우리는 ROUGE-L 대신 validation loss 사용
-
-### 2.4 Decision 3: Step 기반 Logging & Evaluation
-
-**문제**: Epoch 단위는 너무 coarse, 세밀한 제어 불가
-
-**해결책**: Global step 기반 interval (모니터링 전용)
-
-**Interval 역할 구분**:
-```yaml
-training:
-  log_interval: 10      # 10 step마다 train loss 출력 (console/MLflow)
-  eval_interval: 100    # 100 step마다 validation 평가 (로깅만, checkpoint 저장 안 함)
-  save_checkpoint_every: 1  # 1 epoch마다 checkpoint 저장
+    # CUDA distributed - DDP wrapping
+    device_ids = [device.index] if device.type == "cuda" else None
+    return DDP(model, device_ids=device_ids, find_unused_parameters=find_unused_parameters)
 ```
 
-**핵심 원칙**:
-- `eval_interval: 100` → **모니터링 전용**
-  - Validation loss 계산 → console/MLflow 로깅만
-  - Overfitting 조기 감지, 학습 진행 상황 추적
-  - **Checkpoint 저장 안 함** (I/O 오버헤드 방지)
-- `save_checkpoint_every: 1` → **Checkpoint 저장 전용**
-  - Epoch 끝날 때만 checkpoint 저장
-  - 각 checkpoint에 validation loss 메타데이터 기록
-- **학습 완료 후** → Best 선택
-  - 저장된 모든 checkpoint의 validation loss 비교
-  - 최저 val_loss 가진 checkpoint를 `best.pt`로 복사
+**호환성 보장**:
+- **VESSL A100 4-GPU**: `torchrun` 실행 → `dist.is_initialized() == True` → DDP 활성화
+- **M3 Mac MPS**: 일반 `python` 실행 → `dist.is_initialized() == False` → DDP skip
+- **코드 변경 없음**: 동일 코드로 양쪽 환경 지원
 
-**흐름 예시** (Stage 2: 2.5 epochs, 1000 steps/epoch):
+### 2.2 Decision 2: Pipelines 최소 수정 (3-5줄/파일)
+
+**문제 인식**: DDP 통합 시 기존 파이프라인 대규모 수정 위험
+
+**해결책**: Import + Wrapping + Unwrapping만 추가 (기존 로직 불변)
+
+**수정 전** (run_critic.py):
+
 ```python
-# Step 100: validation → val_loss=2.5 (로깅만, 저장 안 함)
-# Step 200: validation → val_loss=2.3 (로깅만)
-# ...
-# Step 1000 (Epoch 1 끝):
-#   - validation → val_loss=2.1
-#   - checkpoint 저장 "epoch_1.pt" (val_loss=2.1 메타데이터 기록)
+from weighted_mtp.runtime import setup_environment, is_main_process
 
-# Step 1100: validation → val_loss=2.0 (로깅만)
-# Step 1200: validation → val_loss=1.9 (로깅만)
-# ...
-# Step 2000 (Epoch 2 끝):
-#   - validation → val_loss=1.8
-#   - checkpoint 저장 "epoch_2.pt" (val_loss=1.8 메타데이터 기록)
+# Setup
+rank, device = setup_environment(config.runtime.seed)
 
-# Step 2500 (Final):
-#   - validation → val_loss=1.85
-#   - checkpoint 저장 "final.pt" (val_loss=1.85 메타데이터 기록)
+# Model
+adapter = load_adapter(config.models.policy, device)
+optimizer = torch.optim.Adam(adapter.value_head.parameters(), lr=1e-4)
 
-# 학습 완료 후:
-# epoch_2.pt (val_loss=1.8)이 최저 → "best.pt"로 복사
-```
-
-**Global step 계산**:
-```python
-global_step = 0
+# Training loop
 for epoch in range(n_epochs):
-    for batch in dataloader:
-        # Training step
-        ...
-        global_step += 1
+    loss = train_stage1(adapter, train_loader, optimizer, config, device)
 
-        # Log (모니터링 전용)
-        if global_step % log_interval == 0:
-            logger.info(f"Step {global_step}, Loss: {loss:.4f}")
-
-        # Eval (모니터링 전용, checkpoint 저장 안 함)
-        if global_step % eval_interval == 0:
-            val_metrics = evaluate_stage(...)
-            logger.info(f"Step {global_step}, Val Loss: {val_metrics['val_loss']:.4f}")
-            mlflow_manager.log_metrics({"val_loss": val_metrics["val_loss"]}, step=global_step)
-
-    # Epoch 끝: checkpoint 저장
-    val_metrics = evaluate_stage(...)
-    save_checkpoint(f"epoch_{epoch}.pt", metadata={"val_loss": val_metrics["val_loss"]})
-```
-
-### 2.5 Decision 4: Rank 0 Only Operations
-
-**문제**: 분산학습 시 모든 rank가 checkpoint 저장/logging하면 중복
-
-**해결책**: Rank 0만 I/O operations 수행
-
-**Rank 0 Only**:
-- Checkpoint 저장
-- Console logging (logger.info)
-- MLflow logging (start_run, log_params, log_metrics, log_artifact)
-
-**All Ranks**:
-- Training step
-- Metrics 계산 (각 rank에서 계산 후 평균)
-
-**구현**:
-```python
-from weighted_mtp.runtime.distributed import is_main_process
-
-if is_main_process():  # Rank 0 only
-    _save_checkpoint(...)
-    logger.info(...)
-    mlflow_manager.log_metrics(...)
-```
-
-### 2.6 Decision 5: Comprehensive Logging Metrics (LLM SFT/RLHF Best Practices 2024)
-
-**문제**: Loss만 기록하면 학습 상태 파악 어려움, 디버깅 불가
-
-**해결책**: LLM SFT/PPO RLHF 표준 logging 항목 도입 (HuggingFace TRL, OpenRLHF, QLoRA 2024 기준)
-
-**Logging 항목 (Stage별)**:
-
-#### Stage 1 & 2 공통 (Train Metrics)
-```yaml
-# 1. Loss Metrics
-train/loss: 2.1234            # Total loss
-train/mtp_loss: 1.9876        # MTP loss (Stage 2만)
-train/value_loss: 0.1358      # Value loss
-train/head_0_loss: 2.3456     # Individual head losses (디버깅용)
-train/head_1_loss: 2.4123
-train/head_2_loss: 2.5678
-train/head_3_loss: 2.3890
-
-# 2. Gradient & Optimization
-train/grad_norm: 0.8765       # Gradient norm (안정성 지표, QLoRA: max_grad_norm=0.3)
-train/learning_rate: 1.0e-5   # Current LR (scheduler 추적)
-
-# 3. Performance & Throughput
-train/samples_per_second: 4.2 # Throughput (분산학습 효율 측정)
-train/tokens_per_second: 8192 # Token throughput
-train/wall_time: 3600.5       # 누적 벽시계 시간 (초)
-train/epoch: 1.5              # Current epoch (소수점)
-train/global_step: 1500       # Global step counter
-
-# 4. GPU & Memory (분산학습 필수)
-system/gpu_memory_allocated_gb: 35.2  # 할당된 GPU 메모리 (GB)
-system/gpu_memory_reserved_gb: 40.0   # 예약된 GPU 메모리
-system/gpu_utilization_pct: 95.3     # GPU 활용률 (%)
-
-# 5. Stage 2 전용 (Weighted MTP + Value)
-train/td_error_mean: 0.0234   # TD error 평균 (weighting 품질)
-train/td_error_std: 0.1567    # TD error 표준편차
-train/weight_entropy: 2.3456  # Weight distribution entropy
-train/weight_mean: 1.0234     # Weight 평균
-train/weight_min: 0.1000      # Weight 최소값 (clip 확인)
-train/weight_max: 5.0000      # Weight 최대값 (clip 확인)
-train/value_explained_variance: 0.8234  # Value head 성능 (1.0에 가까울수록 이상적)
-```
-
-#### Validation Metrics (100 step마다 + Epoch 끝)
-```yaml
-val/loss: 1.8765              # Validation total loss
-val/mtp_loss: 1.7432          # Validation MTP loss
-val/value_loss: 0.1333        # Validation value loss
-val/value_explained_variance: 0.8456
-```
-
-**Logging 빈도**:
-- `log_interval: 10` → Train metrics (loss, grad_norm, LR, throughput)
-- `eval_interval: 100` → Validation metrics
-- Every step → GPU memory (lightweight)
-
-**Console 출력 형식** (간결화):
-```
-[Step 100/2500] [Epoch 0.04] [3.2 samples/s]
-  Train Loss: 2.1234 | Val Loss: 1.8765
-  Grad Norm: 0.8765 | LR: 1.0e-5
-  GPU Mem: 35.2/40.0 GB (95.3%)
-  MTP: 1.9876 | Value: 0.1358 | ExplVar: 0.8234
-```
-
-**MLflow 전체 로깅** (모든 항목 기록):
-- Train metrics → `mlflow.log_metrics(train_metrics, step=global_step)`
-- Validation metrics → `mlflow.log_metrics(val_metrics, step=global_step)`
-- System metrics → `mlflow.log_metrics(system_metrics, step=global_step)`
-
-**Best Practices 근거**:
-- **Gradient Norm**: Early-stage lower gradient norms → better final performance (SFT 2024)
-- **Learning Rate**: Standard 1e-4 for LoRA, 2e-4 for QLoRA (HuggingFace TRL)
-- **GPU Utilization**: OPPO 2024 - 1.4×-2.1× improvement target
-- **Throughput**: OpenRLHF 2024 - samples/tokens per second for bottleneck detection
-- **Value Explained Variance**: PPO RLHF 2024 - stability indicator (should not spike/NaN)
-
----
-
-## Part 3: 구현 요구사항
-
-### 3.1 Step 1: Config 추출/검증 함수 (`cli/train.py`)
-
-#### 목표
-YAML config를 `run_training_pipeline()` 입력 형식으로 변환하고 유효성 검증
-
-#### 핵심 함수
-
-**`_extract_training_config(config: dict) -> dict`**
-- 역할: 전체 config에서 training 설정 추출
-- 입력: defaults + recipe merge 완료된 config
-- 출력: `{"stage1": {...}, "stage2": {...}, "save_dir": Path, "log_interval": int, "eval_interval": int}`
-
-**`_validate_config(config: dict) -> None`**
-- 역할: 필수 필드 존재 여부, 값 범위 검증
-- 검증 항목:
-  - 필수 섹션: `project`, `models`, `dataset`, `training`, `mlflow`
-  - 필수 필드: `models.policy.name`, `models.policy.path`, `dataset.train`, `dataset.validation`
-  - 값 범위: `n_epochs > 0`, `learning_rate > 0`, `beta > 0`
-- 예외: `ValueError` (missing field 또는 invalid value)
-
-#### 검증 기준
-- [ ] `_extract_training_config()`: stage1/stage2 설정 추출 성공
-- [ ] `_extract_training_config()`: save_dir 기본값 생성 (`storage/checkpoints/{project}/{experiment}`)
-- [ ] `_validate_config()`: 필수 필드 누락 시 ValueError
-- [ ] `_validate_config()`: 값 범위 검증 (n_epochs > 0 등)
-
----
-
-### 3.2 Step 2: Resource Loading 함수 (`cli/train.py`)
-
-#### 목표
-Model, Tokenizer, Datasets, Dataloaders를 로딩하여 `run_training_pipeline()`에 전달
-
-#### 핵심 함수
-
-**`_load_model(config: dict, device: torch.device) -> MetaLlamaMTPAdapter`**
-- 역할: Policy model adapter 로딩
-- 로딩 순서:
-  1. Config에서 model path 추출
-  2. Metadata 로딩 (`{path}/metadata.json`)
-  3. Safetensors 로딩 (`{path}/safetensors/model.safetensors`)
-  4. MetaLlamaMTPAdapter 생성 및 state_dict 로딩
-  5. Device로 이동
-- 출력: 초기화된 adapter
-
-**`_load_tokenizer(config: dict) -> PreTrainedTokenizer`**
-- 역할: Tokenizer 로딩
-- Phase 5와 동일하게 `AutoTokenizer.from_pretrained()` 사용
-
-**`_load_datasets(config: dict) -> tuple[Dataset, Dataset, Dataset]`**
-- 역할: Stage 1 train, Stage 2 train, Validation dataset 로딩
-- Phase 3의 `load_dataset()` 재사용
-- 반환: `(stage1_train_dataset, stage2_train_dataset, val_dataset)`
-- **Validation dataset 로딩 방식**:
-  - `config["data"]["validation"]["split"]` 사용 (기본값: "validation")
-  - `use_full_split: true` → 샘플링 없이 전체 validation split 사용
-  - CodeContests: 14,725 samples (correct + incorrect 혼합)
-  - Stage 1/2 모두 동일한 validation set 사용 (일관성)
-
-**`_create_dataloaders(datasets: tuple, tokenizer, config) -> tuple[DataLoader, ...]`**
-- 역할: 4개 dataloader 생성
-- 반환: `(stage1_train_loader, stage2_train_loader, stage1_val_loader, stage2_val_loader)`
-- 주의사항:
-  - Train: `shuffle=True` (분산학습 시 DistributedSampler 사용)
-  - Validation: `shuffle=False`
-
-#### 검증 기준
-- [ ] `_load_model()`: Adapter 로딩 성공, device 이동 확인
-- [ ] `_load_tokenizer()`: Tokenizer 로딩 성공
-- [ ] `_load_datasets()`: 3개 dataset 반환 (stage1_train, stage2_train, val)
-- [ ] `_create_dataloaders()`: 4개 dataloader 생성 (train/val × stage1/stage2)
-
----
-
-### 3.3 Step 3: Validation Evaluation 함수 (`pipelines/training.py`)
-
-#### 목표
-Validation dataset으로 현재 모델 성능 평가 (no gradient)
-
-#### 핵심 함수
-
-**`evaluate_stage(adapter, dataloader, config, device, stage) -> dict`**
-- 역할: Validation loss 계산 (train과 동일한 loss 함수 사용)
-- 입력:
-  - `adapter`: MetaLlamaMTPAdapter
-  - `dataloader`: Validation DataLoader
-  - `config`: Stage 설정 (stage1 또는 stage2)
-  - `device`: torch.device
-  - `stage`: "stage1" or "stage2"
-- 동작:
-  1. `adapter.eval()` 설정
-  2. `torch.no_grad()` context
-  3. Dataloader iteration
-  4. Stage 1: Value loss 계산
-  5. Stage 2: MTP loss + Value loss 계산
-  6. 평균 계산
-- 반환:
-  ```python
-  {
-      "val_loss": float,
-      "val_mtp_loss": float,  # Stage 2만
-      "val_value_loss": float,  # Stage 2만
-      "val_value_explained_variance": float,
-  }
-  ```
-
-#### 통합 위치
-
-**Stage 1 학습 루프 수정**:
-```python
-# 기존 train_stage1() 유지
-# 호출하는 곳에서 periodic evaluation 추가
-
-for epoch in range(n_epochs):
-    # Training
-    train_metrics = train_stage1_epoch(...)
-
-    # Validation (epoch 종료 시)
-    val_metrics = evaluate_stage(adapter, val_dataloader, config, device, "stage1")
-
-    # Best checkpoint 저장
-    if val_metrics["val_loss"] < best_val_loss:
-        best_val_loss = val_metrics["val_loss"]
-        _save_checkpoint(..., "best")
-```
-
-**Stage 2도 동일한 패턴 적용**
-
-#### 검증 기준
-- [ ] `evaluate_stage()`: no_grad context에서 실행
-- [ ] `evaluate_stage()`: Stage 1 val_loss 계산 성공
-- [ ] `evaluate_stage()`: Stage 2 val_loss (MTP + Value) 계산 성공
-- [ ] Best checkpoint: val_loss 개선 시에만 저장 확인
-
----
-
-### 3.4 Step 4: Best Checkpoint 저장 로직 (`pipelines/training.py`)
-
-#### 목표
-Validation loss 기반 best checkpoint 추적 및 저장
-
-#### 핵심 로직
-
-**Best checkpoint tracking**:
-```python
-# run_training_pipeline() 내부
-best_val_loss_stage1 = float('inf')
-best_val_loss_stage2 = float('inf')
-
-# Stage 1 학습 중
-for epoch in range(n_epochs):
-    train_metrics = train_stage1_epoch(...)
-    val_metrics = evaluate_stage(..., "stage1")
-
-    # Best 갱신
-    if val_metrics["val_loss"] < best_val_loss_stage1:
-        best_val_loss_stage1 = val_metrics["val_loss"]
-        if is_main_process():
-            _save_checkpoint(adapter, optimizer, "stage1", epoch, val_metrics, save_dir / "checkpoint_stage1_best.pt")
-```
-
-**Checkpoint 종류**:
-1. **Periodic**: `checkpoint_stage1_epoch_0.5.pt` (optional)
-2. **Best**: `checkpoint_stage1_best.pt` (필수)
-3. **Final**: `checkpoint_stage1_final.pt` (필수)
-
-#### 검증 기준
-- [ ] Best checkpoint: val_loss 개선 시에만 저장
-- [ ] Best checkpoint: 파일명 `checkpoint_{stage}_best.pt`
-- [ ] Final checkpoint: 학습 완료 후 저장
-- [ ] Rank 0 only: is_main_process() 체크
-
----
-
-### 3.5 Step 5: MLflow 로깅 통합 (`runtime/mlflow.py` + `cli/train.py`)
-
-#### 목표
-WMTP EC2 MLflow 서버에 실험 추적 정보 로깅
-
-#### 구현 파일
-**`src/weighted_mtp/runtime/mlflow.py`** (신규 생성)
-
-#### MLflowManager 클래스 구현
-
-**역할**:
-- EC2 MLflow 서버 연결 관리
-- .env에서 Basic Auth 자동 로드
-- Experiment 생성/조회
-- Run lifecycle 관리 (start → log → end)
-- S3 artifact 업로드
-
-**핵심 메서드**:
-- `__init__(tracking_uri, experiment_name, s3_artifacts)`: EC2 서버 연결 초기화
-- `_inject_basic_auth(uri)`: .env에서 MLFLOW_TRACKING_USERNAME/PASSWORD 로드 후 URI에 주입
-- `start_run(run_name, tags)`: mlflow.start_run() 호출, run_id 반환
-- `log_params(params: dict)`: Config를 flatten하여 mlflow.log_params() 호출
-- `log_metrics(metrics: dict, step: int)`: mlflow.log_metrics() 호출
-- `log_artifact(local_path, artifact_path)`: mlflow.log_artifact() 호출 (S3 자동 업로드)
-- `end_run(status)`: mlflow.end_run() 호출
-
-**구현 핵심 로직**:
-1. **Basic Auth 주입**:
-   - .env에서 `MLFLOW_TRACKING_USERNAME`, `MLFLOW_TRACKING_PASSWORD` 로드
-   - tracking_uri가 http://로 시작하면 `http://user:pass@host` 형태로 변환
-2. **Experiment 관리**:
-   - `mlflow.get_experiment_by_name()` → 없으면 `mlflow.create_experiment()` 호출
-   - artifact_location에 S3 경로 설정
-3. **Config flatten**:
-   - 중첩 dict를 `stage1.learning_rate` 형태로 평탄화
-   - mlflow.log_params()는 flat dict만 지원
-4. **Context manager 패턴**:
-   - `with mlflow_manager.run(run_name): ...` 형태 지원 권장
-
-#### CLI 통합 (`cli/train.py`)
-
-**main() 함수에서 MLflow 사용**:
-```python
-# Rank 0 only
-mlflow_manager = None
-if is_main_process():
-    mlflow_manager = create_mlflow_manager(config)
-    mlflow_manager.start_run(run_name=run_name)
-    mlflow_manager.log_params(config)
-
-try:
-    # Training
-    metrics = run_training_pipeline(...)
-
-    # Metrics 로깅
     if is_main_process():
-        mlflow_manager.log_metrics(metrics["stage1"], step=0)
-        mlflow_manager.log_metrics(metrics["stage2"], step=1)
+        mlflow.log_metrics({"train/loss": loss}, step=epoch)
 
-        # Checkpoint 업로드
-        mlflow_manager.log_artifact(checkpoint_path, "checkpoints")
-finally:
-    if mlflow_manager:
-        mlflow_manager.end_run()
+# Checkpoint
+torch.save(adapter.state_dict(), checkpoint_path)
 ```
 
-#### defaults.yaml 설정
+**수정 후** (run_critic.py):
 
-```yaml
-mlflow:
-  tracking_uri: "http://13.50.240.176"  # EC2 MLflow Server
-  experiment: "weighted-mtp/production"
-  s3_artifacts: "s3://wmtp/mlflow-artifacts"
+```python
+from weighted_mtp.runtime import (
+    setup_environment,
+    is_main_process,
+    wrap_model_ddp,      # 추가
+    unwrap_model,        # 추가
+    all_reduce_scalar,   # 추가
+)
+
+# Setup (변경 없음)
+rank, device = setup_environment(config.runtime.seed)
+
+# Model
+adapter = load_adapter(config.models.policy, device)
+adapter = wrap_model_ddp(adapter, device)  # ⭐ DDP wrapping 추가
+optimizer = torch.optim.Adam(adapter.parameters(), lr=1e-4)
+
+# Training loop
+for epoch in range(n_epochs):
+    loss = train_stage1(adapter, train_loader, optimizer, config, device)
+    avg_loss = all_reduce_scalar(loss)  # ⭐ Metric aggregation 추가
+
+    if is_main_process():
+        mlflow.log_metrics({"train/loss": avg_loss}, step=epoch)  # 변경
+
+# Checkpoint
+torch.save(unwrap_model(adapter).state_dict(), checkpoint_path)  # ⭐ Unwrap 추가
 ```
 
-#### .env 설정
+**변경 요약**:
+- ✅ Import 1줄 수정
+- ✅ Wrapping 1줄 추가
+- ✅ Metric aggregation 1줄 수정
+- ✅ Unwrap 1줄 수정
+- ✅ **총 4줄 변경**
 
-```.env
-# MLflow EC2 Server Authentication
-MLFLOW_TRACKING_USERNAME=wmtp_admin
-MLFLOW_TRACKING_PASSWORD=your_password
+**기존 로직 보존**:
+- ❌ `train_stage1()` 함수 수정 불필요
+- ❌ `load_adapter()` 수정 불필요
+- ❌ Dataset/Dataloader 로직 수정 불필요 (`create_distributed_sampler()` 이미 구현됨)
 
-# AWS S3 Credentials
-AWS_ACCESS_KEY_ID=your_key
-AWS_SECRET_ACCESS_KEY=your_secret
-AWS_DEFAULT_REGION=eu-north-1
+### 2.3 Decision 3: MLflow Logging Rank 0 전용
+
+**문제 인식**: 4개 GPU가 동시에 MLflow에 로깅 시 중복/충돌 발생
+
+**해결책**: `is_main_process()` 체크로 Rank 0만 로깅
+
+**기존 코드** (이미 구현됨):
+
+```python
+if is_main_process():
+    mlflow.log_metrics({"train/loss": loss}, step=epoch)
 ```
 
-#### 검증 기준
-- [ ] MLflowManager: EC2 서버 연결 성공
-- [ ] Experiment: weighted-mtp/production 생성/로드
-- [ ] Params: Config flatten 후 로깅 성공
-- [ ] Metrics: Step 단위 로깅 성공
-- [ ] Artifact: Checkpoint S3 업로드 성공 (s3://wmtp/mlflow-artifacts/8/{run_id}/artifacts/checkpoints/)
+**추가 작업**: 없음 (Phase 5에서 이미 rank 0 체크 완료)
+
+**Metric Aggregation 필요**:
+
+```python
+# Before (각 GPU가 자기 loss만 계산)
+loss = compute_loss(...)  # GPU 0: 0.5, GPU 1: 0.6, GPU 2: 0.55, GPU 3: 0.58
+
+if is_main_process():
+    mlflow.log_metrics({"train/loss": loss}, step=epoch)  # ❌ GPU 0 loss만 로깅 (0.5)
+
+# After (4개 GPU loss 평균)
+loss = compute_loss(...)
+avg_loss = all_reduce_scalar(loss.item())  # (0.5+0.6+0.55+0.58)/4 = 0.5575
+
+if is_main_process():
+    mlflow.log_metrics({"train/loss": avg_loss}, step=epoch)  # ✅ 전체 평균 로깅
+```
+
+**적용 대상**:
+- ✅ Training loss (step-level)
+- ✅ Validation loss (epoch-level)
+- ✅ TD error stats (mean, std)
+- ✅ Weight stats (mean, std)
+- ❌ GPU metrics (각 GPU별 개별 로깅 가능, 선택적)
+
+### 2.4 Decision 4: torchrun 실행 표준화
+
+**문제 인식**: DDP 실행 방식 표준화 필요 (사용자 혼란 방지)
+
+**해결책**: `torchrun` 명령어 표준 제공
+
+**Local Single-GPU / MPS Test** (기존 방식 유지):
+
+```bash
+# M3 Mac MPS
+python -m weighted_mtp.pipelines.run_critic \
+    --config configs/critic/critic_local.yaml
+
+# Single CUDA GPU
+python -m weighted_mtp.pipelines.run_critic \
+    --config configs/critic/critic.yaml
+```
+
+**VESSL A100 4-GPU (DDP)**:
+
+```bash
+# torchrun으로 실행 (4-GPU)
+torchrun \
+    --nproc_per_node=4 \
+    --nnodes=1 \
+    --node_rank=0 \
+    --master_addr=localhost \
+    --master_port=29500 \
+    -m weighted_mtp.pipelines.run_critic \
+    --config configs/critic/critic.yaml
+```
+
+**torchrun 환경변수 자동 설정**:
+- `RANK`: 현재 프로세스 rank (0, 1, 2, 3)
+- `WORLD_SIZE`: 전체 프로세스 수 (4)
+- `LOCAL_RANK`: 노드 내 rank (0, 1, 2, 3)
+- `MASTER_ADDR`, `MASTER_PORT`: 통신 주소
+
+**runtime/distributed.py가 자동 감지**:
+
+```python
+def init_distributed(backend="nccl"):
+    if "RANK" in os.environ:
+        # torchrun 환경 → DDP 초기화
+        dist.init_process_group(backend=backend)
+        return dist.get_rank(), dist.get_world_size()
+    else:
+        # 일반 실행 → Single-device
+        return 0, 1
+```
+
+**편의 스크립트** (선택적):
+
+```bash
+# scripts/train_ddp.sh
+#!/bin/bash
+torchrun --nproc_per_node=4 -m weighted_mtp.pipelines.run_critic "$@"
+
+# 사용
+./scripts/train_ddp.sh --config configs/critic/critic.yaml
+```
 
 ---
 
-### 3.6 Step 6: Step 기반 Logging & Evaluation (`pipelines/training.py`)
+## Part 3: runtime/ddp.py 설계
 
-#### 목표
-Global step 기반 주기적 logging 및 evaluation
+### 3.1 전체 구조
 
-#### 핵심 로직
+**파일 경로**: `src/weighted_mtp/runtime/ddp.py`
 
-**Global step tracking**:
+**역할**: DDP 최소 utilities (wrap, unwrap, all_reduce)
+
+**전체 코드** (~100줄):
+
 ```python
-def train_stage1(..., log_interval: int, eval_interval: int, val_dataloader: DataLoader):
-    global_step = 0
+"""DDP 유틸리티
+
+Distributed Data Parallel model wrapping, unwrapping, metric aggregation
+"""
+
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+
+def wrap_model_ddp(
+    model: torch.nn.Module,
+    device: torch.device,
+    find_unused_parameters: bool = False,
+) -> torch.nn.Module:
+    """DDP로 모델 래핑
+
+    Distributed 환경에서만 DDP 적용, MPS/CPU local test는 skip
+
+    Args:
+        model: 원본 모델
+        device: torch.device (cuda:rank, mps, cpu)
+        find_unused_parameters: Unused gradient 허용 (기본 False)
+
+    Returns:
+        DDP-wrapped model (또는 원본 model if not distributed)
+
+    Example:
+        >>> device = torch.device("cuda:0")
+        >>> model = MyModel().to(device)
+        >>> model = wrap_model_ddp(model, device)
+    """
+    if not dist.is_initialized():
+        # MPS/CPU local test - no wrapping
+        return model
+
+    # CUDA distributed - DDP wrapping
+    device_ids = [device.index] if device.type == "cuda" else None
+    return DDP(
+        model,
+        device_ids=device_ids,
+        find_unused_parameters=find_unused_parameters,
+    )
+
+
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    """DDP wrapper 제거하여 원본 모델 추출
+
+    Checkpoint 저장 시 사용 (DDP wrapper 제외하고 state_dict 저장)
+
+    Args:
+        model: DDP-wrapped model (또는 원본 model)
+
+    Returns:
+        Original model
+
+    Example:
+        >>> wrapped_model = wrap_model_ddp(model, device)
+        >>> # Training...
+        >>> original_model = unwrap_model(wrapped_model)
+        >>> torch.save(original_model.state_dict(), "checkpoint.pt")
+    """
+    if isinstance(model, DDP):
+        return model.module
+    return model
+
+
+def all_reduce_scalar(
+    value: float,
+    op: str = "mean",
+) -> float:
+    """GPU ranks 간 scalar 값 집계
+
+    Loss, accuracy 등 metric 평균/합계 계산
+
+    Args:
+        value: 현재 rank의 scalar 값
+        op: "mean" (평균) 또는 "sum" (합계)
+
+    Returns:
+        전체 ranks에서 집계된 값
+
+    Example:
+        >>> # GPU 0: loss = 0.5, GPU 1: loss = 0.6
+        >>> avg_loss = all_reduce_scalar(loss.item())  # 0.55
+        >>> if is_main_process():
+        >>>     mlflow.log_metrics({"train/loss": avg_loss}, step=epoch)
+    """
+    if not dist.is_initialized():
+        return value
+
+    tensor = torch.tensor(value, device=torch.cuda.current_device())
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+
+    if op == "mean":
+        tensor /= dist.get_world_size()
+
+    return tensor.item()
+```
+
+### 3.2 wrap_model_ddp() 상세
+
+**기능**: 모델을 DDP로 래핑 (분산 환경에서만)
+
+**핵심 로직**:
+
+```python
+def wrap_model_ddp(model, device, find_unused_parameters=False):
+    # 1. Distributed 환경 체크
+    if not dist.is_initialized():
+        return model  # MPS/CPU → skip
+
+    # 2. Device type에 따라 device_ids 설정
+    device_ids = [device.index] if device.type == "cuda" else None
+    # CUDA: device_ids=[0,1,2,3] (각 rank에서 자기 device)
+    # MPS/CPU: device_ids=None (device_ids 불필요)
+
+    # 3. DDP wrapping
+    return DDP(model, device_ids=device_ids, find_unused_parameters=find_unused_parameters)
+```
+
+**find_unused_parameters 설명**:
+- `False` (기본): 모든 파라미터가 gradient 계산에 사용됨 (가정)
+- `True`: 일부 파라미터가 사용되지 않을 수 있음 (예: Conditional branches)
+- **우리 케이스**: `False` 사용 (Adapter 전체 파라미터 항상 사용)
+
+**MPS 호환성**:
+- MPS는 `dist.is_initialized() == False` → DDP skip → 원본 모델 반환
+- CUDA는 `dist.is_initialized() == True` → DDP wrapping
+
+### 3.3 unwrap_model() 상세
+
+**기능**: DDP wrapper 제거 (checkpoint 저장용)
+
+**필요성**:
+
+```python
+# DDP-wrapped model state_dict (오염됨)
+wrapped_model.state_dict()
+# {
+#     "module.value_head.weight": ...,  # ❌ "module." prefix
+#     "module.mtp_heads.0.weight": ...,
+# }
+
+# Original model state_dict (깨끗함)
+unwrap_model(wrapped_model).state_dict()
+# {
+#     "value_head.weight": ...,  # ✅ "module." prefix 없음
+#     "mtp_heads.0.weight": ...,
+# }
+```
+
+**로직**:
+
+```python
+def unwrap_model(model):
+    if isinstance(model, DDP):
+        return model.module  # DDP.module이 원본 모델
+    return model  # 이미 unwrapped
+```
+
+**사용 패턴**:
+
+```python
+# Training
+model = wrap_model_ddp(adapter, device)
+optimizer = Adam(model.parameters())
+
+# Checkpoint 저장
+checkpoint = {
+    "adapter_state_dict": unwrap_model(model).state_dict(),  # ✅ Clean state_dict
+    "optimizer_state_dict": optimizer.state_dict(),
+}
+torch.save(checkpoint, "checkpoint.pt")
+```
+
+### 3.4 all_reduce_scalar() 상세
+
+**기능**: GPU 간 scalar metric 집계
+
+**필요성**:
+
+```python
+# 4-GPU 환경에서 각 GPU의 loss
+# GPU 0: loss = 0.50 (batch 0-7)
+# GPU 1: loss = 0.60 (batch 8-15)
+# GPU 2: loss = 0.55 (batch 16-23)
+# GPU 3: loss = 0.58 (batch 24-31)
+
+# Without all_reduce
+if is_main_process():
+    mlflow.log_metrics({"train/loss": 0.50}, step=epoch)  # ❌ GPU 0만
+
+# With all_reduce
+avg_loss = all_reduce_scalar(loss.item())  # (0.50+0.60+0.55+0.58)/4 = 0.5575
+if is_main_process():
+    mlflow.log_metrics({"train/loss": 0.5575}, step=epoch)  # ✅ 전체 평균
+```
+
+**로직**:
+
+```python
+def all_reduce_scalar(value, op="mean"):
+    if not dist.is_initialized():
+        return value  # Single-device → 그대로 반환
+
+    # Tensor 변환 (current device에 위치)
+    tensor = torch.tensor(value, device=torch.cuda.current_device())
+
+    # All-reduce (SUM)
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    # 모든 GPU의 값을 합산하여 각 GPU에 동일 값 저장
+
+    # Mean 계산 (필요 시)
+    if op == "mean":
+        tensor /= dist.get_world_size()
+
+    return tensor.item()  # Python float로 반환
+```
+
+**지원 연산**:
+- `op="mean"`: 평균 (기본, loss/accuracy용)
+- `op="sum"`: 합계 (total samples count용)
+
+**사용 예시**:
+
+```python
+# Training loop
+for batch in train_loader:
+    loss = compute_loss(...)
+    loss.backward()
+    optimizer.step()
+
+    # Metric aggregation
+    avg_loss = all_reduce_scalar(loss.item(), op="mean")
+    total_samples = all_reduce_scalar(batch_size, op="sum")
+
+    if is_main_process():
+        mlflow.log_metrics({
+            "train/loss": avg_loss,
+            "train/samples_processed": total_samples,
+        }, step=global_step)
+```
+
+---
+
+## Part 4: Pipelines 수정 가이드
+
+### 4.1 run_critic.py 수정
+
+**목표**: DDP 지원 추가 (4줄 변경)
+
+**수정 전** (핵심 부분만):
+
+```python
+from weighted_mtp.runtime import setup_environment, is_main_process
+
+def run_critic_training(config_path, **override_params):
+    # Setup
+    rank, device = setup_environment(config.runtime.seed)
+
+    # Model
+    adapter = load_adapter(config.models.policy, device)
+    optimizer = torch.optim.Adam(adapter.value_head.parameters(), lr=config.training.learning_rate)
+
+    # Training loop
+    for epoch in range(n_epochs):
+        train_metrics = train_stage1(adapter, train_loader, optimizer, config, device)
+        val_metrics = evaluate_stage(adapter, val_loader, config, device, stage="stage1")
+
+        if is_main_process():
+            mlflow.log_metrics({
+                "train/loss": train_metrics["stage1_loss"],
+                "val/loss": val_metrics["val_loss"],
+            }, step=epoch)
+
+        # Checkpoint
+        checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch}.pt"
+        save_checkpoint(adapter, optimizer, epoch, train_metrics, val_metrics, checkpoint_path)
+```
+
+**수정 후**:
+
+```python
+from weighted_mtp.runtime import (
+    setup_environment,
+    is_main_process,
+    wrap_model_ddp,      # 추가
+    unwrap_model,        # 추가
+    all_reduce_scalar,   # 추가
+)
+
+def run_critic_training(config_path, **override_params):
+    # Setup (변경 없음)
+    rank, device = setup_environment(config.runtime.seed)
+
+    # Model
+    adapter = load_adapter(config.models.policy, device)
+    adapter = wrap_model_ddp(adapter, device)  # ⭐ 추가 (1줄)
+    optimizer = torch.optim.Adam(adapter.parameters(), lr=config.training.learning_rate)
+
+    # Training loop
+    for epoch in range(n_epochs):
+        train_metrics = train_stage1(adapter, train_loader, optimizer, config, device)
+        val_metrics = evaluate_stage(adapter, val_loader, config, device, stage="stage1")
+
+        # Metric aggregation (⭐ 추가 2줄)
+        avg_train_loss = all_reduce_scalar(train_metrics["stage1_loss"])
+        avg_val_loss = all_reduce_scalar(val_metrics["val_loss"])
+
+        if is_main_process():
+            mlflow.log_metrics({
+                "train/loss": avg_train_loss,  # 수정
+                "val/loss": avg_val_loss,      # 수정
+            }, step=epoch)
+
+        # Checkpoint (⭐ unwrap 추가 1줄)
+        checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch}.pt"
+        save_checkpoint(unwrap_model(adapter), optimizer, epoch, train_metrics, val_metrics, checkpoint_path)
+```
+
+**변경 요약**:
+1. ✅ Import 1줄 수정 (wrap, unwrap, all_reduce 추가)
+2. ✅ Wrapping 1줄 추가 (`wrap_model_ddp`)
+3. ✅ Metric aggregation 2줄 추가 (`all_reduce_scalar`)
+4. ✅ Unwrap 1줄 수정 (`save_checkpoint(unwrap_model(adapter), ...)`)
+
+**총 5줄 변경/추가**
+
+### 4.2 run_verifiable.py 수정
+
+**동일 패턴** (run_critic.py와 유사):
+
+```python
+from weighted_mtp.runtime import (
+    setup_environment,
+    is_main_process,
+    wrap_model_ddp,      # 추가
+    unwrap_model,        # 추가
+    all_reduce_scalar,   # 추가
+)
+
+def run_verifiable_training(config_path, critic_checkpoint=None, **override_params):
+    rank, device = setup_environment(config.runtime.seed)
+
+    adapter = load_adapter(config.models.policy, device)
+    load_critic_checkpoint(config.experiment.critic_checkpoint, adapter, device)
+    adapter = wrap_model_ddp(adapter, device)  # ⭐ DDP wrapping
+    optimizer = torch.optim.Adam(adapter.parameters(), lr=config.training.learning_rate)
 
     for epoch in range(n_epochs):
-        for batch_idx, batch in enumerate(dataloader):
-            # Training step
-            loss = ...
-            loss.backward()
-            optimizer.step()
+        train_metrics = train_stage2(adapter, train_loader, optimizer, config, device)
+        val_metrics = evaluate_stage(adapter, val_loader, config, device, stage="stage2")
 
-            global_step += 1
+        # Metric aggregation
+        avg_train_total = all_reduce_scalar(train_metrics["stage2_total_loss"])
+        avg_train_mtp = all_reduce_scalar(train_metrics["mtp_loss"])
+        avg_train_value = all_reduce_scalar(train_metrics["value_loss"])
+        avg_val_loss = all_reduce_scalar(val_metrics["val_loss"])
 
-            # Log interval
-            if is_main_process() and global_step % log_interval == 0:
-                logger.info(f"[Stage 1] Step {global_step}, Epoch {epoch}, Loss: {loss:.4f}")
+        if is_main_process():
+            mlflow.log_metrics({
+                "train/total_loss": avg_train_total,
+                "train/mtp_loss": avg_train_mtp,
+                "train/value_loss": avg_train_value,
+                "val/loss": avg_val_loss,
+            }, step=epoch)
 
-            # Eval interval
-            if is_main_process() and global_step % eval_interval == 0:
-                val_metrics = evaluate_stage(adapter, val_dataloader, config, device, "stage1")
-                logger.info(f"[Stage 1] Step {global_step}, Val Loss: {val_metrics['val_loss']:.4f}")
-
-                # Best checkpoint
-                if val_metrics["val_loss"] < best_val_loss:
-                    ...
+        checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch}.pt"
+        save_checkpoint(unwrap_model(adapter), optimizer, epoch, train_metrics, val_metrics, checkpoint_path)
 ```
 
-#### defaults.yaml 설정
+**추가 고려**: TD error/weight stats aggregation
 
-```yaml
-training:
-  log_interval: 10    # 10 step마다 train loss 출력
-  eval_interval: 100  # 100 step마다 validation 평가
-  save_checkpoint_every: 1  # 1 epoch마다 checkpoint 저장
-```
-
-#### 검증 기준
-- [ ] Log interval: 설정된 step마다 출력 확인
-- [ ] Eval interval: 설정된 step마다 validation 평가 확인
-- [ ] Global step: Epoch 경계 무관하게 증가 확인
-
----
-
-### 3.7 Step 7: Multi-head Loss 개별 Logging (`pipelines/training.py`)
-
-#### 목표
-Stage 2에서 4개 MTP head loss를 개별적으로 출력
-
-#### 핵심 로직
-
-**Stage 2 학습 중**:
 ```python
-# 기존: 평균만 계산
-mtp_losses = []
-for i, head_logits in enumerate(mtp_logits_list):
-    loss_i = F.cross_entropy(...)
-    mtp_losses.append(loss_i)
+# train_stage2() 내부에서 TD error stats 계산 시
+td_stats = compute_td_stats(td_errors)  # {"td_mean": 0.1, "td_std": 0.3, ...}
+weight_stats = compute_weight_stats(weights)  # {"weight_mean": 1.2, ...}
 
-avg_mtp_loss = sum(mtp_losses) / len(mtp_losses)
+# Aggregation 필요
+avg_td_mean = all_reduce_scalar(td_stats["td_mean"])
+avg_td_std = all_reduce_scalar(td_stats["td_std"])
+avg_weight_mean = all_reduce_scalar(weight_stats["weight_mean"])
 
-# 추가: 개별 loss logging
-if is_main_process() and global_step % log_interval == 0:
-    for i, loss in enumerate(mtp_losses):
-        logger.info(f"    Head {i} loss: {loss:.4f}")
-    logger.info(f"    Avg MTP loss: {avg_mtp_loss:.4f}")
-```
-
-#### 검증 기준
-- [ ] 4개 head loss 개별 출력 확인
-- [ ] 평균 MTP loss 출력 확인
-- [ ] Log interval에 맞춰 출력 확인
-
----
-
-### 3.8 Step 8: CLI main() 함수 완성 (`cli/train.py`)
-
-#### 목표
-모든 구성 요소를 연결하여 사용자 커맨드 실행
-
-#### main() 흐름
-
-1. **Argument parsing**:
-   - `--config`: defaults.yaml 경로
-   - `--recipe`: recipe 파일 경로
-   - `--preset`: local-light 등 preset
-   - `--use-micro-model`: micro 모델 사용
-   - `--dry-run`: 설정만 출력
-   - `--run-name`: MLflow run 이름
-
-2. **Config loading & merging**:
-   - `load_config(config_path, recipe_path)`: Deep merge
-   - Preset 적용 (if specified)
-   - Micro model override (if specified)
-
-3. **Config validation**:
-   - `_validate_config(config)`
-
-4. **Environment setup**:
-   - Logging 설정
-   - Device 설정
-   - Distributed 초기화 (if multi-GPU)
-
-5. **MLflow initialization** (Rank 0 only):
-   - `create_mlflow_manager(config)`
-   - `start_run(run_name)`
-   - `log_params(config)`
-
-6. **Resource loading**:
-   - `_load_model(config, device)`
-   - `_load_tokenizer(config)`
-   - `_load_datasets(config)`
-   - `_create_dataloaders(...)`
-
-7. **Training config extraction**:
-   - `_extract_training_config(config)`
-
-8. **Pipeline execution**:
-   - `run_training_pipeline(adapter, stage1_train_loader, stage2_train_loader, config, device, save_dir)`
-   - Validation evaluation 포함 (내부에서)
-
-9. **MLflow finalization** (Rank 0 only):
-   - `log_metrics(final_metrics)`
-   - `log_artifact(checkpoint_path)`
-   - `end_run()`
-
-10. **Cleanup**:
-    - Distributed cleanup (if multi-GPU)
-
-#### 검증 기준
-- [ ] `--dry-run`: Config 출력 후 종료
-- [ ] `--use-micro-model`: Micro 모델로 로컬 학습 성공
-- [ ] `--recipe configs/recipe.verifiable.yaml`: Recipe 적용 성공
-- [ ] MLflow: Params, metrics, artifact 모두 로깅 확인
-- [ ] Checkpoint: Best checkpoint 저장 확인
-
----
-
-### 3.9 Step 9: Distributed Training 지원 (`runtime/distributed.py`)
-
-#### 목표
-분산학습 환경에서 Rank 0 only operations 보장
-
-#### 핵심 함수
-
-**`is_main_process() -> bool`**
-- 역할: 현재 프로세스가 Rank 0인지 확인
-- 반환: `True` (Rank 0) or `False` (other ranks)
-- 구현:
-  ```python
-  import torch.distributed as dist
-
-  def is_main_process() -> bool:
-      if not dist.is_available() or not dist.is_initialized():
-          return True  # 단일 GPU
-      return dist.get_rank() == 0
-  ```
-
-#### 적용 위치
-
-**Checkpoint 저장**:
-```python
 if is_main_process():
-    _save_checkpoint(...)
+    mlflow.log_metrics({
+        "train/td_mean": avg_td_mean,
+        "train/td_std": avg_td_std,
+        "train/weight_mean": avg_weight_mean,
+    }, step=global_step)
 ```
 
-**Logging**:
+### 4.3 run_rho1.py 수정
+
+**동일 패턴**:
+
 ```python
-if is_main_process():
-    logger.info(...)
+from weighted_mtp.runtime import (
+    setup_environment,
+    is_main_process,
+    wrap_model_ddp,
+    unwrap_model,
+    all_reduce_scalar,
+)
+
+def run_rho1_training(config_path, **override_params):
+    rank, device = setup_environment(config.runtime.seed)
+
+    policy_adapter = load_adapter(config.models.policy, device)
+    policy_adapter = wrap_model_ddp(policy_adapter, device)  # ⭐ DDP wrapping
+
+    # Reference model은 wrapping 불필요 (inference only)
+    ref_model = load_reference_model(config.models.reference, device)
+
+    optimizer = torch.optim.Adam(policy_adapter.parameters(), lr=config.training.learning_rate)
+
+    # Training loop (동일 패턴)
+    for epoch in range(n_epochs):
+        train_metrics = train_rho1(policy_adapter, ref_model, train_loader, optimizer, config, device)
+
+        avg_loss = all_reduce_scalar(train_metrics["rho1_loss"])
+        avg_excess_loss = all_reduce_scalar(train_metrics["excess_loss_mean"])
+
+        if is_main_process():
+            mlflow.log_metrics({
+                "train/rho1_loss": avg_loss,
+                "train/excess_loss_mean": avg_excess_loss,
+            }, step=epoch)
+
+        checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch}.pt"
+        save_checkpoint(unwrap_model(policy_adapter), optimizer, epoch, train_metrics, val_metrics, checkpoint_path)
 ```
 
-**MLflow**:
+**Ref model 주의사항**:
+- ❌ Ref model은 DDP wrapping 불필요 (학습 안 함, inference only)
+- ✅ Policy adapter만 wrapping
+
+### 4.4 checkpoint_utils.py 수정 (선택적)
+
+**현재 save_checkpoint() 구조**:
+
 ```python
-if is_main_process():
-    mlflow_manager.log_metrics(...)
+def save_checkpoint(adapter, optimizer, epoch, train_metrics, val_metrics, checkpoint_path):
+    checkpoint = {
+        "adapter_state_dict": adapter.state_dict(),
+        "value_head_state_dict": adapter.value_head.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        ...
+    }
+    torch.save(checkpoint, checkpoint_path)
 ```
 
-#### 검증 기준
-- [ ] 단일 GPU: is_main_process() = True
-- [ ] 분산학습: Rank 0만 checkpoint 저장
-- [ ] 분산학습: Rank 0만 console 출력
-- [ ] 분산학습: Rank 0만 MLflow 로깅
+**수정 필요 여부**: ❌ 불필요
+
+**이유**:
+- Caller에서 이미 `unwrap_model(adapter)` 전달 → `adapter`는 unwrapped model
+- 현재 코드 그대로 사용 가능
+
+**대안** (더 안전한 방식):
+
+```python
+def save_checkpoint(adapter, optimizer, epoch, train_metrics, val_metrics, checkpoint_path):
+    # Unwrap 내부에서 처리 (호출자 부담 감소)
+    from weighted_mtp.runtime.ddp import unwrap_model
+    adapter = unwrap_model(adapter)
+
+    checkpoint = {
+        "adapter_state_dict": adapter.state_dict(),
+        "value_head_state_dict": adapter.value_head.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        ...
+    }
+    torch.save(checkpoint, checkpoint_path)
+```
+
+**권장**: Caller에서 unwrap (명시적, 현재 방식 유지)
 
 ---
 
-## Part 4: 통합 및 검증
+## Part 5: Step별 구현 가이드
 
-### 4.1 통합 테스트
+### Step 1: runtime/ddp.py 구현
 
-#### Test 1: Dry-run 모드
+**목표**: DDP utilities 파일 생성
+
+**작업**:
+
 ```bash
-python -m weighted_mtp.cli.train \
-    --config configs/defaults.yaml \
-    --recipe configs/recipe.verifiable.yaml \
-    --dry-run
+# 1. 파일 생성
+touch src/weighted_mtp/runtime/ddp.py
+
+# 2. 코드 작성 (Part 3.1 참고)
+# - wrap_model_ddp()
+# - unwrap_model()
+# - all_reduce_scalar()
+
+# 3. __init__.py 업데이트
+# src/weighted_mtp/runtime/__init__.py
 ```
-**검증**: Config 출력, 실행 안 함
 
-#### Test 2: Micro 모델 로컬 학습
-```bash
-python -m weighted_mtp.cli.train \
-    --config configs/defaults.yaml \
-    --recipe configs/recipe.verifiable.yaml \
-    --use-micro-model \
-    --preset local-light
-```
-**검증**:
-- Model loading 성공
-- Stage 1/2 학습 성공
-- Validation evaluation 성공
-- Best checkpoint 저장
-- MLflow 로깅 성공
+**__init__.py 수정**:
 
-#### Test 3: Production 모델 학습
-```bash
-python -m weighted_mtp.cli.train \
-    --config configs/defaults.yaml \
-    --recipe configs/recipe.verifiable.yaml
-```
-**검증**:
-- Production model (7B) 로딩
-- 분산학습 동작 (4 GPU)
-- MLflow S3 artifact 업로드
-
-### 4.2 검증 체크리스트
-
-#### 기능 검증
-- [ ] Config deep merge 동작
-- [ ] Resource loading 성공 (model, tokenizer, datasets)
-- [ ] Validation evaluation 동작
-- [ ] Best checkpoint 저장 (val_loss 기준)
-- [ ] Step 기반 logging
-- [ ] Step 기반 evaluation
-- [ ] Multi-head loss 개별 출력
-- [ ] MLflow params/metrics/artifact 로깅
-- [ ] Rank 0 only operations
-
-#### 성능 검증
-- [ ] Micro 모델: 학습 완료 (<10분)
-- [ ] Production 모델: 분산학습 동작 확인
-
-#### 품질 검증
-- [ ] Unit tests 통과 (config, resource loading)
-- [ ] Integration test 통과 (end-to-end)
-- [ ] MLflow UI에서 실험 확인 가능
-
----
-
-## Part 5: Phase 5와의 연계
-
-### 5.1 Phase 5에서 제공하는 것
-
-**파이프라인 인터페이스**:
 ```python
-def run_training_pipeline(
-    adapter: MetaLlamaMTPAdapter,
-    stage1_dataloader: DataLoader,
-    stage2_dataloader: DataLoader,
-    config: dict,
-    device: torch.device,
-    save_dir: Path | None,
-) -> dict[str, dict[str, float]]
+# src/weighted_mtp/runtime/__init__.py
+from .distributed import (
+    init_distributed,
+    is_main_process,
+    create_distributed_sampler,
+    cleanup_distributed,
+)
+from .environment import (
+    get_device,
+    setup_seed,
+    setup_environment,
+)
+from .ddp import (  # ⭐ 추가
+    wrap_model_ddp,
+    unwrap_model,
+    all_reduce_scalar,
+)
+
+__all__ = [
+    "init_distributed",
+    "is_main_process",
+    "create_distributed_sampler",
+    "cleanup_distributed",
+    "get_device",
+    "setup_seed",
+    "setup_environment",
+    "wrap_model_ddp",      # ⭐ 추가
+    "unwrap_model",        # ⭐ 추가
+    "all_reduce_scalar",   # ⭐ 추가
+]
 ```
 
-**Value weighting 모듈**:
-- `compute_td_errors()`
-- `build_weights()`
-- `compute_weight_stats()`, `compute_td_stats()`
+**검증 기준**:
+- [ ] `python -m py_compile src/weighted_mtp/runtime/ddp.py` 성공
+- [ ] Import 테스트: `from weighted_mtp.runtime import wrap_model_ddp` 성공
+- [ ] Unit test 작성 (tests/unit/test_ddp.py)
 
-**Stage 1/2 학습 함수**:
-- `train_stage1()`
-- `train_stage2()`
+**예상 소요 시간**: 1-2시간
 
-### 5.2 Phase 6에서 추가하는 것
+### Step 2: run_critic.py 수정
 
-**사용자 진입점**:
-- CLI argparse
-- Config loading & merging
-- Resource loading
+**목표**: Critic runner DDP 지원 추가
 
-**프로덕션 기능**:
-- Validation evaluation
-- Best checkpoint 저장
-- MLflow 로깅
-- Distributed training 지원
+**작업**:
 
-**Phase 5 수정사항**:
-- `evaluate_stage()` 함수 추가 (`pipelines/training.py`)
-- Global step 기반 logging/evaluation 추가
-- Multi-head loss 개별 logging 추가
-- Rank 0 only 체크 추가
+1. Import 수정
+2. `wrap_model_ddp()` 추가
+3. `all_reduce_scalar()` 추가
+4. `unwrap_model()` 추가
+
+**검증 기준**:
+- [ ] Syntax check: `python -m py_compile src/weighted_mtp/pipelines/run_critic.py`
+- [ ] MPS local test: `python -m weighted_mtp.pipelines.run_critic --config configs/critic/critic_local.yaml`
+- [ ] DDP simulation test (선택적): `torchrun --nproc_per_node=2 -m weighted_mtp.pipelines.run_critic --config configs/critic/critic_local.yaml`
+
+**예상 소요 시간**: 1-2시간
+
+### Step 3: run_verifiable.py 수정
+
+**목표**: Verifiable runner DDP 지원 추가
+
+**작업**: Step 2와 동일 패턴
+
+**추가 고려**:
+- TD error/weight stats aggregation
+- Critic checkpoint 로드 후 wrapping
+
+**검증 기준**:
+- [ ] Syntax check 성공
+- [ ] MPS local test 성공 (critic checkpoint 로드 확인)
+- [ ] DDP simulation test (선택적)
+
+**예상 소요 시간**: 1-2시간
+
+### Step 4: run_rho1.py 수정
+
+**목표**: Rho-1 runner DDP 지원 추가
+
+**작업**: Step 2와 동일 패턴
+
+**추가 고려**:
+- Policy adapter만 wrapping (ref model 제외)
+
+**검증 기준**:
+- [ ] Syntax check 성공
+- [ ] MPS local test 성공
+- [ ] DDP simulation test (선택적)
+
+**예상 소요 시간**: 1-2시간
+
+### Step 5: Unit Tests 작성
+
+**목표**: DDP utilities 테스트
+
+**파일 생성**: `tests/unit/test_ddp.py`
+
+**테스트 케이스**:
+
+```python
+"""DDP utilities unit tests"""
+import pytest
+import torch
+from weighted_mtp.runtime.ddp import wrap_model_ddp, unwrap_model, all_reduce_scalar
+
+
+class DummyModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(10, 10)
+
+
+def test_wrap_model_ddp_without_distributed():
+    """Distributed 환경 없을 때 원본 모델 반환"""
+    model = DummyModel()
+    device = torch.device("cpu")
+
+    wrapped = wrap_model_ddp(model, device)
+
+    assert wrapped is model  # 원본 반환
+    assert not isinstance(wrapped, torch.nn.parallel.DistributedDataParallel)
+
+
+def test_unwrap_model_no_wrapping():
+    """Unwrapped model 그대로 반환"""
+    model = DummyModel()
+
+    unwrapped = unwrap_model(model)
+
+    assert unwrapped is model
+
+
+def test_unwrap_model_with_ddp():
+    """DDP-wrapped model unwrap"""
+    # DDP mock (실제 distributed 환경 없이 테스트)
+    model = DummyModel()
+    # 실제 DDP는 distributed 환경 필요, mock으로 대체
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
+    # Skip if not CUDA available
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    device = torch.device("cuda:0")
+    model = model.to(device)
+    wrapped = DDP(model, device_ids=[0])
+
+    unwrapped = unwrap_model(wrapped)
+
+    assert unwrapped is model
+
+
+def test_all_reduce_scalar_without_distributed():
+    """Distributed 환경 없을 때 원본 값 반환"""
+    value = 1.234
+
+    result = all_reduce_scalar(value)
+
+    assert result == value
+
+
+def test_all_reduce_scalar_with_sum():
+    """Sum operation"""
+    value = 10.0
+
+    result = all_reduce_scalar(value, op="sum")
+
+    assert result == value  # Single-device → 그대로 반환
+```
+
+**검증 기준**:
+- [ ] `uv run pytest tests/unit/test_ddp.py -v` 전체 통과
+- [ ] Coverage ≥ 80%
+
+**예상 소요 시간**: 1-2시간
+
+### Step 6: Integration Test (선택적)
+
+**목표**: End-to-end DDP 테스트
+
+**테스트 시나리오**:
+
+1. **2-GPU DDP simulation** (로컬 머신):
+   ```bash
+   torchrun --nproc_per_node=2 \
+       -m weighted_mtp.pipelines.run_critic \
+       --config configs/critic/critic_local.yaml
+   ```
+
+2. **Checkpoint 호환성 확인**:
+   - DDP로 학습한 checkpoint
+   - Single-device로 로드 가능 확인
+
+3. **Metric aggregation 검증**:
+   - 2-GPU에서 서로 다른 loss 계산
+   - All-reduce 후 평균 확인
+
+**검증 기준**:
+- [ ] 2-GPU 실행 성공 (GPU 2개 있는 환경)
+- [ ] Checkpoint 호환성 확인
+- [ ] Metric aggregation 정확도 확인
+
+**예상 소요 시간**: 2-3시간
+
+### Step 7: 문서 업데이트
+
+**목표**: README 및 사용 가이드 업데이트
+
+**작업**:
+
+1. **README.md 업데이트**:
+   - DDP 실행 방법 추가
+   - torchrun 예시 명령어
+
+2. **docs/usage_guide.md 생성** (선택적):
+   - Single-device vs DDP 실행 가이드
+   - VESSL 환경 설정 가이드
+
+**내용 예시**:
+
+```markdown
+## Distributed Training (DDP)
+
+### Local Single-Device / MPS (M3 Mac)
+
+```bash
+# MPS (M3 Mac)
+python -m weighted_mtp.pipelines.run_critic \
+    --config configs/critic/critic_local.yaml
+
+# Single CUDA GPU
+python -m weighted_mtp.pipelines.run_critic \
+    --config configs/critic/critic.yaml
+```
+
+### VESSL A100 4-GPU (DDP)
+
+```bash
+# torchrun으로 실행
+torchrun \
+    --nproc_per_node=4 \
+    -m weighted_mtp.pipelines.run_critic \
+    --config configs/critic/critic.yaml
+
+# 편의 스크립트 (선택적)
+./scripts/train_ddp.sh --config configs/critic/critic.yaml
+```
+
+### 주의사항
+
+- DDP 환경에서는 `batch_size`가 per-GPU batch size입니다
+- Effective batch size = `batch_size` × `nproc_per_node` × `gradient_accumulation_steps`
+- 예: batch_size=8, 4-GPU, grad_accum=4 → Effective=128
+```
+
+**검증 기준**:
+- [ ] README.md DDP 섹션 추가
+- [ ] 명령어 예시 정확성 확인
+
+**예상 소요 시간**: 0.5-1시간
 
 ---
 
-## Part 6: 예상 소요 시간
+## Part 6: 검증 및 완료 기준
+
+### 6.1 기능 검증
+
+**runtime/ddp.py**:
+- [ ] `wrap_model_ddp()` 정상 동작 (distributed 환경 자동 감지)
+- [ ] `unwrap_model()` 정상 동작 (DDP wrapper 제거)
+- [ ] `all_reduce_scalar()` 정상 동작 (metric aggregation)
+- [ ] MPS 환경에서 DDP skip 확인
+- [ ] Unit test 전체 통과 (`tests/unit/test_ddp.py`)
+
+**run_critic.py**:
+- [ ] MPS local test 실행 성공 (DDP 미적용)
+- [ ] Checkpoint 저장 시 unwrap 확인 (state_dict에 "module." prefix 없음)
+- [ ] Metric aggregation 정상 동작 (all_reduce_scalar)
+
+**run_verifiable.py**:
+- [ ] MPS local test 실행 성공
+- [ ] Critic checkpoint 로드 후 DDP wrapping 성공
+- [ ] TD error/weight stats aggregation 정상 동작
+
+**run_rho1.py**:
+- [ ] MPS local test 실행 성공
+- [ ] Policy adapter만 wrapping 확인 (ref model 제외)
+
+**DDP Integration** (선택적, GPU 2개 이상 환경):
+- [ ] 2-GPU torchrun 실행 성공
+- [ ] Gradient synchronization 확인 (각 GPU에서 동일 weight 업데이트)
+- [ ] Checkpoint 호환성 확인 (DDP → Single-device 로드 가능)
+
+### 6.2 성능 검증
+
+**학습 속도** (4-GPU VESSL):
+- [ ] DDP 적용 시 ~3-4x 속도 향상 (이론치: 4x, 실제 통신 overhead 고려)
+- [ ] GPU utilization ≥ 80% (모든 GPU 활용)
+
+**메모리 효율**:
+- [ ] 각 GPU 메모리 사용량 < 80GB (A100 80GB 기준)
+- [ ] OOM 에러 없음
+
+**Metric 정확성**:
+- [ ] All-reduce 평균이 각 GPU loss 평균과 일치
+- [ ] Validation loss가 single-device와 동일 (동일 seed)
+
+### 6.3 코드 품질 검증
+
+**Linting**:
+```bash
+uv run ruff check --fix src/weighted_mtp/runtime/ddp.py
+uv run ruff check --fix src/weighted_mtp/pipelines/run_*.py
+```
+
+**Type checking** (선택적):
+```bash
+uv run mypy src/weighted_mtp/runtime/ddp.py
+```
+
+**Unit tests**:
+```bash
+uv run pytest tests/unit/test_ddp.py -v --cov=src/weighted_mtp/runtime/ddp
+```
+
+**Integration tests** (선택적):
+```bash
+# 2-GPU 환경
+torchrun --nproc_per_node=2 -m weighted_mtp.pipelines.run_critic \
+    --config configs/critic/critic_local.yaml
+```
+
+### 6.4 완료 기준
+
+**필수 (Must-have)**:
+- [ ] `runtime/ddp.py` 구현 완료 (3개 함수)
+- [ ] `run_critic.py` DDP 지원 추가
+- [ ] `run_verifiable.py` DDP 지원 추가
+- [ ] `run_rho1.py` DDP 지원 추가
+- [ ] Unit tests 통과 (`test_ddp.py`)
+- [ ] MPS local test 성공 (모든 runner)
+- [ ] Syntax check 전체 통과
+
+**권장 (Should-have)**:
+- [ ] 2-GPU integration test 성공
+- [ ] Checkpoint 호환성 검증
+- [ ] README 업데이트 (DDP 사용 가이드)
+
+**선택적 (Nice-to-have)**:
+- [ ] VESSL 4-GPU 실제 테스트
+- [ ] 성능 벤치마크 (1-GPU vs 4-GPU 속도 비교)
+- [ ] scripts/train_ddp.sh 편의 스크립트
+
+---
+
+## Part 7: 예상 소요 시간
 
 | 작업 | 예상 시간 | 비고 |
 |------|-----------|------|
-| Config extraction/validation | 2-3시간 | _extract_training_config, _validate_config |
-| Resource loading 함수 | 3-4시간 | _load_model, _load_tokenizer, _load_datasets, _create_dataloaders |
-| Validation evaluation | 3-4시간 | evaluate_stage 함수 |
-| Best checkpoint 저장 | 2-3시간 | Best tracking 로직 |
-| MLflow 통합 | 3-4시간 | MLflowManager 신규 구현 + CLI 통합 |
-| Step 기반 logging/eval | 2-3시간 | Global step tracking |
-| Multi-head logging | 1-2시간 | 개별 loss 출력 |
-| CLI main() 완성 | 3-4시간 | 전체 흐름 연결 |
-| Distributed 지원 | 2-3시간 | is_main_process 적용 |
-| 통합 테스트 및 디버깅 | 4-6시간 | End-to-end 테스트 |
-| 문서화 | 2-3시간 | 본 문서 업데이트 |
-| **합계** | **27-39시간** | 약 3.5-5일 |
+| Step 1: runtime/ddp.py 구현 | 1-2시간 | 3개 함수 + __init__.py |
+| Step 2: run_critic.py 수정 | 1-2시간 | 4줄 변경 + 검증 |
+| Step 3: run_verifiable.py 수정 | 1-2시간 | 동일 패턴 |
+| Step 4: run_rho1.py 수정 | 1-2시간 | 동일 패턴 |
+| Step 5: Unit tests 작성 | 1-2시간 | test_ddp.py |
+| Step 6: Integration test (선택적) | 2-3시간 | 2-GPU 테스트 |
+| Step 7: 문서 업데이트 | 0.5-1시간 | README DDP 섹션 |
+| 최종 검증 및 디버깅 | 1-2시간 | End-to-end 확인 |
+| **합계 (Integration test 제외)** | **6.5-11시간** | 약 1-1.5일 |
+| **합계 (Integration test 포함)** | **8.5-14시간** | 약 1-2일 |
 
 ---
 
-## Part 7: 부록
+## Part 8: 다음 단계 (Phase 6 완료 후)
 
-### 7.1 Config 구조 요약
+**Phase 6 완료 기준 충족 시**:
+- ✅ DDP 인프라 통합 완료
+- ✅ MPS local test / 4-GPU VESSL 양쪽 호환
+- ✅ Checkpoint 호환성 확인
+- ✅ Metric aggregation 정상 동작
 
-```yaml
-# defaults.yaml
-project:
-  name: weighted-mtp
-  version: "2.0.0"
+**다음 작업**:
+1. **VESSL Production 실험**: 4-GPU DDP로 full training 실행
+2. **성능 분석**: 1-GPU vs 4-GPU 학습 속도 비교
+3. **Hyperparameter tuning**: DDP 환경에서 최적 batch size/learning rate 탐색
+4. **Phase 7 계획** (선택적): Mixed precision (AMP), Gradient checkpointing 등 최적화
 
-models:
-  policy:
-    name: meta-llama-mtp
-    path: storage/models_v2/meta-llama-mtp
+---
 
-dataset:
-  name: codecontests
-  train: storage/datasets_v2/codecontests/processed/train.jsonl
-  validation: storage/datasets_v2/codecontests/processed/valid.jsonl
+## Part 9: 개발원칙 준수 체크리스트
 
-mlflow:
-  tracking_uri: "http://13.50.240.176"
-  experiment: "weighted-mtp/production"
-  s3_artifacts: "s3://wmtp/mlflow-artifacts"
+- [x] **원칙 1**: 앞/뒤 흐름 확인 완료 (runtime/ 인프라 → pipelines/ 통합)
+- [x] **원칙 2**: 기존 구조 존중 (runtime/distributed.py 재사용), 중복 제거 (Accelerate 도입 안 함)
+- [x] **원칙 3**: 잘못된 구조 없음 (기존 runtime/ 인프라 우수)
+- [x] **원칙 4**: 하위 호환성 무시 (DDP 전격 도입, 구조 변경 최소화)
+- [x] **원칙 4-1**: 인자명 통일 (model, device, value 일관성)
+- [x] **원칙 4-2**: 단순 wrapper 금지 (3개 utility 함수만, 과도한 계층 없음)
+- [x] **원칙 4-3**: 한글 주석, 이모지 없음, 핵심만
+- [ ] **원칙 5**: 구현 후 계획과 비교 검토 (구현 완료 시)
+- [x] **원칙 6**: 의존성 도구 활용 (PyTorch 기본 DDP, torchrun)
 
-training:
-  log_interval: 10
-  eval_interval: 100
-  save_checkpoint_every: 1
+---
 
-  stage1:
-    n_epochs: 0.5
-    learning_rate: 1.0e-4
-    loss_type: mse
+## 부록 A: torchrun 상세 가이드
 
-  stage2:
-    n_epochs: 2.5
-    learning_rate: 1.0e-5
-    beta: 0.9
-    value_coef: 0.5
-    max_grad_norm: 0.5
-    loss_type: mse
-    weight_clip_min: 0.1
-    weight_clip_max: 5.0
+### A.1 torchrun 기본 사용법
+
+**단일 노드 4-GPU**:
+
+```bash
+torchrun \
+    --nproc_per_node=4 \
+    --nnodes=1 \
+    --node_rank=0 \
+    --master_addr=localhost \
+    --master_port=29500 \
+    -m weighted_mtp.pipelines.run_critic \
+    --config configs/critic/critic.yaml
 ```
 
-### 7.2 MLflow 저장 구조
+**파라미터 설명**:
+- `--nproc_per_node=4`: 노드당 프로세스 수 (=GPU 수)
+- `--nnodes=1`: 전체 노드 수 (단일 머신)
+- `--node_rank=0`: 현재 노드 rank (0-indexed)
+- `--master_addr=localhost`: 통신 주소 (단일 머신은 localhost)
+- `--master_port=29500`: 통신 포트 (임의 선택, 충돌 방지)
 
+### A.2 환경변수 자동 설정
+
+torchrun이 각 프로세스에 설정하는 환경변수:
+
+```bash
+# GPU 0 (Rank 0)
+RANK=0
+WORLD_SIZE=4
+LOCAL_RANK=0
+MASTER_ADDR=localhost
+MASTER_PORT=29500
+
+# GPU 1 (Rank 1)
+RANK=1
+WORLD_SIZE=4
+LOCAL_RANK=1
+MASTER_ADDR=localhost
+MASTER_PORT=29500
+
+# ... GPU 2, 3 동일 패턴
 ```
-s3://wmtp/mlflow-artifacts/
-└── 8/                                    # Experiment ID
-    └── {run_id}/                         # Run ID
-        └── artifacts/
-            └── checkpoints/
-                ├── checkpoint_stage1_best.pt
-                └── checkpoint_stage2_best.pt
+
+### A.3 편의 스크립트
+
+**scripts/train_ddp.sh**:
+
+```bash
+#!/bin/bash
+# DDP 학습 편의 스크립트
+
+set -e
+
+# Default values
+NPROC=${NPROC:-4}
+MASTER_PORT=${MASTER_PORT:-29500}
+
+# Run torchrun
+torchrun \
+    --nproc_per_node="${NPROC}" \
+    --nnodes=1 \
+    --node_rank=0 \
+    --master_addr=localhost \
+    --master_port="${MASTER_PORT}" \
+    -m weighted_mtp.pipelines.run_critic \
+    "$@"
 ```
 
-### 7.3 개발 원칙 준수 체크리스트
+**사용**:
 
-- [x] **원칙 1**: Phase 5 파이프라인 인터페이스 분석 완료
-- [x] **원칙 2**: Phase 5 구조 존중, 중복 메서드 없음
-- [x] **원칙 3**: Phase 5 수정 최소화 (evaluate_stage 추가만)
-- [x] **원칙 4**: 구체적 코드 구현 삭제, 핵심 설명만 유지
-- [x] **원칙 5**: Phase 3/5 양식 참고하여 간결한 문서 작성
-- [x] **원칙 6**: 의존성 도구 활용 (uv, mlflow, boto3)
+```bash
+# 4-GPU (기본)
+./scripts/train_ddp.sh --config configs/critic/critic.yaml
 
-### 7.4 참고 문서
+# 2-GPU (NPROC override)
+NPROC=2 ./scripts/train_ddp.sh --config configs/critic/critic_local.yaml
 
-- `docs/05_phase3_detailed_plan.md`: 데이터 파이프라인 (양식 참고)
-- `docs/07_phase5_detailed_plan.md`: Value Training 파이프라인
-- `docs/wmtp_research_proposal.md`: WMTP 연구 의도
-- `src/weighted_mtp/pipelines/training.py`: Phase 5 파이프라인 구현
+# Custom port
+MASTER_PORT=12345 ./scripts/train_ddp.sh --config configs/critic/critic.yaml
+```
+
+---
+
+## 부록 B: Troubleshooting
+
+### B.1 DDP 관련 에러
+
+**에러**: `RuntimeError: Default process group has not been initialized`
+
+**원인**: `dist.is_initialized() == False`인데 DDP 사용 시도
+
+**해결**:
+```python
+# wrap_model_ddp()가 자동 처리 (is_initialized 체크)
+# torchrun 없이 실행 시 DDP skip됨
+```
+
+---
+
+**에러**: `RuntimeError: module(s) in parameter list do not match module(s) in DDP`
+
+**원인**: DDP wrapping 후 optimizer에 원본 모델 파라미터 전달
+
+**해결**:
+```python
+# Wrong
+model = wrap_model_ddp(model, device)
+optimizer = Adam(original_model.parameters())  # ❌
+
+# Correct
+model = wrap_model_ddp(model, device)
+optimizer = Adam(model.parameters())  # ✅ DDP-wrapped model
+```
+
+---
+
+**에러**: Checkpoint 로드 시 `"module." prefix` 에러
+
+**원인**: DDP-wrapped model state_dict를 unwrap 없이 저장
+
+**해결**:
+```python
+# Correct
+torch.save(unwrap_model(model).state_dict(), "checkpoint.pt")
+```
+
+### B.2 성능 이슈
+
+**문제**: 4-GPU인데 1-GPU와 속도 차이 없음
+
+**원인 1**: `DistributedSampler` 미사용 (모든 GPU가 동일 데이터 처리)
+
+**해결**:
+```python
+# create_distributed_sampler()가 자동 처리 (이미 구현됨)
+sampler = create_distributed_sampler(dataset, shuffle=True)
+loader = DataLoader(dataset, sampler=sampler, batch_size=32)
+```
+
+**원인 2**: Batch size가 너무 작음 (통신 overhead > 계산 이득)
+
+**해결**:
+```bash
+# Per-GPU batch size 증가
+# Before: batch_size=2 → Effective=8 (2×4)
+# After: batch_size=8 → Effective=32 (8×4)
+```
+
+---
+
+**문서 종료**

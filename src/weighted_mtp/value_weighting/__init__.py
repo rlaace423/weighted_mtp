@@ -1,18 +1,30 @@
-"""TD error 기반 가중치 계산
+"""가중치 계산 모듈
 
-Modules:
-- td_error: 표준 TD error 계산 (Intermediate + Terminal)
-- weight_builder: Exponential weighting (IQL/AWR 방식)
-- metrics: TD error/weight 모니터링
+두 가지 Weighting 방식:
+- td_weighting: TD Error 기반 (Verifiable WMTP용)
+- rho1_weighting: Reference model 기반 (Rho-1 WMTP용)
 """
 
-from .td_error import compute_td_errors
-from .weight_builder import build_weights
-from .metrics import compute_weight_stats, compute_td_stats
+from .td_weighting import (
+    build_weights as build_td_weights,
+    compute_td_errors,
+    compute_td_stats,
+    compute_weight_stats,
+)
+from .rho1_weighting import (
+    build_weights as build_rho1_weights,
+    compute_excess_loss,
+    compute_rho1_stats,
+)
 
 __all__ = [
+    # TD Error 기반 (Verifiable)
     "compute_td_errors",
-    "build_weights",
-    "compute_weight_stats",
+    "build_td_weights",
     "compute_td_stats",
+    "compute_weight_stats",
+    # Rho-1 기반
+    "compute_excess_loss",
+    "build_rho1_weights",
+    "compute_rho1_stats",
 ]

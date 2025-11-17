@@ -1,6 +1,7 @@
 # MLflow 통합 가이드 (리팩토링 버전)
 
-본 문서는 `docs/00_ideal_structure.md`와 `docs/02_implementation_plan.md`에서 정의한 아키텍처에 맞추어, 기존 WMTP EC2 MLflow 서버 + S3 아티팩트 구성을 **동일하게 재사용**하면서 리팩토링된 `weighted_mtp/` 프로젝트에 통합하는 절차를 상세히 설명한다.
+본 문서는 `docs/00_ideal_structure.md`와 `docs/02_implementation_plan.md`에서 정의한 아키텍처에 맞추어, 
+기존 WMTP EC2 MLflow 서버 + S3 아티팩트 구성을 **동일하게 재사용**하면서 리팩토링된 `weighted_mtp/` 프로젝트에 통합하는 절차를 상세히 설명한다.
 
 ---
 

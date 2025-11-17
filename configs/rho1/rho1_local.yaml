@@ -1,0 +1,48 @@
+# Rho-1 WMTP Local Test (Micro model)
+# M3 Mac 경량 테스트용
+
+experiment:
+  name: rho1-wmtp-local
+  description: "Local test with micro model"
+  stage: rho1
+  tags:
+    - rho1
+    - local
+    - micro-model
+
+models:
+  policy:
+    name: micro-mtp
+    path: storage/models_v2/micro-mtp
+
+dataset:
+  name: codecontests
+  train: storage/datasets_v2/codecontests/processed/train.jsonl
+  validation: storage/datasets_v2/codecontests/processed/valid.jsonl
+  max_length: 512
+
+data_sampling:
+  n_samples: 500
+  balance_correct: false
+  correct_ratio: 1.0
+  seed: 42
+
+training:
+  n_epochs: 0.2
+  batch_size: 2
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-5
+  temperature: 1.0
+  max_grad_norm: 0.5
+  log_interval: 5
+
+checkpoint:
+  save_dir: storage/checkpoints/rho1/${experiment.name}
+  save_checkpoint_every: 0.2
+  save_best: true
+  save_final: true
+  save_total_limit: 3
+
+runtime:
+  device: mps
+  mixed_precision: false

@@ -20,8 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def load_dataset(
-    dataset_name: Literal["codecontests", "mbpp", "humaneval",
-                          "codecontests_small", "mbpp_small", "humaneval_small"],
+    dataset_name: Literal["codecontests", "mbpp", "humaneval"],
     split: Optional[str] = None,
     stage: Optional[Literal["stage1", "stage2"]] = None,
     n_samples: Optional[int] = None,
@@ -37,10 +36,10 @@ def load_dataset(
     JSONL 파일에서 해당 라인만 선택적으로 읽습니다.
 
     Args:
-        dataset_name: 데이터셋 이름 (codecontests, mbpp, humaneval, *_small)
+        dataset_name: 데이터셋 이름 (codecontests, mbpp, humaneval)
         split: 데이터 스플릿 (train, validation, test). None이면 모든 스플릿 로딩
         stage: 샘플링 전략 (stage1: is_correct 균형, stage2: difficulty curriculum)
-        n_samples: 샘플링할 샘플 수
+        n_samples: 샘플링할 샘플 수 (효율적 샘플링, 전체 데이터 로드 불필요)
         balance_correct: is_correct 균형 샘플링 여부
         correct_ratio: correct 샘플 비율 (기본 0.5)
         difficulty_weights: 난이도별 가중치 (Stage 2 전용)
@@ -141,35 +140,23 @@ def _get_dataset_paths(dataset_name: str) -> dict[str, str]:
     """데이터셋 이름으로 JSONL 파일 경로 해석
 
     Args:
-        dataset_name: 데이터셋 이름 (codecontests, mbpp, humaneval, *_small)
+        dataset_name: 데이터셋 이름 (codecontests, mbpp, humaneval)
 
     Returns:
         스플릿별 JSONL 파일 경로 딕셔너리
     """
-    # 작은 데이터셋인지 확인
-    if dataset_name.endswith("_small"):
-        base_dir = Path("storage/datasets_local_small")
-        dataset_dir = base_dir / dataset_name
-    else:
-        base_dir = Path("storage/datasets_v2")
-        dataset_dir = base_dir / dataset_name / "processed"
+    base_dir = Path("storage/datasets_v2")
+    dataset_dir = base_dir / dataset_name / "processed"
 
     if not dataset_dir.exists():
         raise FileNotFoundError(f"데이터셋 디렉터리가 존재하지 않습니다: {dataset_dir}")
 
     # 표준 스플릿 이름 매핑
-    if dataset_name.endswith("_small"):
-        split_mappings = {
-            "train": ["train_small.jsonl"],
-            "validation": ["valid_small.jsonl", "validation_small.jsonl"],
-            "test": ["test_small.jsonl"],
-        }
-    else:
-        split_mappings = {
-            "train": ["train.jsonl"],
-            "validation": ["valid.jsonl", "validation.jsonl"],
-            "test": ["test.jsonl"],
-        }
+    split_mappings = {
+        "train": ["train.jsonl"],
+        "validation": ["valid.jsonl", "validation.jsonl"],
+        "test": ["test.jsonl"],
+    }
 
     data_files = {}
 
@@ -199,29 +186,21 @@ def _load_metadata(
     Returns:
         메타데이터 리스트 또는 None (파일이 없는 경우)
     """
-    # 데이터셋 디렉터리 결정
-    if dataset_name.endswith("_small"):
-        base_dir = Path("storage/datasets_local_small")
-        dataset_dir = base_dir / dataset_name
-        suffix = "_small"
-    else:
-        base_dir = Path("storage/datasets_v2")
-        dataset_dir = base_dir / dataset_name / "processed"
-        suffix = ""
+    base_dir = Path("storage/datasets_v2")
+    dataset_dir = base_dir / dataset_name / "processed"
 
     if not dataset_dir.exists():
         logger.error(f"데이터셋 디렉터리가 존재하지 않습니다: {dataset_dir}")
         return None
 
-    # 메타데이터 파일 경로
-    # validation → validation 또는 valid
+    # 메타데이터 파일 경로 (validation → validation 또는 valid)
     if split == "validation":
         candidates = [
-            dataset_dir / f"validation{suffix}_metadata.json",
-            dataset_dir / f"valid{suffix}_metadata.json",
+            dataset_dir / "validation_metadata.json",
+            dataset_dir / "valid_metadata.json",
         ]
     else:
-        candidates = [dataset_dir / f"{split}{suffix}_metadata.json"]
+        candidates = [dataset_dir / f"{split}_metadata.json"]
 
     metadata_path = None
     for candidate in candidates:

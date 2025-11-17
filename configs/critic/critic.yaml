@@ -1,0 +1,38 @@
+# Critic Pre-training (Stage 1)
+# Value head pretraining for TD error calculation
+
+experiment:
+  name: critic-pretrain
+  description: "Value head pretraining for TD error calculation"
+  stage: critic
+  tags:
+    - critic
+    - value-head
+    - stage1
+
+dataset:
+  name: codecontests
+  train: storage/datasets_v2/codecontests/processed/train.jsonl
+  validation: storage/datasets_v2/codecontests/processed/valid.jsonl
+  max_length: 2048
+
+data_sampling:
+  n_samples: 30000
+  balance_correct: true
+  correct_ratio: 0.5
+  difficulty_range: [1, 11]
+  seed: 42
+
+training:
+  n_epochs: 0.5
+  batch_size: 8
+  learning_rate: 1.0e-4
+  loss_type: mse
+  log_interval: 10
+
+checkpoint:
+  save_dir: storage/checkpoints/critic/${experiment.name}
+  save_checkpoint_every: 0.5
+  save_best: true
+  save_final: true
+  save_total_limit: 3
