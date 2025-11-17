@@ -633,3 +633,57 @@ def _read_jsonl_by_indices(
     logger.info(f"JSONL 읽기 완료: {len(samples)} 샘플 로드")
 
     return samples
+
+
+def load_evaluation_dataset(
+    dataset_name: str,
+    split: str = "test",
+) -> Dataset:
+    """평가용 데이터셋 로드 (전체 샘플, 샘플링 없음)
+
+    벤치마크 평가를 위해 데이터셋 전체를 로드합니다.
+    학습용 load_dataset()과 달리 샘플링/필터링 없이 전체 데이터를 반환합니다.
+
+    Args:
+        dataset_name: 데이터셋 이름 (humaneval, mbpp, codecontests)
+        split: 데이터 스플릿 (test, validation)
+
+    Returns:
+        Dataset (HuggingFace Dataset 형식)
+
+    Examples:
+        >>> dataset = load_evaluation_dataset("humaneval", split="test")
+        >>> print(len(dataset))
+        164
+        >>> print(dataset[0].keys())
+        dict_keys(['instruction', 'input', 'output', 'task_id', 'metadata'])
+    """
+    # 데이터셋 경로 구성
+    dataset_dir = Path("storage/datasets_v2") / dataset_name / "processed"
+    jsonl_path = dataset_dir / f"{split}.jsonl"
+
+    if not jsonl_path.exists():
+        raise FileNotFoundError(
+            f"평가 데이터셋 파일이 존재하지 않습니다: {jsonl_path}\n"
+            f"먼저 데이터셋 준비를 완료하세요."
+        )
+
+    # JSONL 파일 전체 읽기
+    samples = []
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line_idx, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                sample = json.loads(line)
+                samples.append(sample)
+            except json.JSONDecodeError as e:
+                logger.warning(f"라인 {line_idx} 파싱 오류: {e}")
+                continue
+
+    logger.info(f"평가 데이터셋 로드 완료: {dataset_name}/{split} ({len(samples)} 샘플)")
+
+    # HuggingFace Dataset으로 변환
+    return Dataset.from_list(samples)

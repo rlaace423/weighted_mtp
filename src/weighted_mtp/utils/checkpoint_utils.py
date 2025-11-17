@@ -129,6 +129,104 @@ def load_critic_checkpoint(
     return checkpoint
 
 
+def load_checkpoint_for_evaluation(
+    checkpoint_path: Path,
+    device: torch.device,
+):
+    """평가용 checkpoint 로드 (전체 adapter 로드)
+
+    학습된 모델 전체를 로드하여 평가 모드로 설정합니다.
+    load_critic_checkpoint()와 달리 전체 adapter를 로드합니다.
+
+    Args:
+        checkpoint_path: Checkpoint 파일 경로
+        device: torch.device
+
+    Returns:
+        (model, checkpoint_metadata)
+        - model: MetaLlamaMTPAdapter (eval 모드, value_head 없음)
+        - checkpoint_metadata: {
+            "epoch": float,
+            "config": dict,  # 학습 설정 (모델 경로 등)
+            "val_metrics": dict,
+          }
+
+    Raises:
+        FileNotFoundError: Checkpoint 파일이 존재하지 않음
+        KeyError: checkpoint에 필수 키가 없음
+
+    Examples:
+        >>> model, metadata = load_checkpoint_for_evaluation(
+        ...     checkpoint_path=Path("storage/checkpoints/baseline/checkpoint_best.pt"),
+        ...     device=torch.device("cpu"),
+        ... )
+        >>> print(metadata["epoch"])
+        5.0
+        >>> print(metadata["val_metrics"]["val_loss"])
+        2.34
+    """
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint 파일이 존재하지 않습니다: {checkpoint_path}")
+
+    # Checkpoint 로드
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    logger.info(f"Checkpoint 로드 완료: {checkpoint_path}")
+
+    # 필수 키 검증
+    required_keys = ["adapter_state_dict", "epoch", "val_metrics"]
+    missing_keys = [k for k in required_keys if k not in checkpoint]
+    if missing_keys:
+        raise KeyError(
+            f"Checkpoint에 필수 키가 없습니다: {missing_keys}\n"
+            f"사용 가능한 키: {list(checkpoint.keys())}"
+        )
+
+    # Config 정보 추출 (checkpoint에 저장된 경우)
+    # 없으면 checkpoint 경로에서 추론
+    config_info = checkpoint.get("config", {})
+    if not config_info:
+        # Fallback: checkpoint 경로에서 모델 경로 추론
+        # storage/checkpoints/{experiment}/checkpoint_*.pt
+        checkpoint_dir = checkpoint_path.parent
+        experiment_name = checkpoint_dir.name
+
+        # 기본 모델 경로 추정
+        config_info = {
+            "model": {
+                "path": "storage/models_v2/meta-llama-mtp"  # 기본값
+            }
+        }
+        logger.warning(
+            f"Checkpoint에 config 정보가 없습니다. 기본값 사용: {config_info['model']['path']}"
+        )
+
+    # Adapter 로드 (MetaLlamaMTPAdapter)
+    from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
+
+    model = MetaLlamaMTPAdapter.from_pretrained(
+        model_path=config_info["model"]["path"],
+        device=device,
+        initialize_value_head=False,  # 평가에는 value head 불필요
+    )
+
+    # State dict 로드
+    model.load_state_dict(checkpoint["adapter_state_dict"])
+    model.eval()  # 평가 모드 설정
+
+    # Metadata 구성
+    checkpoint_metadata = {
+        "epoch": checkpoint["epoch"],
+        "config": config_info,
+        "val_metrics": checkpoint["val_metrics"],
+    }
+
+    logger.info("평가용 모델 로드 성공")
+    logger.info(f"  Epoch: {checkpoint_metadata['epoch']}")
+    logger.info(f"  Val loss: {checkpoint_metadata['val_metrics'].get('val_loss', 'N/A')}")
+
+    return model, checkpoint_metadata
+
+
 def cleanup_old_checkpoints(
     checkpoint_dir: Path,
     save_total_limit: int,

@@ -1,10 +1,12 @@
-# Phase1 Setup Scripts
+# Weighted MTP Scripts
 
-Phase1 자산 준비를 위한 통합 스크립트 (9개 → 3개로 통합)
+프로젝트 설정, 평가, 배포를 위한 스크립트 모음
 
 ## 📁 스크립트 구성
 
-### 1. `setup_models.py` - 모델 설정
+### Setup Scripts (Phase 1 자산 준비)
+
+#### 1. `setup_models.py` - 모델 설정
 모델 다운로드, 변환, Micro 생성, 검증을 통합 처리
 
 **기능:**
@@ -33,7 +35,7 @@ uv run python scripts/setup_models.py --model meta-llama-mtp --steps verify
 
 ---
 
-### 2. `setup_datasets.py` - 데이터셋 설정
+#### 2. `setup_datasets.py` - 데이터셋 설정
 데이터셋 다운로드, Small 버전 생성, 검증, 통계 생성을 통합 처리
 
 **기능:**
@@ -64,7 +66,7 @@ uv run python scripts/setup_datasets.py --datasets codecontests --steps small --
 
 ---
 
-### 3. `verify_storage.py` - 무결성 검증
+#### 3. `verify_storage.py` - 무결성 검증
 전체 storage 디렉터리 검증 및 Phase1 체크리스트 생성
 
 **기능:**
@@ -90,7 +92,95 @@ uv run python scripts/verify_storage.py --check all --generate-report
 
 ---
 
-## 🚀 Phase1 원클릭 실행
+### Evaluation Scripts (Phase 7 평가)
+
+#### 4. `compare_evaluation_results.py` - MLflow 평가 결과 비교
+
+MLflow에서 여러 모델의 평가 결과를 조회하여 시각화 및 비교
+
+**기능:**
+- MLflow experiment 조회 및 run 필터링
+- Pass@K 메트릭 비교 (Pass@1, Pass@5, Pass@10, Pass@20)
+- DataFrame으로 결과 추출 및 CSV 저장
+- matplotlib 차트 생성 (bar chart)
+
+**사용 예:**
+```bash
+# HumanEval 결과 비교
+python scripts/compare_evaluation_results.py \
+  --experiment weighted-mtp-evaluation \
+  --dataset humaneval \
+  --output-dir results
+
+# MBPP 결과 비교
+python scripts/compare_evaluation_results.py \
+  --experiment weighted-mtp-evaluation \
+  --dataset mbpp \
+  --output-dir results
+```
+
+**출력:**
+- `comparison_{dataset}.csv`: 모델별 Pass@K 결과
+- `comparison_{dataset}.png`: 시각화 차트
+
+**환경변수:**
+- `MLFLOW_TRACKING_URI`: MLflow tracking server URL (필수)
+
+---
+
+### Deployment Scripts (배포)
+
+#### 5. `download_s3_checkpoints.py` - S3 checkpoint 다운로드
+
+MLflow artifact store (S3)에서 학습된 checkpoint를 다운로드하여 로컬 또는 VESSL에서 평가
+
+**기능:**
+- MLflow experiment 및 run 조회
+- S3에서 checkpoint 다운로드
+- 로컬 storage 저장 또는 VESSL 업로드
+- 대화형/배치 모드 지원
+
+**사용 예 (대화형):**
+```bash
+# 대화형 모드로 실행
+python scripts/download_s3_checkpoints.py --interactive
+
+# Experiment 선택 → Run 선택 → Checkpoint 선택 → 다운로드 모드 선택
+```
+
+**사용 예 (배치):**
+```bash
+# Best checkpoint 다운로드 (로컬)
+python scripts/download_s3_checkpoints.py \
+  --experiment weighted-mtp-baseline \
+  --run baseline_run_1 \
+  --checkpoint best \
+  --output-dir storage/checkpoints/baseline
+
+# Latest checkpoint 다운로드 (VESSL)
+python scripts/download_s3_checkpoints.py \
+  --experiment weighted-mtp-baseline \
+  --run baseline_run_1 \
+  --checkpoint latest \
+  --vessl
+```
+
+**Checkpoint 타입:**
+- `best`: checkpoint_best.pt (가장 낮은 validation loss)
+- `final`: checkpoint_final.pt (마지막 epoch)
+- `latest`: checkpoint_epoch_*.pt 중 가장 최근
+
+**환경변수:**
+- `MLFLOW_TRACKING_URI`: MLflow tracking server URL (필수)
+- `AWS_ACCESS_KEY_ID`: AWS access key (필수)
+- `AWS_SECRET_ACCESS_KEY`: AWS secret key (필수)
+- `AWS_DEFAULT_REGION`: AWS region (필수)
+
+---
+
+## 🚀 원클릭 실행
+
+### Phase 1 설정
 
 전체 Phase1 설정을 한 번에 실행:
 
@@ -122,51 +212,111 @@ uv run python scripts/verify_storage.py \
 
 ---
 
-## 📋 통합 효과
+### Phase 7 평가 및 비교
 
-| 구분 | Before | After | 개선 |
-|------|--------|-------|------|
-| 스크립트 개수 | 9개 | 3개 | 67% 감소 |
-| 중복 코드 | SHA256 4회, 검증 4회 | 각 1회 | 중복 제거 |
-| 누락 기능 | 다운로드 없음 | 모두 구현 | Phase1 완성 |
-| 유지보수 | 분산된 로직 | 통합된 구조 | 유지보수 용이 |
+```bash
+# 1. 모델 평가 실행 (CLI)
+python -m weighted_mtp evaluate \
+  --checkpoint storage/checkpoints/baseline/checkpoint_best.pt \
+  --dataset humaneval \
+  --num-samples 20
+
+# 2. MLflow 결과 비교
+python scripts/compare_evaluation_results.py \
+  --experiment weighted-mtp-evaluation \
+  --dataset humaneval \
+  --output-dir results
+```
+
+### 배포 및 재평가
+
+```bash
+# 1. S3에서 checkpoint 다운로드
+python scripts/download_s3_checkpoints.py \
+  --experiment weighted-mtp-baseline \
+  --run baseline_run_1 \
+  --checkpoint best \
+  --output-dir storage/checkpoints/downloaded
+
+# 2. 다운로드된 checkpoint 평가
+python -m weighted_mtp evaluate \
+  --checkpoint storage/checkpoints/downloaded/checkpoint_best.pt \
+  --dataset humaneval
+```
+
+---
+
+## 📋 스크립트 요약
+
+| 스크립트 | 용도 | Phase | 주요 기능 |
+|---------|------|-------|----------|
+| `setup_models.py` | 모델 설정 | Phase 1 | 다운로드, 변환, Micro 생성, 검증 |
+| `setup_datasets.py` | 데이터셋 설정 | Phase 1 | 다운로드, Small 생성, 검증 |
+| `verify_storage.py` | 무결성 검증 | Phase 1 | 전체 검증, 리포트 생성 |
+| `compare_evaluation_results.py` | 평가 비교 | Phase 7 | MLflow 결과 시각화 |
+| `download_s3_checkpoints.py` | Checkpoint 배포 | 배포 | S3 다운로드, VESSL 업로드 |
 
 ---
 
 ## ⚠️ 주의사항
 
-1. **HuggingFace 토큰**: 다운로드 전에 `HF_TOKEN` 환경변수 설정 필요
-   ```bash
-   export HF_TOKEN=hf_...
-   ```
+### 환경변수 설정
 
-2. **디스크 용량**: 모델 다운로드 시 약 50GB 필요
+**Phase 1 (Setup):**
+```bash
+export HF_TOKEN=hf_...  # HuggingFace 토큰
+```
 
-3. **실행 순서**: 모델 → 데이터셋 → 검증 순서 권장
+**Phase 7 (Evaluation):**
+```bash
+export MLFLOW_TRACKING_URI=http://...  # MLflow tracking server
+```
 
-4. **재실행**: 모든 스크립트는 멱등성(idempotent) 보장
-   - 이미 존재하는 파일은 건너뛰거나 덮어쓰기
+**배포 (S3 Download):**
+```bash
+export MLFLOW_TRACKING_URI=http://...
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_DEFAULT_REGION=eu-north-1
+```
 
----
+### 디스크 용량
 
-## 🗑️ 삭제된 스크립트 (참고용)
+- 모델 다운로드: 약 50GB
+- Checkpoint 다운로드: 모델당 약 7GB
 
-다음 9개 스크립트가 위 3개 통합 스크립트로 대체되었습니다:
+### 실행 순서
 
-1. `setup_mtp_model.sh` → `setup_models.py`
-2. `convert_mtp_to_safetensors.py` → `setup_models.py`
-3. `convert_sharded_to_safetensors.py` → `setup_models.py`
-4. `convert_pytorch_to_safetensors.py` → `setup_models.py`
-5. `sync_mtp_config.py` → `setup_models.py`
-6. `prepare_local_small_model.py` → `setup_models.py`
-7. `prepare_micro_reference.py` → `setup_models.py`
-8. `prepare_dataset.py` → `setup_datasets.py`
-9. `verify_mtp_model.py` → `verify_storage.py`
+1. **Setup**: `setup_models.py` → `setup_datasets.py` → `verify_storage.py`
+2. **Training**: `python -m weighted_mtp --config configs/...`
+3. **Evaluation**: `python -m weighted_mtp evaluate --checkpoint ...`
+4. **Analysis**: `compare_evaluation_results.py`
+5. **Deployment**: `download_s3_checkpoints.py` → 재평가
+
+### 멱등성
+
+모든 setup 스크립트는 멱등성(idempotent) 보장:
+- 이미 존재하는 파일은 건너뛰거나 덮어쓰기
+- 재실행 시 안전
 
 ---
 
 ## 📖 추가 문서
 
-- Phase1 상세 계획: `docs/03_phase1_detailed_plan.md`
-- Storage 구조: `docs/01_storage_preparation_plan.md`
-- 이상적 구조: `docs/00_ideal_structure.md`
+- **Phase 1**: `docs/03_phase1_detailed_plan.md` (자산 준비)
+- **Phase 7**: `docs/07_phase7_detailed_plan.md` (SFT 평가)
+- **Storage 구조**: `docs/01_storage_preparation_plan.md`
+- **이상적 구조**: `docs/00_ideal_structure.md`
+
+---
+
+## 🗑️ 변경 이력
+
+**Phase 1 통합 (9개 → 3개)**:
+- `setup_mtp_model.sh`, `convert_*.py`, `sync_mtp_config.py`, `prepare_*.py` → `setup_models.py`
+- `prepare_dataset.py` → `setup_datasets.py`
+- `verify_mtp_model.py` → `verify_storage.py`
+
+**Phase 7 추가**:
+- `compare_evaluation_results.py`: MLflow 평가 결과 비교 및 시각화
+- `download_s3_checkpoints.py`: S3 checkpoint 다운로드 및 배포

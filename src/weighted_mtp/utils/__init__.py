@@ -1,12 +1,21 @@
 """Weighted MTP 유틸리티 모듈
 
-Checkpoint 관리, 성능 모니터링, S3 백업 기능 제공
+Checkpoint 관리, 성능 모니터링, S3 백업, Generation, Evaluation 기능 제공
 """
 
 from weighted_mtp.utils.checkpoint_utils import (
     cleanup_old_checkpoints,
+    load_checkpoint_for_evaluation,
     load_critic_checkpoint,
     save_checkpoint,
+)
+from weighted_mtp.utils.evaluation_utils import (
+    compute_pass_at_k,
+    evaluate_pass_at_k,
+    execute_code_with_tests,
+)
+from weighted_mtp.utils.generation_utils import (
+    generate_with_mtp,
 )
 from weighted_mtp.utils.metrics_utils import (
     GPUMonitor,
@@ -30,8 +39,15 @@ from weighted_mtp.utils.s3_utils import (
 __all__ = [
     # Checkpoint utils
     "cleanup_old_checkpoints",
+    "load_checkpoint_for_evaluation",
     "load_critic_checkpoint",
     "save_checkpoint",
+    # Evaluation utils
+    "compute_pass_at_k",
+    "evaluate_pass_at_k",
+    "execute_code_with_tests",
+    # Generation utils
+    "generate_with_mtp",
     # Metrics utils
     "GPUMonitor",
     "ThroughputTracker",

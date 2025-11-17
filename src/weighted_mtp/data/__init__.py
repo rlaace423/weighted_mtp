@@ -1,9 +1,10 @@
 """데이터 로딩 및 처리 모듈"""
 
 from weighted_mtp.data.collators import AlpacaDataCollator
-from weighted_mtp.data.datasets import load_dataset
+from weighted_mtp.data.datasets import load_dataset, load_evaluation_dataset
 
 __all__ = [
     "load_dataset",
+    "load_evaluation_dataset",
     "AlpacaDataCollator",
 ]
