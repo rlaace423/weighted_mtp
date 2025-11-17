@@ -141,15 +141,27 @@
   - 메모리 사용량 목표 달성 (<1GB for Stage 2)
 
 ### P4. Meta Adapter 통합
-- **목표**  
+- **목표**
   - `MetaLlamaMTPAdapter`가 safetensors/params/json 조합을 로딩해 trunk/full forward를 제공하도록 구현한다.
-- **주요 활동**  
-  - `src/models/meta_mtp/adapter.py`: 캐시 준비, n_future_tokens 적용, extra_heads 처리.  
-  - `src/models/meta_mtp/checkpoints.py`: dtype 변환, 장치 선택, value head 로딩.  
-  - micro 모델을 사용한 unit test (`tests/unit/test_adapter.py`).  
+  - **`from_pretrained()` Classmethod 구현**: 모델 로딩을 통합하고 Stage별 Value Head 초기화를 제어한다.
+- **주요 활동**
+  - `src/models/meta_mtp/adapter.py`:
+    - `from_pretrained(model_path, device, dtype, initialize_value_head)` classmethod 구현
+    - Transformer 로딩: `checkpoints.load_meta_mtp_model()` 호출
+    - ModelArgs 파싱: params.json 또는 config.json 자동 감지
+    - **Value Head 선택적 초기화**:
+      - `initialize_value_head=True`: Critic/Verifiable Stage용 (기본값)
+      - `initialize_value_head=False`: Rho-1 Stage용 (Value head 불필요)
+    - trunk_forward/full_forward 메서드 구현
+  - `src/models/meta_mtp/checkpoints.py`: safetensors 로딩, dtype 변환, 장치 선택.
+  - micro 모델을 사용한 unit test (`tests/unit/test_adapter.py`).
   - 오류/로그 정책 정리.
-- **산출물**: Adapter 모듈, 체크포인트 유틸, unit test.  
-- **검증 기준**: micro 모델 trunk_forward < 2s, dtype & shape 검증, `pytest -k adapter` 통과.
+- **산출물**: Adapter 모듈 (from_pretrained() 포함), 체크포인트 유틸, unit test.
+- **검증 기준**:
+  - micro 모델 trunk_forward < 2s, dtype & shape 검증
+  - `initialize_value_head=True` 시 adapter.value_head 존재 확인
+  - `initialize_value_head=False` 시 adapter.value_head is None 확인
+  - `pytest -k adapter` 통과
 
 ### P5. Value Weighting 모듈
 - **목표**  
@@ -168,8 +180,16 @@
   - Stage0(환경 + 분산학습 초기화) → Stage1(trunk pretrain) → Stage2(weighted training) → Stage3(logging)을 오케스트레이션한다.
   - **A100 4-GPU 분산학습**: FSDP 기반 모델 분산, DistributedSampler 기반 데이터 분산
   - **Stage2 Critic Continual Learning**: Value loss를 auxiliary loss로 추가하여 policy 학습 중 critic도 지속 학습
+  - **Reference 모델 전략**: Rho-1 Stage에서 HuggingFace `AutoModelForCausalLM` 직접 사용 (Custom wrapper 불필요)
 - **주요 활동**
   - `pipelines/training.py`: 환경 초기화, 데이터 로더, Stage1/2 실행, MLflow 로깅, 체크포인트 저장.
+  - **Policy 모델 로딩**: `MetaLlamaMTPAdapter.from_pretrained()`
+    - Critic/Verifiable: `initialize_value_head=True`
+    - Rho-1: `initialize_value_head=False`
+  - **Reference 모델 로딩** (Rho-1 전용):
+    - `AutoModelForCausalLM.from_pretrained(config.models.reference.path)`
+    - Tokenizer 공유: policy와 동일한 tokenizer 사용 (model_path/tokenizer/)
+    - Custom wrapper 없이 HuggingFace 표준 인터페이스 직접 활용
   - **Stage0 분산 환경 초기화** (P3에서 구현된 runtime 모듈 활용):
     - `runtime.distributed.init_distributed()`: torch.distributed 초기화 (NCCL backend)
     - `runtime.distributed.create_distributed_sampler()`: 데이터를 4-GPU로 균등 분할 (중복 없음)
@@ -266,269 +286,3 @@
 - **자산 관리**: `storage/` 구조와 metadata가 문서와 일치하며, SHA256/dtype/토크나이저 정보가 기록되어 재현성을 보장한다.
 - **품질 보증**: unit/integration/CI가 모두 통과하고, MLflow/배포 스크립트가 정상 동작한다.
 - **문서화**: 설계·준비·구현·운영 문서가 최신 상태로 유지되며, 제안서에 명시된 세 실험 비교 보고가 가능하다.
-# WMTP 리팩토링 Phase별 구현 계획
-
-본 문서는 `docs/00_ideal_structure.md`와 `docs/01_storage_preparation_plan.md`를 실제 코드/데이터 자산으로 구현하기 위한 상세 단계별 로드맵이다. 
-모든 Phase는 **철학 → 구현 단위 → 산출물 → 검증 기준**을 명확히 정의하며, 순차적으로 수행하되 병렬 가능한 작업은 명시된 조건을 만족할 때에 한해 병행한다.
-
----
-
-## 0. 공통 철학 및 원칙 정리
-
-1. **Meta 네이티브 우선**: 모델 로딩·forward는 Meta 레퍼런스 구현을 직접 호출하는 Adapter 기반 구조를 유지한다. HuggingFace 호환 계층은 제거한다.
-2. **단순·명료한 파이프라인**: 3개 핵심 실험(Baseline, Verifiable Critic, Rho-1 Weighted)에 집중하고, 각 실험은 동일한 파이프라인 위에서 recipe 차이만 남긴다.
-3. **TD error 기반 가중치 안정화**: GAE, weight 정규화/클리핑 등 critic-weighted WMTP에 필요한 안정화 기법을 내장한다.
-4. **storage/의 단일화**: 변환된 dataset/model은 `01_storage_preparation_plan.md` 스키마에 맞추어 staging한다. 코드베이스에는 로직만, 자산은 storage에만 둔다.
-5. **검증 우선 개발**: 각 Phase는 최소 하나 이상의 자동 테스트 또는 체크리스트를 통과해야 다음 Phase로 진행할 수 있다.
-
----
-
-## 1. Phase 요약
-
-| Phase | 명칭 | 주요 목표 | 선행 조건 | 핵심 산출물 |
-|-------|------|-----------|-----------|-------------|
-| P0 | 킥오프 & 환경 정비 | 일정/역할 정의, 문서 정합성 확보 | 없음 | 실행 일정, 용어 사전 |
-| P1 | storage 자산 변환 | 모델/데이터 v2 구조로 재편 | P0 | `storage/models_v2`, `storage/datasets_v2`, README |
-| P2 | 코드 스켈레톤 구축 | 디렉터리 생성, 빈 모듈 배치 | P1 (부분 병행 가능) | `src/` 하위 기본 모듈, configs/skeleton |
-| P3 | Meta Adapter 통합 | Meta 네이티브 모델 로딩 확립 | P2 | `MetaLlamaMTPAdapter` 개선, 로딩 테스트 |
-| P4 | Value Weighting 모듈 | TD error 계산/가중치 생성 로직 설계 | P2 | `src/value_weighting/` 모듈, 단위 테스트 |
-| P5 | 파이프라인 구현 | Stage 0~3 오케스트레이션 | P3, P4 | `pipelines/training.py`, 통합 테스트 |
-| P6 | CLI & Config | `cli.train`, config/recipe 적용 | P5 (초기 버전은 병행) | CLI 엔트리, defaults.yaml, recipe 3종 |
-| P7 | 테스트 & 검증 | unit/integration 테스트 세트 | P3~P6 | pytest 시나리오, GitHub Actions 워크플로우 |
-| P8 | 배포 & VESSL 연동 | sync 스크립트, MLflow 연동 확인 | P1, P6 | `scripts/sync_to_vessl_storage.py`, VESSL 드라이런 |
-| P9 | 문서화 & 최종 점검 | 문서 정리, 체인지로그, 인수 조건 | 전체 | docs 업데이트, 체인지로그, 승인 체크리스트 |
-
----
-
-## 2. 상세 Phase별 계획
-
-### Phase 0. 킥오프 & 환경 정비
-- **목표**: 팀이 공통 철학을 공유하고, 용어/경로/도구 체계를 확정한다.
-- **작업**
-  1. `00_ideal_structure.md`, `01_storage_preparation_plan.md`, 본 문서를 리뷰하고 승인 기록 남김.
-  2. 용어 사전 작성(`docs/glossary.md`): horizon, trunk_forward, micro model 등 정의.
-  3. 개발 브랜치 전략/CI 정책 합의.
-- **산출물**
-  - `docs/glossary.md`
-  - 프로젝트 일정 및 책임자 매트릭스(내부 공유 문서)
-- **검증 기준**
-  - 모든 문서가 최신 상태이며 상호 모순 없음.
-  - 모든 참여자가 Phase 1 착수 조건에 동의.
-
-### Phase 1. storage 자산 변환
-- **목표**: 모델/데이터 자산을 `01_storage_preparation_plan.md` 구조로 재편.
-- **선행조건**: Phase 0 완료.
-- **작업**
-  1. 기존 `storage/models_v1`, `storage/datasets_v1` 자산 백업.
-  2. safetensors 병합, `meta_adapter.yaml`, `metadata.json` 생성 (Meta `7B_1T_4` params: `intermediate_size=11008`, `rope_theta=10000.0`, `dtype=float16` 반영).
-  3. 데이터셋 전처리 스크립트 작성 및 실행 → `datasets_v2` 구축.
-  4. `storage/README.md` 업데이트와 체크리스트 작성.
-- **산출물**
-  - `storage/models_v2/...`
-  - `storage/datasets_v2/...`
-  - `storage/datasets_local_small/...`
-- **검증 기준**
-  - 체크리스트 항목 전부 통과 (SHA256, dtype=float16, schema, stats).
-  - micro 모델/데이터로 최소 smoke test 통과 (임시 스크립트 ok).
-
-### Phase 2. 코드 스켈레톤 구축
-- **목표**: 이상적 구조에 맞는 패키지/파일을 생성하고, 인터페이스 뼈대를 정의. Meta reference 코드를 vendor/로 이동.
-- **선행조건**: Phase 1 (모델/데이터 구조 확인) — 단, 구조 정의는 병행 가능.
-- **작업**
-  1. `vendor/meta_llama/` 디렉터리 생성 및 Meta reference 코드 이동
-     - `storage/models/llama-7b-mtp/llama/*` → `vendor/meta_llama/`
-     - `vendor/__init__.py`, `vendor/meta_llama/__init__.py` 작성
-     - import 경로 정리: `from vendor.meta_llama import Transformer, ModelArgs`
-  2. `src/` 하위 디렉터리 생성 (`cli`, `core`, `data`, `models`, `value_weighting`, `pipelines`, `runtime`, `utils`).
-  3. 각 모듈에 `__init__.py`와 타입 힌트 기반 인터페이스 스텁 작성.
-  4. configs 디렉터리에 `defaults.yaml`, recipe 템플릿 생성. `defaults.yaml`에 모델 파라미터 스냅샷 등록.
-  5. pre-commit 셋업, formatting/linting 기준 확정.
-- **산출물**
-  - `vendor/meta_llama/` 패키지 (Meta reference 코드)
-  - 최소 구현 클래스/함수 (pass 처리) 포함된 스켈레톤 코드.
-  - `pyproject.toml` 업데이트(패키지 경로 `packages = ["weighted_mtp", "vendor"]`, 의존성).
-  - `configs/defaults.yaml` (모델 파라미터 스냅샷 포함)
-- **검증 기준**
-  - `uv run python -c "from vendor.meta_llama import Transformer; print('OK')"` 성공
-  - `uv run pytest` (빈 테스트) + `uv run ruff check` 통과.
-  - import 경로 모두 정상 (ModuleNotFoundError 없음).
-
-### Phase 3. Meta Adapter 통합
-- **목표**: Meta LLaMA MTP 모델을 네이티브 인터페이스로 로딩하고, trunk/full forward 경로를 확립.
-- **선행조건**: Phase 2 스켈레톤, Phase 1 모델 자산.
-- **작업**
-  1. `src/models/meta_mtp/adapter.py` 구현: freqs_cis/causal mask 캐시, trunk/full forward.
-  2. `src/models/meta_mtp/checkpoints.py` 작성: safetensors 로딩, dtype 정리.
-  3. micro 모델로 adapter 단위 테스트(`tests/unit/test_adapter.py`).
-  4. Stage1 value head 저장/로드 인터페이스 정의.
-- **산출물**
-  - 동작하는 Meta Adapter 클래스.
-  - 관련 unit test.
-- **검증 기준**
-  - micro 모델로 trunk_forward 시간을 측정해 합리적 범위(수 초 이하).
-  - Value head normalization 확인 (평균/표준편차 0≠, 1≠ 0).
-
-### Phase 4. Value Weighting 모듈
-- **목표**: TD error 기반 토큰 가중치 계산을 모듈화.
-- **선행조건**: Phase 2.
-- **작업**
-  1. `value_weighting.td_error`: value head 출력과 보상으로 TD error 계산.
-  2. `value_weighting.weight_builder`: TD error 정규화, temperature/클리핑, entropy 제약 적용.
-  3. `value_weighting.metrics`: weight/TD error 통계 계산.
-  4. (선택) `value_weighting.regularizers`: drift 감시, 선택적 KL 모니터링.
-  5. 최신 연구(AsyPPO, PSPO, DVPO, SFPO, DPO 등)에서 차용 가능한 안정화 포인트 주석화.
-- **산출물**
-  - 각 모듈에 테스트 작성 (`tests/unit/test_td_error.py`, `test_weight_builder.py` 등).
-  - config schema 업데이트(kl target, clip 값 등).
-- **검증 기준**
-  - 단위 테스트에서 edge case 통과 (zero rewards, extreme TD error 등).
-  - 결과값이 참고 구현과 일치하는지 간단한 수치 검증.
-
-### Phase 5. 파이프라인 구현
-- **목표**: Stage 0~3을 아우르는 실행 흐름 구축.
-- **선행조건**: Phase 3, Phase 4.
-- **작업**
-  1. `pipelines/training.py`에 run_training_pipeline 구현 (환경 초기화, 모델 로딩, Stage1/2, MLflow).
-  2. `pipelines/evaluation.py`에 baseline 평가 스텁.
-  3. runtime 모듈(환경/분산/MLflow) 초기화 코드 작성.
-  4. Stage별 metrics 로깅 설계 (loss, TD error, weight stats).
-- **산출물**
-  - 통합 파이프라인 코드.
-  - integration 테스트(`tests/integration/test_stage1_local.py`, `test_stage2_local.py`).
-- **검증 기준**
-  - micro 모델 + small 데이터로 Stage1, Stage2 순차 실행 성공.
-  - MLflow 로컬 모드(`file://`)에서 메트릭 기록 확인.
-
-### Phase 6. CLI & Config 시스템
-- **목표**: 사용자 진입점 및 설정 체계 완성.
-- **선행조건**: Phase 5 (기본 파이프라인 동작), Phase 2 (config 스켈레톤).
-- **작업**
-  1. `cli/train.py`: argparse, preset 옵션(`--preset local-light`, `--use-micro-model`).
-  2. `core/config.py`: Pydantic 모델 정의 (Config, Recipe).
-  3. `configs/defaults.yaml`, recipe 3종 작성 및 검증.
-  4. `.env` 로딩(python-dotenv) 및 VESSL/MLflow 환경변수 주입 로직.
-- **산출물**
-  - CLI에서 세 실험을 각각 실행할 수 있는 최소 기능.
-  - config validation 테스트.
-- **검증 기준**
-  - `uv run python -m weighted_mtp.cli.train --dry-run` 성공.
-  - recipe별 파라미터가 파이프라인에 정확히 반영되는지 확인.
-
-### Phase 7. 테스트 & 검증 체계
-- **목표**: 안정적인 회귀 방지 및 품질 보증.
-- **선행조건**: Phase 3~6.
-- **작업**
-  1. unit/integration 테스트 확장, 커버리지를 최소한 Stage1/Stage2 core에 맞춘다.
-  2. GitHub Actions 워크플로우 작성(`.github/workflows/test.yaml`): 포맷팅, lint, tests.
-  3. 로컬 smoke 테스트 스크립트 작성 (`scripts/run_smoke_tests.sh`).
-- **산출물**
-  - 테스트 스위트, CI 파이프라인.
-  - 테스트 결과 리포트(coverage 등).
-- **검증 기준**
-  - CI 모든 단계 통과.
-  - 실패 시 빠른 triage 프로세스 확립.
-
-### Phase 8. 배포 & VESSL 연동
-- **목표**: 실제 GPU 환경에서 실행 가능한 상태로 배포.
-- **선행조건**: Phase 1 (자산), Phase 6 (CLI).
-- **작업**
-  1. `scripts/sync_to_vessl_storage.py`: storage/ 내용 업로드 자동화.
-  2. Docker 이미지 빌드/테스트 (필요 시 `docker/` 폴더 추가).
-  3. VESSL CLI 명령 템플릿(`docs/00_ideal_structure.md`의 명령 검증).
-  4. MLflow 서버 연결 및 artifact 업로드 확인.
-- **산출물**
-  - 업로드 스크립트, Dockerfile/이미지 (필요 시).
-  1. VESSL dry-run 로그.
-- **검증 기준**
-  - `vessl run create ... --dry-run` 성공.
-  - MLflow에 실험 기록 생성, artifact 업로드 확인.
-
-### Phase 9. 문서화 & 최종 점검
-- **목표**: 모든 산출물을 정리하고, 인수 기준을 충족했음을 증명.
-- **선행조건**: 전체 Phase.
-- **작업**
-  1. `docs/migration_notes.md`에 변경 사항 및 차이점 기록.
-  2. `docs/00_ideal_structure.md`, `docs/01_storage_preparation_plan.md` 실제 결과 반영 업데이트.
-  3. CHANGELOG 작성, 릴리즈 노트 초안.
-  4. 최종 검증 체크리스트 (모델/데이터/코드/배포/문서) 점검.
-- **산출물**
-  - 최신 문서 세트, 체인지로그, 인수 보고서.
-  - 릴리즈 태그 준비(필요 시).
-- **검증 기준**
-  - 모든 체크리스트 ✔️, 잔여 이슈 없음.
-  - 리뷰어/PO 승인.
-
----
-
-## 3. Phase 간 의존성 및 병행 전략
-
-- **P1 ↔ P2**: 모델/데이터 구조가 확정돼야 파이프라인을 안정적으로 테스트할 수 있으나, 스켈레톤 작성은 병행 가능. 단, Phase 2 테스트에서 사용할 자산 mock이 준비돼야 한다.
-- **P3와 P4**: Meta Adapter와 PPO 모듈은 상호 독립적으로 개발 가능하지만, 통합 테스트는 둘 다 준비돼야 진행 가능.
-- **P6 이후**: CLI/Config 구현이 완료되기 전에도 단위 테스트는 가능하지만, 통합 검증은 CLI를 통해 수행하는 것이 바람직하다.
-- **P8**: storage 자산 업로드와 CLI 안정화가 선행돼야 VESSL 연동 테스트가 의미 있다.
-
----
-
-## 4. 위험 요소 및 대응
-
-| 위험 | 설명 | 영향 | 대응 전략 |
-|------|------|------|-----------|
-| 모델 자산 무결성 | safetensors 병합 오류, adapter 파라미터 불일치 | 학습 실패 | SHA256 검증, meta_adapter.yaml 2중 검토 |
-| 데이터 품질 | `is_correct` 누락, 2048 초과 샘플 미제거 | Verifiable 학습 실패 | 전처리 스크립트 자동화 + 테스트 |
-| Weight 불안정 | TD error 폭주, weight 집중 | 학습 중단 | Z-score/temperature 조정, weight clip |
-| VESSL 업로드 실패 | 경로 오타, 권한 문제 | 배포 지연 | dry-run 스크립트, Secrets 검증 |
-| 일정 지연 | 병목 Phase 장기화 | 전체 일정 영향 | Phase 완성 조건 엄격히 관리, 병렬화 |
-
----
-
-## 5. 모니터링 및 리포트
-
-- **주간 리포트 템플릿** (Notion/내부 문서)
-  - 진행 Phase 요약, 주요 산출물 링크
-  - 위험 항목 업데이트
-  - 다음 주 목표
-- **메트릭**
-  - 테스트 통과 수, 커버리지
-  - storage 자산 변환 진행률
-  - TD error/weight 모니터링 (실제 학습 시)
-- **리뷰 사이클**
-  - Phase마다 코드 리뷰 + 문서 리뷰 필수
-  - Phase 완료 시 승인자 서명 기록 (체인지로그 또는 PR 설명)
-
----
-
-## 6. 마일스톤 타임라인 (예시)
-
-| 주차 | Phase | 예상 소요 | 비고 |
-|------|-------|-----------|------|
-| Week 1 | P0, P1 | 3일, 2일 | 자산 변환 완료 |
-| Week 2 | P2, P3 | 3일, 2일 | 스켈레톤 + Meta Adapter |
-| Week 3 | P4, P5 | 2일, 3일 | PPO 모듈 + 파이프라인 |
-| Week 4 | P6, P7 | 2일, 3일 | CLI/Config + 테스트/CI |
-| Week 5 | P8, P9 | 3일, 2일 | 배포 연동 + 문서화 |
-
-*실제 일정은 자원 배분에 따라 조정 가능하며, 각 Phase 완료 시점에 상태 점검 미팅을 갖는다.*
-
----
-
-## 7. Phase 완료 보고 템플릿
-
-각 Phase 종료 시 아래 템플릿을 채워 `docs/migration_notes.md` 또는 별도 보고서에 기록한다.
-
-```
-### Phase X 완료 보고
-- 일정: YYYY-MM-DD ~ YYYY-MM-DD
-- 담당자: 이름
-- 주요 산출물:
-  - 경로/링크
-- 체크리스트:
-  - [x] 항목1
-  - [ ] 항목2 (보류 사유)
-- 발견된 이슈 / 해결방안:
-- 다음 단계 착수 조건:
-```
-
----
-
-이 계획 문서는 리팩토링 전 과정의 기준선이다. Phase 수행 중 발견되는 변경 사항이나 위험 요소는 즉시 문서에 반영하며, 모든 결정은 문서 간 정합성을 유지하는 것을 원칙으로 한다. Phase별 승인 없이 다음 단계로 넘어가지 않도록 각 담당자는 산출물과 검증 결과를 명확히 공유해야 한다.
-

@@ -1,0 +1,41 @@
+# Baseline MTP (Uniform Weighting)
+# 균등 가중치 기반 표준 MTP (비교 기준선)
+
+experiment:
+  name: baseline-mtp
+  description: "Baseline MTP with uniform weights (all tokens weight=1.0)"
+  stage: baseline
+  tags:
+    - baseline
+    - uniform-weight
+    - stage2
+
+# models 섹션은 defaults.yaml 사용 (meta-llama-mtp + tokenizer)
+
+dataset:
+  name: codecontests
+  train: storage/datasets_v2/codecontests/processed/train.jsonl
+  validation: storage/datasets_v2/codecontests/processed/valid.jsonl
+  max_length: 2048
+
+data_sampling:
+  n_samples: 100000
+  # Baseline은 정답만 학습 (표준 SFT)
+  balance_correct: false
+  correct_ratio: 1.0
+  seed: 42
+
+training:
+  n_epochs: 2.5
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-5
+  max_grad_norm: 0.5
+  log_interval: 10
+
+checkpoint:
+  save_dir: storage/checkpoints/baseline/${experiment.name}
+  save_checkpoint_every: 1.0
+  save_best: true
+  save_final: true
+  save_total_limit: 3

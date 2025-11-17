@@ -19,6 +19,7 @@ from transformers import AutoTokenizer
 
 from weighted_mtp.data import AlpacaDataCollator, load_dataset
 from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
+from weighted_mtp.models.tokenizer_utils import load_tokenizer_from_config
 from weighted_mtp.pipelines.checkpoint_utils import load_critic_checkpoint, save_checkpoint
 from weighted_mtp.pipelines.metrics_utils import (
     GPUMonitor,
@@ -70,25 +71,6 @@ def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
     return adapter
 
 
-def load_tokenizer(config: dict) -> AutoTokenizer:
-    """Tokenizer 로드
-
-    Args:
-        config: 모델 설정
-
-    Returns:
-        AutoTokenizer 인스턴스
-    """
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.models.policy.path,
-        use_fast=True,
-    )
-
-    # Padding token 설정
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    return tokenizer
 
 
 def create_dataloader(
@@ -96,7 +78,6 @@ def create_dataloader(
     tokenizer: AutoTokenizer,
     batch_size: int,
     max_length: int,
-    stage: str,
     n_samples: int | None,
     balance_correct: bool,
     correct_ratio: float,
@@ -105,19 +86,18 @@ def create_dataloader(
     seed: int,
     shuffle: bool = True,
 ) -> DataLoader:
-    """DataLoader 생성
+    """DataLoader 생성 (Config-driven 샘플링)
 
     Args:
         dataset_path: 데이터셋 경로
         tokenizer: Tokenizer
         batch_size: 배치 크기
         max_length: 최대 시퀀스 길이
-        stage: Stage 식별자
         n_samples: 샘플 수
         balance_correct: is_correct 균형 여부
         correct_ratio: correct 샘플 비율
-        difficulty_weights: 난이도 가중치
-        difficulty_bins: 난이도 구간
+        difficulty_weights: 난이도 가중치 (curriculum learning용)
+        difficulty_bins: 난이도 구간 (curriculum learning용)
         seed: 시드
         shuffle: 셔플 여부
 
@@ -137,11 +117,10 @@ def create_dataloader(
     else:
         split = "test"
 
-    # 데이터셋 로드
+    # 데이터셋 로드 (Config-driven 샘플링)
     dataset = load_dataset(
         dataset_name=dataset_name,
         split=split,
-        stage=stage,
         n_samples=n_samples,
         balance_correct=balance_correct,
         correct_ratio=correct_ratio,
@@ -408,7 +387,7 @@ def run_verifiable_training(
 
     # 7. Resource 로딩
     adapter = load_adapter(config, device)
-    tokenizer = load_tokenizer(config)
+    tokenizer = load_tokenizer_from_config(config)
 
     # Model size + System info 로깅
     model_size = get_model_size(adapter)
@@ -493,7 +472,6 @@ def run_verifiable_training(
         tokenizer=tokenizer,
         batch_size=config.training.batch_size,
         max_length=config.dataset.max_length,
-        stage="stage2",
         n_samples=config.data_sampling.n_samples,
         balance_correct=config.data_sampling.balance_correct,
         correct_ratio=config.data_sampling.correct_ratio,
@@ -511,7 +489,6 @@ def run_verifiable_training(
         tokenizer=tokenizer,
         batch_size=config.training.batch_size,
         max_length=config.dataset.max_length,
-        stage="stage2",
         n_samples=val_n_samples,
         balance_correct=config.data_sampling.balance_correct,
         correct_ratio=config.data_sampling.correct_ratio,
@@ -555,7 +532,6 @@ def run_verifiable_training(
                 tokenizer=tokenizer,
                 batch_size=config.training.batch_size,
                 max_length=config.dataset.max_length,
-                stage="stage2",
                 n_samples=config.data_sampling.n_samples,
                 balance_correct=config.data_sampling.balance_correct,
                 correct_ratio=config.data_sampling.correct_ratio,

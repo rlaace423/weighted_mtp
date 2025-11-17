@@ -10,6 +10,8 @@ experiment:
     - value-head
     - stage1
 
+# models 섹션은 defaults.yaml 사용 (meta-llama-mtp + tokenizer)
+
 dataset:
   name: codecontests
   train: storage/datasets_v2/codecontests/processed/train.jsonl

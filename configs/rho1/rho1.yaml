@@ -10,6 +10,14 @@ experiment:
     - wmtp
     - reference-based
 
+models:
+  # policy 모델은 defaults.yaml 사용 (meta-llama-mtp + tokenizer)
+  reference:
+    name: ref-sheared-llama-2.7b
+    path: storage/models_v2/ref-sheared-llama-2.7b
+    dtype: float16
+    # Tokenizer는 policy 모델(meta-llama-mtp)과 공유
+
 dataset:
   name: codecontests
   train: storage/datasets_v2/codecontests/processed/train.jsonl

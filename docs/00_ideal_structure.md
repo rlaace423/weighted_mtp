@@ -158,10 +158,10 @@ weighted_mtp/
 │   │   ├── __init__.py
 │   │   ├── meta_mtp/
 │   │   │   ├── __init__.py
-│   │   │   ├── adapter.py                 # MetaLlamaMTPAdapter
-│   │   │   ├── policy.py                  # 정책 헤드 (logits)
+│   │   │   ├── adapter.py                 # MetaLlamaMTPAdapter (from_pretrained, trunk/full forward)
+│   │   │   ├── checkpoints.py             # safetensors 로딩 유틸 (load_meta_mtp_model)
+│   │   │   ├── transformer.py             # Pure PyTorch Transformer (Meta 네이티브 재구현)
 │   │   │   └── value_head.py              # Value head 정의 및 로딩
-│   │   └── checkpoints.py                 # safetensors 로딩 유틸
 │   ├── value_weighting/
 │   │   ├── __init__.py
 │   │   ├── td_error.py                    # 표준 TD error 계산 (Intermediate: γV(s_k)-V(s_{k-1}), Terminal: R-V(s_{T-1}))
@@ -202,7 +202,6 @@ weighted_mtp/
 │   │   └── mbpp/
 │   │       └── processed/
 │   │           └── train.jsonl
-│   ├── datasets_local_small/             # 로컬 테스트용 소형 데이터셋
 │   ├── models_v2/
 │   │   ├── meta-llama-mtp/
 │   │   │   ├── configs/
@@ -308,7 +307,7 @@ weighted_mtp/
 - `src/data/prepare.py`: 데이터셋 전처리 및 스키마 검증 (instruction, input, output, is_correct, metadata). 메타데이터 추출 기능 포함.
 - `src/value_weighting/`: TD error 기반 가중치 계산 로직을 기능 단위로 분할하여 테스트 가능하도록 구성.
 - `scripts/validate_datasets.py`: 데이터셋 무결성 검증 사용.
-- `storage/`: 로컬 실험 리소스 원천. `models_v2/`, `datasets_v2/`, `datasets_local_small/`로 구성. VESSL Storage 업로드 전에 이 구조를 그대로 동기화한다.
+- `storage/`: 로컬 실험 리소스 원천. `models_v2/`, `datasets_v2/`로 구성. VESSL Storage 업로드 전에 이 구조를 그대로 동기화한다. n_samples 파라미터를 통한 효율적 샘플링으로 별도 소형 데이터셋 불필요.
 
 ---
 
@@ -330,6 +329,49 @@ weighted_mtp/
 |        | **Best checkpoint tracking** | val_loss 기준 best checkpoint 저장 | Rank 0만: `if val_loss < best_val_loss: save_checkpoint()` | val_metrics, best_val_loss | checkpoint_stage{N}_best.pt |
 |        | **Step 기반 logging/evaluation** | Global step 기반 주기적 logging 및 evaluation | log_interval=10 (train loss), eval_interval=100 (val eval) | global_step counter | console output, MLflow metrics |
 |        | `runtime.mlflow` | MLflow 실험 추적 및 S3 업로드 | Rank 0만: params/metrics 로깅, checkpoint S3 업로드 | config, metrics, checkpoint paths | MLflow run (EC2 + S3) |
+
+### 5.5 모델 로딩 및 Value Head 전략
+
+#### 통합 로딩 메커니즘
+
+모든 파이프라인은 `MetaLlamaMTPAdapter.from_pretrained()` classmethod를 통해 모델을 로딩한다.
+
+**Signature**:
+```python
+MetaLlamaMTPAdapter.from_pretrained(
+    model_path: str,
+    device: str = "auto",
+    dtype: Optional[str] = None,
+    initialize_value_head: bool = True,
+) -> MetaLlamaMTPAdapter
+```
+
+**로딩 절차**:
+1. **Transformer 로딩**: `checkpoints.load_meta_mtp_model()` 호출
+2. **ModelArgs 파싱**: params.json 또는 config.json 자동 감지
+3. **Value Head 선택적 초기화**:
+   - `initialize_value_head=True`: Critic/Verifiable Stage용
+   - `initialize_value_head=False`: Rho-1 Stage용
+
+#### Stage별 Value Head 요구사항
+
+| Stage | Value Head | 근거 |
+|-------|-----------|------|
+| Critic (Stage 1) | **필수** (단독 학습) | PPO Critic처럼 Value head만 학습하여 TD error 계산 능력 확보 |
+| Verifiable (Stage 2) | **필수** (continual learning) | Policy 학습 중 Value loss를 auxiliary loss로 추가하여 critic drift 방지 |
+| Rho-1 (Stage 3) | **불필요** | Reference 모델 excess loss만 사용, Value head 연산 불필요 |
+
+**구현 방식**:
+- **Critic**: `from_pretrained(initialize_value_head=True)` → trunk_forward()로 Value head 학습
+- **Verifiable**: `from_pretrained(initialize_value_head=True)` → full_forward()로 policy + value 동시 학습
+- **Rho-1**: `from_pretrained(initialize_value_head=False)` → MTP trunk만 사용, Reference 모델과 loss 비교
+
+#### Reference 모델 전략
+
+- **사용처**: Rho-1 Stage 전용
+- **로딩 방법**: HuggingFace `AutoModelForCausalLM.from_pretrained()` 직접 사용
+- **Custom wrapper**: 불필요 (표준 인터페이스로 충분)
+- **Tokenizer**: Policy 모델과 공유 (`{model_path}/tokenizer/`)
 
 ---
 

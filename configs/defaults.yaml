@@ -15,6 +15,7 @@ models:
   policy:
     name: meta-llama-mtp
     path: storage/models_v2/meta-llama-mtp
+    tokenizer_path: storage/models_v2/meta-llama-mtp/tokenizer
     params:
       dim: 4096
       n_layers: 32
@@ -29,6 +30,7 @@ models:
     name: ref-sheared-llama-2.7b
     path: storage/models_v2/ref-sheared-llama-2.7b
     dtype: float16
+    # Tokenizer는 policy 모델(meta-llama-mtp)과 공유
     tokenizer_shared_with: meta-llama-mtp
 
   reward:
@@ -36,7 +38,7 @@ models:
     path: storage/models_v2/starling-rm-7b
     dtype: bfloat16
     status: optional
-
+    
 runtime:
   device: cuda
   seed: 42

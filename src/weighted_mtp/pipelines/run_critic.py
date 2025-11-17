@@ -18,6 +18,7 @@ from transformers import AutoTokenizer
 
 from weighted_mtp.data import AlpacaDataCollator, load_dataset
 from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
+from weighted_mtp.models.tokenizer_utils import load_tokenizer_from_config
 from weighted_mtp.pipelines.checkpoint_utils import save_checkpoint
 from weighted_mtp.pipelines.metrics_utils import (
     GPUMonitor,
@@ -63,25 +64,6 @@ def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
     return adapter
 
 
-def load_tokenizer(config: dict) -> AutoTokenizer:
-    """Tokenizer 로드
-
-    Args:
-        config: 모델 설정
-
-    Returns:
-        AutoTokenizer 인스턴스
-    """
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.models.policy.path,
-        use_fast=True,
-    )
-
-    # Padding token 설정
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    return tokenizer
 
 
 def create_dataloader(
@@ -89,7 +71,6 @@ def create_dataloader(
     tokenizer: AutoTokenizer,
     batch_size: int,
     max_length: int,
-    stage: str,
     n_samples: int | None,
     balance_correct: bool,
     correct_ratio: float,
@@ -98,19 +79,18 @@ def create_dataloader(
     seed: int,
     shuffle: bool = True,
 ) -> DataLoader:
-    """DataLoader 생성
+    """DataLoader 생성 (Config-driven 샘플링)
 
     Args:
         dataset_path: 데이터셋 경로
         tokenizer: Tokenizer
         batch_size: 배치 크기
         max_length: 최대 시퀀스 길이
-        stage: Stage 식별자
         n_samples: 샘플 수
         balance_correct: is_correct 균형 여부
         correct_ratio: correct 샘플 비율
-        difficulty_weights: 난이도 가중치
-        difficulty_bins: 난이도 구간
+        difficulty_weights: 난이도 가중치 (None for Critic)
+        difficulty_bins: 난이도 구간 (None for Critic)
         seed: 시드
         shuffle: 셔플 여부
 
@@ -130,11 +110,10 @@ def create_dataloader(
     else:
         split = "test"
 
-    # 데이터셋 로드
+    # 데이터셋 로드 (Config-driven 샘플링)
     dataset = load_dataset(
         dataset_name=dataset_name,
         split=split,
-        stage=stage,
         n_samples=n_samples,
         balance_correct=balance_correct,
         correct_ratio=correct_ratio,
@@ -422,8 +401,9 @@ def run_critic_training(config_path: str, **override_params: Any) -> tuple[dict[
     actual_seed, device = setup_environment(config.runtime.seed)
     logger.info(f"Device: {device}, Seed: {actual_seed}")
 
-    # 5. MLflow 초기화 (Rank 0만)
-    if is_main_process():
+    # 5. MLflow 초기화 (Rank 0만, experiment 이름이 있는 경우만)
+    use_mlflow = bool(config.mlflow.experiment)
+    if is_main_process() and use_mlflow:
         mlflow.set_tracking_uri(config.mlflow.tracking_uri)
         mlflow.set_experiment(config.mlflow.experiment)
         mlflow.start_run(
@@ -436,18 +416,19 @@ def run_critic_training(config_path: str, **override_params: Any) -> tuple[dict[
     # 6. Resource 로딩
     adapter = load_adapter(config, device)
     adapter = wrap_model_ddp(adapter, device)
-    tokenizer = load_tokenizer(config)
+    tokenizer = load_tokenizer_from_config(config)
 
     # Model size 로깅
     model_size = get_model_size(unwrap_model(adapter))
     if is_main_process():
-        mlflow.log_params(
-            {
-                "model_total_params": model_size["total_params"],
-                "model_trainable_params": model_size["trainable_params"],
-                "model_non_trainable_params": model_size["non_trainable_params"],
-            }
-        )
+        if use_mlflow:
+            mlflow.log_params(
+                {
+                    "model_total_params": model_size["total_params"],
+                    "model_trainable_params": model_size["trainable_params"],
+                    "model_non_trainable_params": model_size["non_trainable_params"],
+                }
+            )
         logger.info(
             f"Model size: {model_size['trainable_params']:,} trainable / "
             f"{model_size['total_params']:,} total params"
@@ -455,12 +436,13 @@ def run_critic_training(config_path: str, **override_params: Any) -> tuple[dict[
 
         # System info 로깅
         system_info = get_system_info()
-        mlflow.log_params(
-            {
-                "system_cpu_count": system_info["cpu_count"],
-                "system_ram_total_gb": round(system_info["ram_total_gb"], 2),
-            }
-        )
+        if use_mlflow:
+            mlflow.log_params(
+                {
+                    "system_cpu_count": system_info["cpu_count"],
+                    "system_ram_total_gb": round(system_info["ram_total_gb"], 2),
+                }
+            )
 
         # GPU monitor 초기화
         gpu_monitor = GPUMonitor(device)
@@ -475,7 +457,6 @@ def run_critic_training(config_path: str, **override_params: Any) -> tuple[dict[
             tokenizer=tokenizer,
             batch_size=config.training.batch_size,
             max_length=config.dataset.max_length,
-            stage="stage1",
             n_samples=config.data_sampling.n_samples,
             balance_correct=config.data_sampling.balance_correct,
             correct_ratio=config.data_sampling.correct_ratio,
@@ -493,7 +474,6 @@ def run_critic_training(config_path: str, **override_params: Any) -> tuple[dict[
             tokenizer=tokenizer,
             batch_size=config.training.batch_size,
             max_length=config.dataset.max_length,
-            stage="stage1",
             n_samples=val_n_samples,
             balance_correct=config.data_sampling.balance_correct,
             correct_ratio=config.data_sampling.correct_ratio,
@@ -507,14 +487,15 @@ def run_critic_training(config_path: str, **override_params: Any) -> tuple[dict[
         logger.info(f"Validation batches: {len(val_loader)}")
 
         # Dataset statistics 로깅
-        mlflow.log_params(
-            {
-                "dataset_train_samples": len(train_loader.dataset),
-                "dataset_val_samples": len(val_loader.dataset),
-                "dataset_train_batches": len(train_loader),
-                "dataset_val_batches": len(val_loader),
-            }
-        )
+        if use_mlflow:
+            mlflow.log_params(
+                {
+                    "dataset_train_samples": len(train_loader.dataset),
+                    "dataset_val_samples": len(val_loader.dataset),
+                    "dataset_train_batches": len(train_loader),
+                    "dataset_val_batches": len(val_loader),
+                }
+            )
 
         # 6. Optimizer (Value head only) - Meta MTP 논문 설정
         optimizer = torch.optim.AdamW(
@@ -632,15 +613,16 @@ def run_critic_training(config_path: str, **override_params: Any) -> tuple[dict[
                     avg_grad_norm = all_reduce_scalar(grad_norm_dict["grad_norm"])
 
                     if is_main_process():
-                        mlflow.log_metrics(
-                            {
-                                "train/loss": avg_loss,
-                                "train/grad_norm": avg_grad_norm,
-                                "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
-                                "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
-                            },
-                            step=global_step,
-                        )
+                        if use_mlflow:
+                            mlflow.log_metrics(
+                                {
+                                    "train/loss": avg_loss,
+                                    "train/grad_norm": avg_grad_norm,
+                                    "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
+                                    "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
+                                },
+                                step=global_step,
+                            )
                     logger.info(
                         f"Step {global_step}/{batches_to_run}, "
                         f"Loss: {avg_loss:.4f}, "
@@ -680,18 +662,19 @@ def run_critic_training(config_path: str, **override_params: Any) -> tuple[dict[
 
             # Epoch-level 로깅
             if is_main_process():
-                mlflow.log_metrics(
-                    {
-                        "train/epoch_loss": train_loss_avg,
-                        "val/loss": avg_val_loss,
-                        "val/explained_variance": avg_val_explained_var,
-                    "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
-                    "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
-                    "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
-                    "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
-                },
-                step=int(current_epoch * 100),  # Epoch을 정수로 변환 (0.5 -> 50)
-            )
+                if use_mlflow:
+                    mlflow.log_metrics(
+                        {
+                            "train/epoch_loss": train_loss_avg,
+                            "val/loss": avg_val_loss,
+                            "val/explained_variance": avg_val_explained_var,
+                        "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
+                        "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
+                        "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
+                        "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
+                    },
+                    step=int(current_epoch * 100),  # Epoch을 정수로 변환 (0.5 -> 50)
+                    )
 
             logger.info(
                 f"Validation - Loss: {val_metrics['val_loss']:.4f}, "
@@ -751,7 +734,7 @@ def run_critic_training(config_path: str, **override_params: Any) -> tuple[dict[
             logger.info(f"Final checkpoint saved: {final_path.name}")
 
     # 9. MLflow artifact 업로드 (Rank 0만)
-    if is_main_process():
+    if is_main_process() and use_mlflow:
         # 최신 epoch checkpoint 업로드 (모두 validation loss 개선 시에만 저장되므로 best)
         epoch_checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
         if epoch_checkpoints:
@@ -766,7 +749,9 @@ def run_critic_training(config_path: str, **override_params: Any) -> tuple[dict[
 
     logger.info(f"Critic pre-training 완료! Latest checkpoint: {latest_checkpoint_path}")
 
-    return final_val_metrics, latest_checkpoint_path
+    # final_val_metrics가 정의되지 않은 경우 마지막 val_metrics 사용
+    final_metrics = final_val_metrics if config.checkpoint.save_final else val_metrics
+    return final_metrics, latest_checkpoint_path
 
 
 if __name__ == "__main__":

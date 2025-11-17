@@ -27,8 +27,6 @@ storage/
 │   │   └── stats/          # 길이·정확도 통계
 │   ├── mbpp/
 │   └── humaneval/
-├── datasets_local_small/   # 소형 검증 세트
-│   └── codecontests_small/
 ├── models_v2/
 │   ├── meta-llama-mtp/
 │   │   ├── raw/            # 7B_1T_4/consolidated.pth, params.json
@@ -195,6 +193,48 @@ storage/
 - 산출물: `safetensors/model.safetensors` (freqs_cis 제외), `configs/config.json`, `tokenizer/`, `metadata.json(target_device="mps")`
 - 검증: `uv run pytest tests/unit/test_adapter.py -k micro` 통과 (11/11 tests)
 
+### 3.4 모델 로딩 아키텍처
+**통합 로딩 메커니즘**: `MetaLlamaMTPAdapter.from_pretrained()`
+
+모든 파이프라인은 `MetaLlamaMTPAdapter.from_pretrained()` classmethod를 통해 모델을 로딩한다.
+
+**Signature**:
+```python
+MetaLlamaMTPAdapter.from_pretrained(
+    model_path: str,
+    device: str = "auto",
+    dtype: Optional[str] = None,
+    initialize_value_head: bool = True,
+) -> MetaLlamaMTPAdapter
+```
+
+**로딩 절차**:
+1. **Transformer 로딩**: `checkpoints.load_meta_mtp_model()` 호출
+   - safetensors 파일 로드
+   - Dtype 변환 (dtype 인자 또는 safetensors 기본값)
+   - Device 이동 (auto/cuda/mps/cpu)
+2. **ModelArgs 파싱**: params.json 또는 config.json 자동 감지
+   - params.json 우선 (Meta 표준)
+   - config.json fallback (HuggingFace 호환)
+3. **Value Head 선택적 초기화**:
+   - `initialize_value_head=True` (기본값): Critic/Verifiable Stage용
+     - ValueHead 생성 및 device/dtype 일치
+   - `initialize_value_head=False`: Rho-1 Stage용
+     - Value Head 불필요 (MTP trunk만 사용)
+
+**Tokenizer 공유 구조**:
+- Policy 모델과 Reference 모델은 동일한 tokenizer 사용
+- Tokenizer 위치: `{model_path}/tokenizer/`
+- 구성 파일:
+  - `tokenizer.model` (SentencePiece 모델)
+  - `tokenizer_config.json` (HuggingFace 설정)
+- Reference 모델도 동일 경로에서 tokenizer 로드 (중복 저장 불필요)
+
+**Reference 모델 전략** (Rho-1 전용):
+- HuggingFace `AutoModelForCausalLM.from_pretrained()` 직접 사용
+- Custom wrapper 불필요 (표준 인터페이스로 충분)
+- Tokenizer는 policy 모델과 공유
+
 ---
 
 ## 4. 데이터셋 준비 지침
@@ -239,11 +279,7 @@ storage/
 4. **통계/무결성 기록**
    - `stats/YYYY-MM-DD_summary.json`에 샘플 수, 평균 토큰 길이(`instruction`, `input`, `output`), `is_correct` 분포, 최대 길이 등을 기록.
    - `scripts/validate_datasets.py`로 schema 검증, 2048 토큰 초과 여부 검사, SHA256 로그를 수행한다.
-5. **로컬 소형 세트**
-   - `head` 기반으로 `datasets_local_small/<name>_small/{train_small.jsonl,validation_small.jsonl}` 생성(≤100 / ≤32).
-   - 메타데이터 파일도 함께 생성: `*_small_metadata.json`
-   - CLI에서 `--dataset-suffix small`로 선택 가능하도록 경로를 유지한다.
-6. **메모리 효율 학습 워크플로우**
+5. **메모리 효율 학습 워크플로우**
    - **메타데이터 기반 샘플링** (핵심 혁신):
      1. 전체 데이터셋(3.7M, ~15GB)을 메모리에 로드하지 **않음**
      2. 메타데이터 파일(`*_metadata.json`, ~217MB)만 로드
@@ -334,9 +370,9 @@ uv run python scripts/extract_metadata.py --dataset codecontests --split test
 ### 5.2 데이터셋
 1. **raw 정리**: CodeContests 등 원본 JSONL을 `datasets_v2/<name>/raw/`로 이동하고 SHA256 기록.
 2. **전처리 실행**: `src/data/prepare.py`를 돌려 processed train/validation/test, stats, schema를 생성한다.
-3. **검증 & 스몰셋**  
-   - `scripts/validate_datasets.py`로 스키마, 길이, 중복을 검사.  
-   - `datasets_local_small`에 소형셋 작성.  
+3. **검증 & 메타데이터 추출**
+   - `scripts/validate_datasets.py`로 스키마, 길이, 중복을 검사.
+   - `scripts/extract_metadata.py`로 메타데이터 파일 생성 (is_correct, difficulty만 추출, 99% 메모리 절감)
    - README에 생성 일자와 SHA256을 갱신한다.
 
 ### 5.3 README 갱신

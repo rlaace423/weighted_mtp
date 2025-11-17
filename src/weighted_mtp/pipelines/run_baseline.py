@@ -1,7 +1,9 @@
-"""Rho-1 WMTP Runner
+"""Baseline MTP Runner (Uniform Weighting)
+
+균등 가중치 기반 표준 MTP 학습 (비교 기준선)
 
 독립 실행:
-    python -m weighted_mtp.pipelines.run_rho1 --config configs/rho1/rho1.yaml
+    python -m weighted_mtp.pipelines.run_baseline --config configs/baseline/baseline.yaml
 """
 
 import argparse
@@ -15,7 +17,7 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 from weighted_mtp.data import AlpacaDataCollator, load_dataset
 from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
@@ -36,11 +38,6 @@ from weighted_mtp.runtime import (
     unwrap_model,
     all_reduce_scalar,
 )
-from weighted_mtp.value_weighting.rho1_weighting import (
-    build_weights,
-    compute_excess_loss,
-    compute_rho1_stats,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -54,54 +51,22 @@ def setup_logging(level: str = "INFO") -> None:
 
 
 def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
-    """Adapter 로드
+    """Adapter 로드 (Value head 없이)
 
     Args:
         config: 모델 설정
         device: 디바이스
 
     Returns:
-        MetaLlamaMTPAdapter 인스턴스
+        MetaLlamaMTPAdapter 인스턴스 (Value head 없음)
     """
+    # Baseline은 Value head 불필요 (균등 가중치)
     adapter = MetaLlamaMTPAdapter.from_pretrained(
         model_path=config.models.policy.path,
         device=device,
-        initialize_value_head=False,  # Rho-1은 Value Head 불필요
+        initialize_value_head=False,
     )
     return adapter
-
-
-def load_reference_model(config: dict, device: torch.device) -> AutoModelForCausalLM:
-    """Reference model 로드
-
-    Args:
-        config: 모델 설정
-        device: 디바이스
-
-    Returns:
-        Reference model (eval mode)
-    """
-    logger.info(f"Loading reference model: {config.models.reference.name}")
-    logger.info(f"Path: {config.models.reference.path}")
-
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        config.models.reference.path,
-        torch_dtype=getattr(torch, config.models.reference.dtype),
-        device_map={"": device},
-    )
-
-    # Eval mode (gradient 불필요)
-    ref_model.eval()
-
-    # Gradient 계산 비활성화
-    for param in ref_model.parameters():
-        param.requires_grad = False
-
-    logger.info("✓ Reference model loaded successfully")
-
-    return ref_model
-
-
 
 
 def create_dataloader(
@@ -123,8 +88,8 @@ def create_dataloader(
         batch_size: 배치 크기
         max_length: 최대 시퀀스 길이
         n_samples: 샘플 수
-        balance_correct: is_correct 균형 여부 (Rho-1은 False)
-        correct_ratio: correct 샘플 비율 (Rho-1은 1.0)
+        balance_correct: is_correct 균형 여부 (Baseline은 False)
+        correct_ratio: correct 샘플 비율 (Baseline은 1.0)
         seed: 시드
         shuffle: 셔플 여부
 
@@ -132,7 +97,6 @@ def create_dataloader(
         DataLoader
     """
     # 데이터셋 이름 및 스플릿 추출
-    # storage/datasets_v2/codecontests/processed/train.jsonl -> codecontests
     dataset_path_obj = Path(dataset_path)
     dataset_name = dataset_path_obj.parent.parent.name
     split_file = dataset_path_obj.name
@@ -151,7 +115,7 @@ def create_dataloader(
         n_samples=n_samples,
         balance_correct=balance_correct,
         correct_ratio=correct_ratio,
-        difficulty_weights=None,  # Rho-1은 curriculum learning 없음
+        difficulty_weights=None,  # Baseline은 curriculum learning 없음
         difficulty_bins=None,
         seed=seed,
     )
@@ -174,32 +138,24 @@ def create_dataloader(
     return dataloader
 
 
-def validate_rho1(
+def validate_baseline(
     adapter: MetaLlamaMTPAdapter,
-    ref_model: AutoModelForCausalLM,
     dataloader: DataLoader,
     device: torch.device,
-    temperature: float,
 ) -> dict[str, float]:
-    """Validation 수행 (Rho-1)
+    """Validation 수행 (Baseline - 균등 가중치)
 
     Args:
-        adapter: Adapter (DDP-wrapped 가능)
-        ref_model: Reference model
+        adapter: Adapter (Value head 없음)
         dataloader: Validation DataLoader
         device: 디바이스
-        temperature: Softmax temperature
 
     Returns:
-        Validation metrics (DDP 환경에서는 all-reduce 적용됨)
+        Validation metrics
     """
-    # DDP unwrap for eval
-    unwrapped_adapter = unwrap_model(adapter)
-    unwrapped_adapter.eval()
-    ref_model.eval()
+    adapter.eval()
 
-    total_weighted_ce_loss = 0.0
-    total_excess_loss = 0.0
+    total_ce_loss = 0.0
     n_batches = 0
 
     with torch.no_grad():
@@ -209,76 +165,47 @@ def validate_rho1(
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            # 2. Reference forward
-            ref_outputs = ref_model(input_ids, attention_mask=attention_mask)
-            ref_logits = ref_outputs.logits
+            # 2. Forward (MTP만, Value head 없음)
+            # Baseline은 Value head가 없으므로 transformer 직접 호출
+            logits = adapter.transformer(input_ids, start_pos=0, return_all_heads=True)
+            # logits: [batch, seq, n_future, vocab]
 
-            # 3. Policy forward (MTP)
-            policy_outputs = unwrapped_adapter.full_forward(input_ids, attention_mask)
-            policy_logits = policy_outputs["logits"]
+            batch_size, seq_len, n_future, vocab_size = logits.shape
 
-            batch_size, seq_len, n_future, vocab_size = policy_logits.shape
-
-            # 4. Excess loss 계산
-            excess_loss = compute_excess_loss(
-                policy_logits=policy_logits,
-                ref_logits=ref_logits,
-                labels=labels,
-                attention_mask=attention_mask,
-            )
-
-            # 5. Rho-1 weights
-            weights = build_weights(
-                excess_loss=excess_loss,
-                temperature=temperature,
-                attention_mask=attention_mask,
-            )
-
-            # 6. Weighted CE loss (모든 H개 토큰)
-            batch_weighted_ce_loss = 0.0
+            # 3. Uniform CE loss (모든 토큰 weight=1.0)
+            batch_ce_loss = 0.0
 
             for k in range(1, n_future + 1):
                 valid_len = seq_len - k
 
-                if valid_len <= 0:
-                    continue
-
-                policy_logits_k = policy_logits[:, :valid_len, k - 1, :]
+                logits_k = logits[:, :valid_len, k - 1, :]
                 labels_k = labels[:, k : k + valid_len]
-                weights_k = weights[:, :valid_len]
                 mask_k = attention_mask[:, k : k + valid_len]
 
                 ce_loss_k = F.cross_entropy(
-                    policy_logits_k.reshape(-1, vocab_size),
+                    logits_k.reshape(-1, vocab_size),
                     labels_k.reshape(-1),
                     reduction="none",
                 )
 
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.float().reshape(-1)
+                # 균등 가중치 (weight=1.0)
+                masked_ce_k = ce_loss_k * mask_k.float().reshape(-1)
 
                 mask_sum_k = mask_k.float().sum()
                 if mask_sum_k > 0:
-                    batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
+                    batch_ce_loss += masked_ce_k.sum() / mask_sum_k
 
-            weighted_ce_loss = batch_weighted_ce_loss / n_future
+            ce_loss = batch_ce_loss / n_future
 
-            # 7. Metrics 수집
-            total_weighted_ce_loss += weighted_ce_loss.item()
-            total_excess_loss += excess_loss.mean().item()
+            # 4. Metrics 수집
+            total_ce_loss += ce_loss.item()
             n_batches += 1
 
     # 평균 metrics 계산
-    avg_weighted_ce_loss = total_weighted_ce_loss / n_batches
-    avg_excess_loss = total_excess_loss / n_batches
-
-    # Validation metrics aggregation (DDP)
-    avg_weighted_ce_loss = all_reduce_scalar(avg_weighted_ce_loss)
-    avg_excess_loss = all_reduce_scalar(avg_excess_loss)
+    avg_ce_loss = total_ce_loss / n_batches
 
     metrics = {
-        "val_weighted_ce_loss": avg_weighted_ce_loss,
-        "val_excess_loss": avg_excess_loss,
-        "val_loss": avg_weighted_ce_loss,  # Best tracking용
+        "val_loss": avg_ce_loss,
     }
 
     return metrics
@@ -303,7 +230,7 @@ def cleanup_old_checkpoints(
     # 중간 checkpoint 파일만 수집 (checkpoint_epoch_*.pt)
     epoch_checkpoints = sorted(
         [f for f in checkpoint_dir.glob("checkpoint_epoch_*.pt")],
-        key=lambda x: x.stat().st_mtime,  # 수정 시간 기준 정렬
+        key=lambda x: x.stat().st_mtime,
     )
 
     # 삭제할 파일 개수 계산
@@ -315,27 +242,25 @@ def cleanup_old_checkpoints(
             checkpoint_path.unlink()
 
 
-def run_rho1_training(config_path: str, **override_params: Any) -> tuple[dict[str, float], str]:
-    """Rho-1 WMTP 실행
+def run_baseline_training(
+    config_path: str, **override_params: Any
+) -> tuple[dict[str, float], str]:
+    """Baseline MTP 실행 (균등 가중치)
 
     Args:
-        config_path: configs/rho1/rho1.yaml
+        config_path: configs/baseline/baseline.yaml
         override_params: CLI overrides
 
     Returns:
         (final_metrics, best_checkpoint_path)
     """
-    # 1. Config 로딩 (defaults + rho1 config merge)
+    # 1. Config 로딩 (defaults + baseline config merge)
     defaults = OmegaConf.load("configs/defaults.yaml")
     config = OmegaConf.load(config_path)
     config = OmegaConf.merge(defaults, config, override_params)
 
     # 2. 로깅 설정
     setup_logging(config.logging.level)
-
-    logger.info("=== Rho-1 WMTP (Reference-based Weighting) ===")
-    logger.info(f"Experiment: {config.experiment.name}")
-    logger.info(f"Description: {config.experiment.description}")
 
     # 3. Distributed 초기화 (torchrun 환경인 경우)
     if "RANK" in os.environ:
@@ -345,50 +270,61 @@ def run_rho1_training(config_path: str, **override_params: Any) -> tuple[dict[st
         rank, world_size = 0, 1
         logger.info("Local training (single device)")
 
+    logger.info("=== Baseline MTP (Uniform Weighting) ===")
+    logger.info(f"Experiment: {config.experiment.name}")
+    logger.info(f"Description: {config.experiment.description}")
+
     # 4. Environment setup (seed + device)
     actual_seed, device = setup_environment(config.runtime.seed)
     logger.info(f"Device: {device}, Seed: {actual_seed}")
 
-    # 5. MLflow 초기화 (Rank 0만)
-    if is_main_process():
+    # 5. MLflow 초기화 (Rank 0만, experiment 이름이 있는 경우만)
+    use_mlflow = bool(config.mlflow.experiment)
+    if is_main_process() and use_mlflow:
         mlflow.set_tracking_uri(config.mlflow.tracking_uri)
         mlflow.set_experiment(config.mlflow.experiment)
         mlflow.start_run(
             run_name=config.experiment.name,
             tags={tag: True for tag in config.experiment.tags},
         )
+        # Config 로깅
         mlflow.log_params(OmegaConf.to_container(config, resolve=True))
 
     # 6. Resource 로딩
     adapter = load_adapter(config, device)
-    ref_model = load_reference_model(config, device)
+    adapter = wrap_model_ddp(adapter, device)
     tokenizer = load_tokenizer_from_config(config)
 
-    # 7. DDP wrapping (adapter만 - reference는 frozen inference용)
-    adapter = wrap_model_ddp(adapter, device)
-
-    # Model size + System info 로깅 (Rank 0만)
+    # Model size 로깅
+    model_size = get_model_size(unwrap_model(adapter))
     if is_main_process():
-        model_size = get_model_size(unwrap_model(adapter))
-        mlflow.log_params(
-            {
-                "model_total_params": model_size["total_params"],
-                "model_trainable_params": model_size["trainable_params"],
-            }
+        if use_mlflow:
+            mlflow.log_params(
+                {
+                    "model_total_params": model_size["total_params"],
+                    "model_trainable_params": model_size["trainable_params"],
+                    "model_non_trainable_params": model_size["non_trainable_params"],
+                }
+            )
+        logger.info(
+            f"Model size: {model_size['trainable_params']:,} trainable / "
+            f"{model_size['total_params']:,} total params"
         )
+
+        # System info 로깅
         system_info = get_system_info()
-        mlflow.log_params(
-            {
-                "system_cpu_count": system_info["cpu_count"],
-                "system_ram_total_gb": round(system_info["ram_total_gb"], 2),
-            }
-        )
+        if use_mlflow:
+            mlflow.log_params(
+                {
+                    "system_cpu_count": system_info["cpu_count"],
+                    "system_ram_total_gb": round(system_info["ram_total_gb"], 2),
+                }
+            )
 
-    # GPU monitor 초기화
-    gpu_monitor = GPUMonitor(device)
-    throughput_tracker = ThroughputTracker()
+        # GPU monitor 초기화
+        gpu_monitor = GPUMonitor(device)
 
-    # 8. Dataset & DataLoader 생성
+    # 5. Dataset & DataLoader 생성
     logger.info(f"Dataset: {config.dataset.name}")
     logger.info(f"Train: {config.dataset.train}")
     logger.info(f"Validation: {config.dataset.validation}")
@@ -423,7 +359,18 @@ def run_rho1_training(config_path: str, **override_params: Any) -> tuple[dict[st
     logger.info(f"Train batches: {len(train_loader)}")
     logger.info(f"Validation batches: {len(val_loader)}")
 
-    # 6. Optimizer (MTP heads만 - Value head 없음) - Meta MTP 논문 설정
+    # Dataset statistics 로깅
+    if is_main_process() and use_mlflow:
+        mlflow.log_params(
+            {
+                "dataset_train_samples": len(train_loader.dataset),
+                "dataset_val_samples": len(val_loader.dataset),
+                "dataset_train_batches": len(train_loader),
+                "dataset_val_batches": len(val_loader),
+            }
+        )
+
+    # 6. Optimizer (전체 파라미터) - Meta MTP 논문 설정
     optimizer = torch.optim.AdamW(
         adapter.parameters(),
         lr=config.training.learning_rate,
@@ -448,11 +395,13 @@ def run_rho1_training(config_path: str, **override_params: Any) -> tuple[dict[st
     logger.info(f"Total epochs: {n_epochs}")
     logger.info(f"Total batches to run: {batches_to_run}")
     logger.info(f"Validation & Checkpoint every: {save_checkpoint_every} epochs")
-    logger.info(f"Temperature: {config.training.temperature}")
 
     current_epoch = 0.0
     batch_count = 0
     next_checkpoint_epoch = save_checkpoint_every
+
+    # Throughput tracker 초기화
+    throughput_tracker = ThroughputTracker()
 
     # 8. Training loop
     while batch_count < batches_to_run:
@@ -465,7 +414,7 @@ def run_rho1_training(config_path: str, **override_params: Any) -> tuple[dict[st
 
         # DataLoader에서 필요한 만큼만 사용
         epoch_train_loader = iter(train_loader)
-        period_metrics_sum = {"weighted_ce_loss": 0.0, "excess_loss": 0.0}
+        period_loss_sum = 0.0
         period_batches = 0
 
         for _ in range(batches_this_period):
@@ -476,71 +425,50 @@ def run_rho1_training(config_path: str, **override_params: Any) -> tuple[dict[st
                 epoch_train_loader = iter(train_loader)
                 batch = next(epoch_train_loader)
 
-            # 1 batch 훈련 (Rho-1 로직)
+            # 1 batch 훈련 (Baseline 로직 - 균등 가중치)
             adapter.train()
-            ref_model.eval()  # Reference는 항상 eval
 
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            # Reference forward (no grad)
-            with torch.no_grad():
-                ref_outputs = ref_model(input_ids, attention_mask=attention_mask)
-                ref_logits = ref_outputs.logits
+            # Forward (MTP만, Value head 없음)
+            logits = adapter.transformer(input_ids, start_pos=0, return_all_heads=True)
+            # logits: [batch, seq, n_future, vocab]
 
-            # Policy forward (MTP)
-            policy_outputs = adapter.full_forward(input_ids, attention_mask)
-            policy_logits = policy_outputs["logits"]
+            batch_size, seq_len, n_future, vocab_size = logits.shape
 
-            batch_size, seq_len, n_future, vocab_size = policy_logits.shape
-
-            # Excess loss 계산
-            excess_loss = compute_excess_loss(
-                policy_logits=policy_logits,
-                ref_logits=ref_logits,
-                labels=labels,
-                attention_mask=attention_mask,
-            )
-
-            # Rho-1 weights
-            weights = build_weights(
-                excess_loss=excess_loss,
-                temperature=config.training.temperature,
-                attention_mask=attention_mask,
-            )
-
-            # Weighted CE loss (모든 H개 토큰)
-            batch_weighted_ce_loss = 0.0
+            # Uniform CE loss (모든 토큰 weight=1.0)
+            batch_ce_loss = 0.0
 
             for k in range(1, n_future + 1):
                 valid_len = seq_len - k
 
-                if valid_len <= 0:
-                    continue
-
-                policy_logits_k = policy_logits[:, :valid_len, k - 1, :]
+                logits_k = logits[:, :valid_len, k - 1, :]
                 labels_k = labels[:, k : k + valid_len]
-                weights_k = weights[:, :valid_len]
                 mask_k = attention_mask[:, k : k + valid_len]
 
                 ce_loss_k = F.cross_entropy(
-                    policy_logits_k.reshape(-1, vocab_size),
+                    logits_k.reshape(-1, vocab_size),
                     labels_k.reshape(-1),
                     reduction="none",
                 )
 
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.float().reshape(-1)
+                # 균등 가중치 (weight=1.0)
+                masked_ce_k = ce_loss_k * mask_k.float().reshape(-1)
 
                 mask_sum_k = mask_k.float().sum()
                 if mask_sum_k > 0:
-                    batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
+                    batch_ce_loss += masked_ce_k.sum() / mask_sum_k
 
-            weighted_ce_loss = batch_weighted_ce_loss / n_future
+            ce_loss = batch_ce_loss / n_future
 
             # Backward & update
             optimizer.zero_grad()
-            weighted_ce_loss.backward()
+            ce_loss.backward()
+
+            # Gradient norm (clipping 전)
+            grad_norm_dict = compute_gradient_norm(adapter)
 
             # Gradient clipping
             if config.training.max_grad_norm > 0:
@@ -555,99 +483,110 @@ def run_rho1_training(config_path: str, **override_params: Any) -> tuple[dict[st
             batch_count += 1
             period_batches += 1
 
+            # Throughput tracking
+            batch_size_actual = input_ids.size(0)
+            n_tokens = attention_mask.sum().item()
+            throughput_tracker.update(batch_size_actual, int(n_tokens))
+
             # Metrics 누적
-            period_metrics_sum["weighted_ce_loss"] += weighted_ce_loss.item()
-            period_metrics_sum["excess_loss"] += excess_loss.mean().item()
+            period_loss_sum += ce_loss.item()
 
             # Step-level 로깅
             if global_step % config.training.log_interval == 0:
+                gpu_metrics = gpu_monitor.get_metrics()
+
                 # Metric aggregation (DDP)
-                avg_weighted_ce = all_reduce_scalar(weighted_ce_loss.item())
-                avg_excess_loss = all_reduce_scalar(excess_loss.mean().item())
+                avg_loss = all_reduce_scalar(ce_loss.item())
+                avg_grad_norm = all_reduce_scalar(grad_norm_dict["grad_norm"])
 
                 if is_main_process():
-                    mlflow.log_metrics(
-                        {
-                            "train/weighted_ce_loss": avg_weighted_ce,
-                            "train/excess_loss": avg_excess_loss,
-                        },
-                        step=global_step,
-                    )
-                    logger.info(
-                        f"Step {global_step}/{batches_to_run}, "
-                        f"Weighted CE: {avg_weighted_ce:.4f}, "
-                        f"Excess Loss: {avg_excess_loss:.4f}"
-                    )
+                    if use_mlflow:
+                        mlflow.log_metrics(
+                            {
+                                "train/loss": avg_loss,
+                                "train/grad_norm": avg_grad_norm,
+                                "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
+                                "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
+                            },
+                            step=global_step,
+                        )
+                logger.info(
+                    f"Step {global_step}/{batches_to_run}, "
+                    f"Loss: {avg_loss:.4f}, "
+                    f"Grad Norm: {avg_grad_norm:.4f}"
+                )
 
         # Epoch 경계 도달
         current_epoch = batch_count / total_batches
+        train_loss_avg = period_loss_sum / period_batches
+        train_loss_avg = all_reduce_scalar(train_loss_avg)
 
-        # Period-level metrics 계산
-        train_weighted_ce_avg = period_metrics_sum["weighted_ce_loss"] / period_batches
-        train_excess_avg = period_metrics_sum["excess_loss"] / period_batches
+        logger.info(f"Epoch {current_epoch:.2f} 도달 - Train Loss: {train_loss_avg:.4f}")
 
-        logger.info(
-            f"Epoch {current_epoch:.2f} 도달 - "
-            f"Train Weighted CE: {train_weighted_ce_avg:.4f}"
-        )
-
-        # Validation 실행 (epoch 경계에서)
+        # Validation 실행
         logger.info(f"--- Validation at epoch {current_epoch:.2f} ---")
-        val_metrics = validate_rho1(
+        val_metrics = validate_baseline(
             adapter=adapter,
-            ref_model=ref_model,
             dataloader=val_loader,
             device=device,
-            temperature=config.training.temperature,
         )
 
-        # Epoch-level 로깅 (Rank 0만)
-        if is_main_process():
-            mlflow.log_metrics(
-                {
-                    "train/epoch_weighted_ce_loss": train_weighted_ce_avg,
-                    "train/epoch_excess_loss": train_excess_avg,
-                    "val/weighted_ce_loss": val_metrics["val_weighted_ce_loss"],
-                    "val/excess_loss": val_metrics["val_excess_loss"],
-                },
-                step=int(current_epoch * 100),
-            )
+        # Validation metrics aggregation
+        avg_val_loss = all_reduce_scalar(val_metrics["val_loss"])
 
-            logger.info(
-                f"Validation - Weighted CE: {val_metrics['val_weighted_ce_loss']:.4f}, "
-                f"Excess Loss: {val_metrics['val_excess_loss']:.4f}"
-            )
+        # GPU metrics (epoch-level)
+        gpu_metrics_epoch = gpu_monitor.get_metrics()
+
+        # Throughput metrics 계산
+        throughput_metrics = throughput_tracker.get_epoch_metrics()
+
+        # Epoch-level 로깅
+        if is_main_process():
+            if use_mlflow:
+                mlflow.log_metrics(
+                    {
+                        "train/epoch_loss": train_loss_avg,
+                        "val/loss": avg_val_loss,
+                        "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
+                        "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
+                        "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
+                        "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
+                    },
+                    step=int(current_epoch * 100),
+                )
+
+        logger.info(f"Validation - Loss: {val_metrics['val_loss']:.4f}")
 
         # Checkpoint 저장 (validation loss 개선 시만)
-        if val_metrics["val_loss"] < best_val_loss:
-            best_val_loss = val_metrics["val_loss"]
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}.pt"
 
             save_checkpoint(
                 adapter=unwrap_model(adapter),
                 optimizer=optimizer,
                 epoch=current_epoch,
-                train_metrics={
-                    "train_weighted_ce_loss": train_weighted_ce_avg,
-                    "train_excess_loss": train_excess_avg,
-                },
+                train_metrics={"train_loss": train_loss_avg},
                 val_metrics=val_metrics,
                 checkpoint_path=checkpoint_path,
             )
 
             logger.info(f"✓ Improved checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
 
-            # 오래된 checkpoint 정리 (최대 3개 유지)
-            if config.checkpoint.get("save_total_limit"):
+            # 오래된 checkpoint 정리
+            if config.checkpoint.save_total_limit:
                 cleanup_old_checkpoints(
                     checkpoint_dir=checkpoint_dir,
                     save_total_limit=config.checkpoint.save_total_limit,
                 )
         else:
-            logger.info(f"Validation loss did not improve ({val_metrics['val_loss']:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
+            logger.info(f"Validation loss did not improve ({avg_val_loss:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
 
         # 다음 checkpoint 경계 설정
         next_checkpoint_epoch += save_checkpoint_every
+
+        # Throughput tracker 리셋
+        throughput_tracker.reset_epoch()
 
     # 9. Final checkpoint
     if config.checkpoint.save_final:
@@ -655,22 +594,17 @@ def run_rho1_training(config_path: str, **override_params: Any) -> tuple[dict[st
 
         # 최종 validation 실행
         logger.info("--- Final Validation ---")
-        final_val_metrics = validate_rho1(
+        final_val_metrics = validate_baseline(
             adapter=adapter,
-            ref_model=ref_model,
             dataloader=val_loader,
             device=device,
-            temperature=config.training.temperature,
         )
 
         save_checkpoint(
             adapter=unwrap_model(adapter),
             optimizer=optimizer,
             epoch=current_epoch,
-            train_metrics={
-                "train_weighted_ce_loss": train_weighted_ce_avg,
-                "train_excess_loss": train_excess_avg,
-            },
+            train_metrics={"train_loss": train_loss_avg},
             val_metrics=final_val_metrics,
             checkpoint_path=final_path,
         )
@@ -678,8 +612,8 @@ def run_rho1_training(config_path: str, **override_params: Any) -> tuple[dict[st
         logger.info(f"Final checkpoint saved: {final_path.name}")
 
     # 10. MLflow artifact 업로드 (Rank 0만)
-    if is_main_process():
-        # 최신 epoch checkpoint 업로드 (모두 validation loss 개선 시에만 저장되므로 best)
+    if is_main_process() and use_mlflow:
+        # 최신 epoch checkpoint 업로드
         epoch_checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
         if epoch_checkpoints:
             latest_checkpoint = epoch_checkpoints[-1]
@@ -691,17 +625,19 @@ def run_rho1_training(config_path: str, **override_params: Any) -> tuple[dict[st
     epoch_checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
     latest_checkpoint_path = str(epoch_checkpoints[-1]) if epoch_checkpoints else None
 
-    logger.info(f"🎉 Rho-1 WMTP 완료! Latest checkpoint: {latest_checkpoint_path}")
+    logger.info(f"Baseline MTP 완료! Latest checkpoint: {latest_checkpoint_path}")
 
-    return final_val_metrics, latest_checkpoint_path
+    # final_val_metrics가 정의되지 않은 경우 마지막 val_metrics 사용
+    final_metrics = final_val_metrics if config.checkpoint.save_final else val_metrics
+    return final_metrics, latest_checkpoint_path
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Rho-1 WMTP (Reference-based Weighting)")
+    parser = argparse.ArgumentParser(description="Baseline MTP (Uniform Weighting)")
     parser.add_argument(
         "--config",
         required=True,
-        help="Config path (e.g., configs/rho1/rho1.yaml)",
+        help="Config path (e.g., configs/baseline/baseline.yaml)",
     )
     parser.add_argument("--run-name", help="MLflow run name override")
     parser.add_argument("--device", help="Device override (cuda/cpu/mps)")
@@ -713,4 +649,4 @@ if __name__ == "__main__":
     if args.device:
         overrides["runtime.device"] = args.device
 
-    run_rho1_training(args.config, **overrides)
+    run_baseline_training(args.config, **overrides)
