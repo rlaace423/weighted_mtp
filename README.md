@@ -87,27 +87,22 @@ uv run python -m weighted_mtp \
 
 ## 개발 현황
 
-**Phase 2 완료** (2025-11-14):
-- ✅ vendor/meta_llama/ 패키지 구성
-- ✅ src/weighted_mtp/ 8개 모듈 스켈레톤
-- ✅ pyproject.toml 및 의존성 설정
-- ✅ configs/ 3개 recipe + preset
-- ✅ CLI --dry-run 모드
-- ✅ tests/unit/ 기본 테스트 (7 passed)
-
-**다음 단계** (Phase 3+):
-- Phase 3: 데이터 파이프라인 구현 (Loss masking collator)
-- Phase 4: Meta Adapter 통합
-- Phase 5: Value Weighting 모듈
-- Phase 6: 학습 파이프라인 (Stage2 Value Loss 구현)
+**구현 완료** (2025-11-17):
+- ✅ Pure PyTorch Transformer (Meta 독립, FSDP 호환)
+- ✅ 4개 파이프라인 구현 (Baseline, Critic, Verifiable, Rho-1)
+- ✅ 메타데이터 기반 데이터 로딩 (99% 메모리 절감)
+- ✅ MLflow + S3 인프라 연동
+- ✅ VESSL A100 4-GPU 분산학습 준비
+- ✅ 통합 테스트 전체 통과
 
 ## 문서
 
-- [00_ideal_structure.md](docs/00_ideal_structure.md): 이상적 구조
-- [01_storage_preparation_plan.md](docs/01_storage_preparation_plan.md): Storage 재구성
-- [02_implementation_plan.md](docs/02_implementation_plan.md): 전체 구현 계획
-- [03_phase1_detailed_plan.md](docs/03_phase1_detailed_plan.md): Phase 1 상세
-- [04_phase2_detailed_plan.md](docs/04_phase2_detailed_plan.md): Phase 2 상세
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md): 코드베이스 아키텍처 및 핵심 구현
+- [SETUP.md](docs/SETUP.md): 환경 설정 및 데이터 준비
+- [VESSL.md](docs/VESSL.md): VESSL A100 4-GPU 실행 가이드
+- [MLFLOW.md](docs/MLFLOW.md): MLflow 추적 및 S3 연동
+- [RESEARCH.md](docs/RESEARCH.md): 연구 배경 및 이론
+- [vessl_yaml_cheatsheet.md](docs/vessl_yaml_cheatsheet.md): VESSL YAML 참조
 
 ## 라이선스
 

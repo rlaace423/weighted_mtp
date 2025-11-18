@@ -106,7 +106,11 @@ def all_reduce_scalar(
         return value
 
     # Tensor 변환 (current device에 위치)
-    tensor = torch.tensor(value, device=torch.cuda.current_device())
+    if torch.cuda.is_available():
+        device = torch.cuda.current_device()
+    else:
+        device = torch.device("cpu")
+    tensor = torch.tensor(value, device=device)
 
     # All-reduce (SUM)
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM)

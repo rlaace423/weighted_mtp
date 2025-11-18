@@ -11,6 +11,7 @@ VESSL A100 4-GPU 환경 기준으로 설계됨.
 
 import os
 import logging
+from datetime import timedelta
 from typing import Optional
 
 import torch
@@ -70,7 +71,7 @@ def init_distributed(
     if not dist.is_initialized():
         timeout = torch.distributed.default_pg_timeout
         if timeout_minutes > 0:
-            timeout = torch.timedelta(minutes=timeout_minutes)
+            timeout = timedelta(minutes=timeout_minutes)
 
         dist.init_process_group(
             backend=backend,
