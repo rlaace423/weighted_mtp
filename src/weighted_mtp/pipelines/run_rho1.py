@@ -40,7 +40,7 @@ from weighted_mtp.runtime import (
     init_distributed,
     setup_environment,
     is_main_process,
-    wrap_model_ddp,
+    wrap_model_fsdp,
     unwrap_model,
     all_reduce_scalar,
     barrier,
@@ -109,14 +109,14 @@ def validate_rho1(
     """Validation 수행 (Rho-1)
 
     Args:
-        adapter: Adapter (DDP-wrapped 가능)
+        adapter: Adapter (FSDP-wrapped 가능)
         ref_model: Reference model (MetaLlamaMTPAdapter, eval mode)
         dataloader: Validation DataLoader
         device: 디바이스
         k_percent: Top-k selection ratio (0~1)
 
     Returns:
-        Validation metrics (DDP 환경에서는 all-reduce 적용됨)
+        Validation metrics (FSDP 환경에서는 all-reduce 적용됨)
     """
     # DDP unwrap for eval
     unwrapped_adapter = unwrap_model(adapter)
@@ -255,7 +255,13 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info("✓ Reference model loaded successfully")
 
     # 7. DDP wrapping (adapter만 - reference는 frozen inference용)
-    adapter = wrap_model_ddp(adapter, device)
+    adapter = wrap_model_fsdp(
+        adapter,
+        device,
+        sharding_strategy=config.distributed.fsdp.sharding_strategy,
+        mixed_precision=config.distributed.fsdp.mixed_precision,
+        cpu_offload=config.distributed.fsdp.cpu_offload,
+    )
 
     # Model size + System info 로깅 (Rank 0만)
     if is_main_process() and use_mlflow:
@@ -547,7 +553,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}.pt"
 
             save_checkpoint(
-                adapter=unwrap_model(adapter),
+                adapter=adapter,
                 optimizer=optimizer,
                 epoch=current_epoch,
                 train_metrics={
@@ -604,7 +610,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
         )
 
         save_checkpoint(
-            adapter=unwrap_model(adapter),
+            adapter=adapter,
             optimizer=optimizer,
             epoch=current_epoch,
             train_metrics={

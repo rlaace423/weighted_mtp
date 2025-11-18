@@ -27,8 +27,8 @@ from weighted_mtp.runtime.environment import (
     get_gpu_memory_info,
 )
 
-from weighted_mtp.runtime.ddp import (
-    wrap_model_ddp,
+from weighted_mtp.runtime.fsdp import (
+    wrap_model_fsdp,
     unwrap_model,
     all_reduce_scalar,
 )
@@ -51,8 +51,8 @@ __all__ = [
     "setup_torch_backends",
     "setup_environment",
     "get_gpu_memory_info",
-    # ddp.py
-    "wrap_model_ddp",
+    # fsdp.py
+    "wrap_model_fsdp",
     "unwrap_model",
     "all_reduce_scalar",
 ]

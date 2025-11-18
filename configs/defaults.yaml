@@ -44,6 +44,12 @@ runtime:
   seed: 42
   mixed_precision: true
 
+distributed:
+  fsdp:
+    sharding_strategy: FULL_SHARD
+    mixed_precision: true
+    cpu_offload: false
+
 training:
   log_interval: 1
   max_grad_norm: 0.5

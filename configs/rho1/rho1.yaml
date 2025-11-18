@@ -103,6 +103,13 @@ runtime:
   seed: 42
   mixed_precision: true
 
+# 분산학습 설정
+distributed:
+  fsdp:
+    sharding_strategy: FULL_SHARD
+    mixed_precision: true
+    cpu_offload: false
+
 # 스토리지
 storage:
   root: storage
