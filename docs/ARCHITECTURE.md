@@ -105,10 +105,12 @@ VESSL A100 4-GPU 환경에서 DDP (DistributedDataParallel) 기반 분산학습.
 ### Torchrun 설정
 
 ```bash
-torchrun \
+# 4-GPU 분산학습
+PYTHONPATH=src torchrun \
   --nproc_per_node=4 \
   --nnodes=1 \
-  -m weighted_mtp train \
+  --node_rank=0 \
+  src/weighted_mtp/pipelines/run_verifiable.py \
   --config configs/verifiable/verifiable.yaml
 ```
 
@@ -130,15 +132,25 @@ model = wrap_model_ddp(model, device)
 
 ### 데이터 분산
 
+**Rank-aware Sampling** (DistributedSampler 대신):
+
 ```python
-# DistributedSampler가 자동 분할
-sampler = DistributedSampler(dataset, rank=rank, world_size=world_size)
+# datasets.py: 메타데이터 기반 Rank-aware 샘플링
+all_indices = _compute_sampling_indices_from_metadata(...)  # 모든 rank 동일
+
+if world_size > 1:
+    rank_indices = all_indices[rank::world_size]  # Rank별 분할
 
 # 각 GPU가 전체의 1/4 처리 (중복 없음)
 # Rank 0: samples[0::4]
 # Rank 1: samples[1::4]
 # ...
 ```
+
+**장점**:
+- 75% 메모리 절약 (각 rank가 1/4만 로드)
+- 메타데이터 기반 커리큘럼 학습 지원
+- 재현성 보장 (모든 rank가 동일 인덱스 계산)
 
 ### Rank 0 책임
 

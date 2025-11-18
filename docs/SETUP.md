@@ -155,43 +155,47 @@ uv run pytest tests/unit/test_adapter.py
 uv run pytest tests/unit/test_datasets.py
 ```
 
-### 통합 테스트 (로컬 Micro 모델)
+### 통합 테스트 (DDP 멀티프로세스)
 
 ```bash
-# 4개 파이프라인 E2E 테스트 (MPS 환경, ~88s)
-uv run pytest tests/integration/
+# DDP 통합 테스트 (torchrun 필요)
+PYTHONPATH=src TOKENIZERS_PARALLELISM=false \
+torchrun --nproc_per_node=2 --nnodes=1 \
+  -m pytest tests/integration/test_ddp_multiprocess.py -v -s
 
-# 개별 파이프라인
-uv run pytest tests/integration/test_pipeline_baseline.py
-uv run pytest tests/integration/test_pipeline_verifiable.py
+# Checkpoint 동기화 테스트
+torchrun --nproc_per_node=2 --nnodes=1 \
+  -m pytest tests/integration/test_checkpoint_sync.py -v -s
 ```
 
 ---
 
 ## 로컬 실행
 
-### Dry-run (설정 검증)
+### 직접 실행 (단일 파이프라인)
 
 ```bash
-# Baseline
-uv run python -m weighted_mtp train \
-  --config configs/baseline/baseline_local.yaml \
-  --dry-run
+# Baseline 파이프라인
+PYTHONPATH=src python src/weighted_mtp/pipelines/run_baseline.py \
+  --config configs/baseline/baseline_local.yaml
 
-# Verifiable (Micro 모델)
-uv run python -m weighted_mtp train \
-  --config configs/verifiable/verifiable_local.yaml \
-  --use-micro-model
+# Critic 파이프라인 (로컬)
+PYTHONPATH=src python src/weighted_mtp/pipelines/run_critic.py \
+  --config configs/critic/critic_local.yaml
+
+# Verifiable 파이프라인
+PYTHONPATH=src python src/weighted_mtp/pipelines/run_verifiable.py \
+  --config configs/verifiable/verifiable_local.yaml
 ```
 
-### 실제 학습 (로컬)
+### DDP 분산 학습 (로컬 2-GPU 시뮬레이션)
 
 ```bash
-# MPS 환경 (M3 Mac)
-TOKENIZERS_PARALLELISM=false \
-uv run python -m weighted_mtp train \
-  --config configs/verifiable/verifiable_local.yaml \
-  --use-micro-model
+# 2-process CPU Gloo backend
+PYTHONPATH=src TOKENIZERS_PARALLELISM=false \
+torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 \
+  src/weighted_mtp/pipelines/run_critic.py \
+  --config configs/critic/critic_local.yaml
 ```
 
 **로컬 설정 특징**:
