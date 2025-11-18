@@ -168,35 +168,15 @@ class MetaLlamaMTPAdapter(nn.Module):
         if self.value_head is None:
             raise ValueError("Value head not initialized. Call attach_value_head() first.")
 
-        # Transformer forward (return_all_heads=False → 1개 head만)
-        # output: [batch, seq, 1, vocab]
-        output = self.transformer(input_ids, start_pos=0, return_all_heads=False)
-
-        # hidden_states 추출: norm 적용 전 trunk의 마지막 hidden state
-        # Transformer에서 h_trunk를 직접 반환하지 않으므로,
-        # 대신 norm 전 마지막 layer의 출력을 재계산
-        # 효율성을 위해 forward를 두 번 호출하지 않고, 내부 구조 활용
-
-        # 간단한 방법: Transformer의 trunk layers를 직접 실행
-        _bsz, seqlen = input_ids.shape
-        h = self.transformer.tok_embeddings(input_ids)
-
-        # freqs_cis를 입력 tokens와 동일한 device로 이동 (MPS/CUDA 호환성)
-        freqs_cis = self.transformer.freqs_cis[0:seqlen].to(input_ids.device)
-        mask = None
-        if seqlen > 1:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=input_ids.device)
-            mask = torch.triu(mask, diagonal=1).type_as(h)
-
-        # Trunk forward (마지막 layer 제외)
-        for layer in self.transformer.layers[:-1]:
-            h = layer(h, 0, freqs_cis, mask)
-
-        # 마지막 trunk layer
-        h_trunk = self.transformer.layers[-1](h, 0, freqs_cis, mask)
-
-        # Normalization 적용 (Value head 입력 전 필수)
-        hidden_states = self.transformer.norm(h_trunk.unsqueeze(-2)).squeeze(-2)
+        # Transformer forward로 hidden_states 추출
+        # return_all_heads=False: MTP heads 계산 생략 (속도 향상)
+        # return_hidden_states=True: Value Head용 h_trunk 반환
+        _, hidden_states = self.transformer(
+            input_ids,
+            start_pos=0,
+            return_all_heads=False,
+            return_hidden_states=True,
+        )
 
         # Value head
         value_logits = self.value_head(hidden_states)
@@ -233,28 +213,14 @@ class MetaLlamaMTPAdapter(nn.Module):
         if self.value_head is None:
             raise ValueError("Value head not initialized. Call attach_value_head() first.")
 
-        # Transformer forward (모든 MTP heads 사용)
-        # output: [batch, seq, n_future_tokens, vocab]
-        logits = self.transformer(input_ids, start_pos=0, return_all_heads=True)
-
-        # hidden_states 추출 (trunk_forward와 동일 방식)
-        _bsz, seqlen = input_ids.shape
-        h = self.transformer.tok_embeddings(input_ids)
-
-        # freqs_cis를 입력 tokens와 동일한 device로 이동 (MPS/CUDA 호환성)
-        freqs_cis = self.transformer.freqs_cis[0:seqlen].to(input_ids.device)
-        mask = None
-        if seqlen > 1:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=input_ids.device)
-            mask = torch.triu(mask, diagonal=1).type_as(h)
-
-        # Trunk forward
-        for layer in self.transformer.layers[:-1]:
-            h = layer(h, 0, freqs_cis, mask)
-        h_trunk = self.transformer.layers[-1](h, 0, freqs_cis, mask)
-
-        # Normalization
-        hidden_states = self.transformer.norm(h_trunk.unsqueeze(-2)).squeeze(-2)
+        # Transformer forward (MTP heads + hidden_states 함께 반환)
+        # return_hidden_states=True로 trunk 중복 계산 방지
+        logits, hidden_states = self.transformer(
+            input_ids,
+            start_pos=0,
+            return_all_heads=True,
+            return_hidden_states=True,
+        )
 
         # Value head
         value_logits = self.value_head(hidden_states)

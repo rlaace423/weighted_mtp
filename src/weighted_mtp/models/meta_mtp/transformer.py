@@ -146,8 +146,11 @@ class Attention(nn.Module):
                 device=x.device
             )
 
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+        # Training 시 computational graph 공유 방지를 위해 detach
+        # xk, xv를 그대로 저장하면 이전 iteration의 graph가 cache에 남아
+        # 다음 backward 시 "backward through the graph a second time" 에러 발생
+        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk.detach()
+        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv.detach()
 
         keys = self.cache_k[:bsz, : start_pos + seqlen]
         values = self.cache_v[:bsz, : start_pos + seqlen]
@@ -258,17 +261,28 @@ class Transformer(nn.Module):
             theta=params.rope_theta
         )
 
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0, return_all_heads: bool = False):
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        start_pos: int = 0,
+        return_all_heads: bool = False,
+        return_hidden_states: bool = False,
+    ):
         """Forward pass
 
         Args:
             tokens: [batch, seq] 입력 토큰
             start_pos: KV cache 시작 위치 (학습 시 0)
             return_all_heads: True면 모든 MTP heads 반환
+            return_hidden_states: True면 hidden_states도 함께 반환 (Value Head용)
 
         Returns:
-            [batch, seq, n_future_tokens, vocab] if return_all_heads
-            [batch, seq, vocab] if not return_all_heads
+            if return_hidden_states:
+                (logits, hidden_states) tuple
+                - logits: [batch, seq, n_future_tokens, vocab] or [batch, seq, vocab]
+                - hidden_states: [batch, seq, hidden_size] (trunk 마지막 layer, norm 적용 후)
+            else:
+                logits: [batch, seq, n_future_tokens, vocab] or [batch, seq, vocab]
         """
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
@@ -304,5 +318,11 @@ class Transformer(nn.Module):
         h = torch.stack(latents, dim=-2)  # [batch, seq, n_heads_to_use, dim]
         h = self.norm(h)
         output = self.output(h)  # [batch, seq, n_heads_to_use, vocab]
+
+        if return_hidden_states:
+            # Value Head용 hidden_states 반환
+            # h_trunk의 마지막 layer 출력에 norm 적용
+            hidden_states = self.norm(h_trunk.unsqueeze(-2)).squeeze(-2)
+            return output, hidden_states
 
         return output

@@ -31,15 +31,15 @@ def test_critic_pipeline_micro_mtp():
     # Override 파라미터 (초경량 테스트 설정)
     override_params = {
         "data_sampling": {
-            "n_samples": 20,  # 20개만
+            "n_samples": 20,  # 20개 샘플
         },
         "training": {
-            "n_epochs": 0.1,  # 0.1 epoch
+            "n_epochs": 1.5,  # 1.5 epoch (30 samples total)
             "batch_size": 2,
             "log_interval": 1,
         },
         "checkpoint": {
-            "save_checkpoint_every": 0.1,
+            "save_checkpoint_every": 1.5,
             "save_dir": "storage/checkpoints/critic/test-critic-integration",
         },
         "experiment": {

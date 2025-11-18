@@ -83,7 +83,7 @@ def build_weights(
     td_errors: torch.Tensor,
     beta: float = 0.9,
     min_weight: float = 0.1,
-    max_weight: float = 5.0,
+    max_weight: float = 3.0,
 ) -> torch.Tensor:
     """TD error 기반 exponential weighting
 
@@ -99,7 +99,7 @@ def build_weights(
         td_errors: [batch, seq] TD error (compute_td_errors 출력)
         beta: Temperature parameter (낮을수록 집중도 높음, 기본 0.9)
         min_weight: 최소 가중치 (보수적 안정화, 기본 0.1)
-        max_weight: 최대 가중치 (극단 방지, 기본 5.0)
+        max_weight: 최대 가중치 (극단 방지, 기본 3.0)
 
     Returns:
         weights: [batch, seq] Token-level weights (clipped)
