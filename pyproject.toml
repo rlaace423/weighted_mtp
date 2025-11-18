@@ -23,6 +23,9 @@ dependencies = [
     "rich>=13.7.0",
     "python-dotenv>=1.0.0",
     "fairscale>=0.4.13",
+    "omegaconf>=2.3.0",
+    "boto3>=1.28.0",
+    "psutil>=5.9.0",
 ]
 
 [project.optional-dependencies]
