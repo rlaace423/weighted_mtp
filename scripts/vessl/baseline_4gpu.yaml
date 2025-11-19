@@ -7,8 +7,8 @@ tags:
   - 4gpu
   - production
 resources:
-  cluster: vessl-gcp-oregon
-  preset: gpu-a100-large-spot
+  cluster: vessl-kr-a100-80g-sxm
+  preset: gpu-a100-80g-large
 image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 import:
   /app:
