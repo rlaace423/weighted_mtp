@@ -314,6 +314,7 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
     current_epoch = 0.0
     batch_count = 0
     next_checkpoint_epoch = save_checkpoint_every
+    train_loss_avg = 0.0  # 초기화 (0 batch 케이스 대응)
 
     # Throughput tracker 초기화
     throughput_tracker = ThroughputTracker()
@@ -475,8 +476,9 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         # Epoch 경계 도달
         current_epoch = batch_count / total_batches
-        train_loss_avg = period_loss_sum / period_batches
-        train_loss_avg = all_reduce_scalar(train_loss_avg)
+        if period_batches > 0:
+            train_loss_avg = period_loss_sum / period_batches
+            train_loss_avg = all_reduce_scalar(train_loss_avg)
 
         logger.info(f"Epoch {current_epoch:.2f} 도달 - Train Loss: {train_loss_avg:.4f}")
 

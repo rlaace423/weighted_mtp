@@ -75,21 +75,21 @@ def compute_mtp_selective_weights(
         labels_k = labels[:, k:k+valid_len]                            # [batch, valid_len]
         mask_k = attention_mask[:, k:k+valid_len]                      # [batch, valid_len]
 
-        # Per-token CE loss
+        # Per-token CE loss (float32로 계산하여 정밀도 보장)
         policy_ce = F.cross_entropy(
             policy_logits_k.reshape(-1, vocab_size),
             labels_k.reshape(-1),
             reduction='none'
-        ).view(batch_size, valid_len)
+        ).view(batch_size, valid_len).float()
 
         ref_ce = F.cross_entropy(
             ref_logits_k.reshape(-1, vocab_size),
             labels_k.reshape(-1),
             reduction='none'
-        ).view(batch_size, valid_len)
+        ).view(batch_size, valid_len).float()
 
         # Signed excess loss (NOT abs)
-        excess_loss = policy_ce - ref_ce  # [batch, valid_len]
+        excess_loss = policy_ce - ref_ce  # [batch, valid_len], float32
 
         # Batch-wise top-k selection
         valid_mask = mask_k.bool()
@@ -100,7 +100,7 @@ def compute_mtp_selective_weights(
             stats[f'head_{head_idx}_ratio'] = 0.0
             continue
 
-        # Top k% threshold
+        # Top k% threshold (float32 텐서 사용)
         threshold = torch.quantile(valid_excess, 1 - k_percent)
 
         # Binary selection: 1 if >= threshold, 0 otherwise
