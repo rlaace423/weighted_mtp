@@ -204,6 +204,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         )
         # Config 로깅
         mlflow.log_params(OmegaConf.to_container(config, resolve=True))
+        logger.info(f"MLflow Run ID: {mlflow.active_run().info.run_id}")
 
     # 6. Resource 로딩
     adapter = load_adapter(config, device)
@@ -317,8 +318,17 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         total_batches = len(train_loader)
         batches_to_run = int(total_batches * n_epochs)
 
+        # Gradient accumulation 초기화
+        accumulation_counter = 0
+        gradient_accumulation_steps = config.training.gradient_accumulation_steps
+
+        # Optimization steps 계산
+        total_optimization_steps = (batches_to_run + gradient_accumulation_steps - 1) // gradient_accumulation_steps
+
         logger.info(f"Total epochs: {n_epochs}")
         logger.info(f"Total batches to run: {batches_to_run}")
+        logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+        logger.info(f"Total optimization steps: {total_optimization_steps}")
         logger.info(f"Validation & Checkpoint every: {save_checkpoint_every} epochs")
 
         current_epoch = 0.0
@@ -330,6 +340,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         # 모델 dtype 감지
         model_dtype = next(adapter.parameters()).dtype
+
+        # Optimizer 초기화 (gradient accumulation을 위해 while loop 시작 전)
+        optimizer.zero_grad()
 
         while batch_count < batches_to_run:
             # Train 1 epoch (또는 checkpoint 경계까지)
@@ -387,82 +400,107 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     raise ValueError(f"Unknown loss_type: {config.training.loss_type}")
 
                 masked_loss = loss_per_token * loss_mask
-                value_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)  # Prevent division by zero
+                value_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)
 
-                optimizer.zero_grad()
-                value_loss.backward()
+                # Loss scaling (gradient accumulation 적용)
+                scaled_loss = value_loss / gradient_accumulation_steps
+                scaled_loss.backward()
 
-                # Gradient clipping with statistics
+                accumulation_counter += 1
+                batch_count += 1
+                period_batches += 1
+
+                # Throughput tracking (batch 단위)
+                batch_size_actual = input_ids.size(0)
+                n_tokens = attention_mask.sum().item()
+                throughput_tracker.update(batch_size_actual, int(n_tokens))
+
+                # Period metrics 누적 (batch 단위)
+                period_metrics_sum["train_loss"] += value_loss.item()
+
+                # Optimizer step (accumulation 완료 시에만)
+                if accumulation_counter >= gradient_accumulation_steps:
+                    # Gradient clipping (누적된 gradient에 적용)
+                    if config.training.max_grad_norm > 0:
+                        params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
+                        grad_clip_stats = compute_gradient_clip_stats(
+                            params_with_grad,
+                            config.training.max_grad_norm,
+                        )
+                    else:
+                        grad_norm_dict = compute_gradient_norm(adapter)
+                        grad_clip_stats = {
+                            "grad_norm_pre_clip": grad_norm_dict["grad_norm"],
+                            "grad_norm_post_clip": grad_norm_dict["grad_norm"],
+                            "grad_clip_ratio": 1.0,
+                        }
+
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+                    global_step += 1
+                    accumulation_counter = 0
+
+                    # Step-level logging (optimizer step 시에만)
+                    if global_step % config.training.log_interval == 0:
+                        # GPU metrics
+                        gpu_metrics = gpu_monitor.get_metrics()
+
+                        # Value function statistics
+                        value_stats = compute_value_function_stats(
+                            values=value_logits.squeeze(-1),
+                            returns=value_targets.squeeze(-1),
+                        )
+
+                        # Metric aggregation (DDP)
+                        avg_loss = all_reduce_scalar(value_loss.item())
+                        avg_grad_norm_post = all_reduce_scalar(grad_clip_stats["grad_norm_post_clip"])
+                        avg_grad_norm_pre = all_reduce_scalar(grad_clip_stats["grad_norm_pre_clip"])
+                        avg_grad_clip_ratio = all_reduce_scalar(grad_clip_stats["grad_clip_ratio"])
+                        avg_value_mean = all_reduce_scalar(value_stats["value_mean"])
+                        avg_value_std = all_reduce_scalar(value_stats["value_std"])
+
+                        if is_main_process():
+                            if use_mlflow:
+                                mlflow.log_metrics(
+                                    {
+                                        "train/loss": avg_loss,
+                                        "train/grad_norm": avg_grad_norm_post,
+                                        "train/grad_norm_pre_clip": avg_grad_norm_pre,
+                                        "train/grad_clip_ratio": avg_grad_clip_ratio,
+                                        "train/learning_rate": optimizer.param_groups[0]["lr"],
+                                        "value/mean_prediction": avg_value_mean,
+                                        "value/std_prediction": avg_value_std,
+                                        "value/mse": value_stats["value_mse"],
+                                        "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
+                                        "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
+                                    },
+                                    step=global_step,
+                                )
+                        logger.info(
+                            f"Step {global_step}/{total_optimization_steps}, "
+                            f"Loss: {avg_loss:.4f}, "
+                            f"Grad Norm: {avg_grad_norm_post:.4f} (Clip Ratio: {avg_grad_clip_ratio:.2f})"
+                        )
+
+            # Period loop 종료
+
+            # Incomplete accumulation 처리 (validation 전)
+            if accumulation_counter > 0:
+                logger.info(f"Processing incomplete accumulation ({accumulation_counter} batches before validation)")
+
+                # Gradient clipping
                 if config.training.max_grad_norm > 0:
-                    # Optimizer에 등록된 파라미터만 추적 (Frozen 파라미터 제외 및 Generator 소진 방지)
                     params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
                     grad_clip_stats = compute_gradient_clip_stats(
                         params_with_grad,
                         config.training.max_grad_norm,
                     )
-                else:
-                    grad_norm_dict = compute_gradient_norm(adapter)
-                    grad_clip_stats = {
-                        "grad_norm_pre_clip": grad_norm_dict["grad_norm"],
-                        "grad_norm_post_clip": grad_norm_dict["grad_norm"],
-                        "grad_clip_ratio": 1.0,
-                    }
 
                 optimizer.step()
-
+                optimizer.zero_grad()
                 global_step += 1
-                batch_count += 1
-                period_batches += 1
-
-                # Throughput tracking
-                batch_size_actual = input_ids.size(0)
-                n_tokens = attention_mask.sum().item()
-                throughput_tracker.update(batch_size_actual, int(n_tokens))
-
-                # Metrics 누적
-                period_metrics_sum["train_loss"] += value_loss.item()
-
-                # Step-level 로깅
-                if global_step % config.training.log_interval == 0:
-                    # GPU metrics
-                    gpu_metrics = gpu_monitor.get_metrics()
-
-                    # Value function statistics
-                    value_stats = compute_value_function_stats(
-                        values=value_logits.squeeze(-1),
-                        returns=value_targets.squeeze(-1),
-                    )
-
-                    # Metric aggregation (DDP)
-                    avg_loss = all_reduce_scalar(value_loss.item())
-                    avg_grad_norm_post = all_reduce_scalar(grad_clip_stats["grad_norm_post_clip"])
-                    avg_grad_norm_pre = all_reduce_scalar(grad_clip_stats["grad_norm_pre_clip"])
-                    avg_grad_clip_ratio = all_reduce_scalar(grad_clip_stats["grad_clip_ratio"])
-                    avg_value_mean = all_reduce_scalar(value_stats["value_mean"])
-                    avg_value_std = all_reduce_scalar(value_stats["value_std"])
-
-                    if is_main_process():
-                        if use_mlflow:
-                            mlflow.log_metrics(
-                                {
-                                    "train/loss": avg_loss,
-                                    "train/grad_norm": avg_grad_norm_post,
-                                    "train/grad_norm_pre_clip": avg_grad_norm_pre,
-                                    "train/grad_clip_ratio": avg_grad_clip_ratio,
-                                    "train/learning_rate": optimizer.param_groups[0]["lr"],
-                                    "value/mean_prediction": avg_value_mean,
-                                    "value/std_prediction": avg_value_std,
-                                    "value/mse": value_stats["value_mse"],
-                                    "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
-                                    "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
-                                },
-                                step=global_step,
-                            )
-                    logger.info(
-                        f"Step {global_step}/{batches_to_run}, "
-                        f"Loss: {avg_loss:.4f}, "
-                        f"Grad Norm: {avg_grad_norm_post:.4f} (Clip Ratio: {avg_grad_clip_ratio:.2f})"
-                    )
+                accumulation_counter = 0
 
             # Epoch 경계 도달
             current_epoch = batch_count / total_batches

@@ -189,6 +189,7 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
         )
         # Config 로깅
         mlflow.log_params(OmegaConf.to_container(config, resolve=True))
+        logger.info(f"MLflow Run ID: {mlflow.active_run().info.run_id}")
 
     # 6. Resource 로딩
     adapter = load_adapter(config, device)
@@ -298,8 +299,17 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
     total_batches = len(train_loader)
     batches_to_run = int(total_batches * n_epochs)
 
+    # Gradient accumulation 초기화
+    accumulation_counter = 0
+    gradient_accumulation_steps = config.training.gradient_accumulation_steps
+
+    # Optimization steps 계산
+    total_optimization_steps = (batches_to_run + gradient_accumulation_steps - 1) // gradient_accumulation_steps
+
     logger.info(f"Total epochs: {n_epochs}")
     logger.info(f"Total batches to run: {batches_to_run}")
+    logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    logger.info(f"Total optimization steps: {total_optimization_steps}")
     logger.info(f"Validation & Checkpoint every: {save_checkpoint_every} epochs")
 
     current_epoch = 0.0
@@ -313,6 +323,8 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
     model_dtype = next(adapter.parameters()).dtype
 
     # 8. Training loop
+    optimizer.zero_grad()
+
     while batch_count < batches_to_run:
         # Checkpoint 경계까지 훈련
         target_epoch = min(next_checkpoint_epoch, n_epochs)
@@ -372,45 +384,49 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             ce_loss = batch_ce_loss / n_future
 
-            # Backward & update
-            optimizer.zero_grad()
-            ce_loss.backward()
+            # Loss scaling (gradient accumulation 적용)
+            scaled_loss = ce_loss / gradient_accumulation_steps
+            scaled_loss.backward()
 
-            # Gradient clipping with statistics
-            if config.training.max_grad_norm > 0:
-                # Optimizer에 등록된 파라미터만 추적 (Frozen 파라미터 제외)
-                params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
-                grad_clip_stats = compute_gradient_clip_stats(
-                    params_with_grad,
-                    config.training.max_grad_norm,
-                )
-            else:
-                # No clipping
-                from weighted_mtp.utils.metrics_utils import compute_gradient_norm
-
-                grad_norm_dict = compute_gradient_norm(adapter)
-                grad_clip_stats = {
-                    "grad_norm_pre_clip": grad_norm_dict["grad_norm"],
-                    "grad_norm_post_clip": grad_norm_dict["grad_norm"],
-                    "grad_clip_ratio": 1.0,
-                }
-
-            optimizer.step()
-
-            global_step += 1
+            accumulation_counter += 1
             batch_count += 1
             period_batches += 1
 
-            # Throughput tracking
+            # Throughput tracking (batch 단위)
             batch_size_actual = input_ids.size(0)
             n_tokens = attention_mask.sum().item()
             throughput_tracker.update(batch_size_actual, int(n_tokens))
 
-            # Metrics 누적
+            # Period metrics 누적 (batch 단위)
             period_loss_sum += ce_loss.item()
 
-            # Step-level 로깅
-            if global_step % config.training.log_interval == 0:
+            # Optimizer step (accumulation 완료 시에만)
+            if accumulation_counter >= gradient_accumulation_steps:
+                # Gradient clipping (누적된 gradient에 적용)
+                if config.training.max_grad_norm > 0:
+                    params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
+                    grad_clip_stats = compute_gradient_clip_stats(
+                        params_with_grad,
+                        config.training.max_grad_norm,
+                    )
+                else:
+                    from weighted_mtp.utils.metrics_utils import compute_gradient_norm
+
+                    grad_norm_dict = compute_gradient_norm(adapter)
+                    grad_clip_stats = {
+                        "grad_norm_pre_clip": grad_norm_dict["grad_norm"],
+                        "grad_norm_post_clip": grad_norm_dict["grad_norm"],
+                        "grad_clip_ratio": 1.0,
+                    }
+
+                optimizer.step()
+                optimizer.zero_grad()
+
+                global_step += 1
+                accumulation_counter = 0
+
+            # Step-level 로깅 (optimizer step 시에만)
+            if global_step % config.training.log_interval == 0 and accumulation_counter == 0:
                 gpu_metrics = gpu_monitor.get_metrics()
 
                 # Metric aggregation (DDP)
@@ -434,10 +450,29 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
                             step=global_step,
                         )
                 logger.info(
-                    f"Step {global_step}/{batches_to_run}, "
+                    f"Step {global_step}/{total_optimization_steps}, "
                     f"Loss: {avg_loss:.4f}, "
                     f"Grad Norm: {avg_grad_norm_post:.4f} (clip_ratio: {avg_grad_clip_ratio:.3f})"
                 )
+
+        # Period loop 종료
+
+        # Incomplete accumulation 처리 (validation 전)
+        if accumulation_counter > 0:
+            logger.info(f"Processing incomplete accumulation ({accumulation_counter} batches before validation)")
+
+            # Gradient clipping
+            if config.training.max_grad_norm > 0:
+                params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
+                grad_clip_stats = compute_gradient_clip_stats(
+                    params_with_grad,
+                    config.training.max_grad_norm,
+                )
+
+            optimizer.step()
+            optimizer.zero_grad()
+            global_step += 1
+            accumulation_counter = 0
 
         # Epoch 경계 도달
         current_epoch = batch_count / total_batches
