@@ -98,7 +98,7 @@ def wrap_model_fsdp(
         cpu_offload=cpu_offload_config,
         device_id=device.index if device.type == "cuda" else None,
         sync_module_states=True,
-        use_orig_params=False,
+        use_orig_params=True,
     )
 
     if is_main_process():

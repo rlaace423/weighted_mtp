@@ -322,6 +322,12 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # 모델 dtype 감지
     model_dtype = next(adapter.parameters()).dtype
 
+    # Debug: Training loop 진입 전 barrier
+    if is_distributed():
+        logger.info(f"[Rank {rank}] Reaching barrier before training loop")
+        barrier()
+        logger.info(f"[Rank {rank}] Barrier passed, entering training loop")
+
     # 8. Training loop
     optimizer.zero_grad()
 
@@ -340,7 +346,9 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         for _ in range(batches_this_period):
             try:
+                print(f"[DEBUG] Rank {rank}: Loading batch...", flush=True)
                 batch = next(epoch_train_loader)
+                print(f"[DEBUG] Rank {rank}: Batch loaded.", flush=True)
             except StopIteration:
                 # DataLoader 재시작
                 epoch_train_loader = iter(train_loader)
@@ -349,12 +357,24 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             # 1 batch 훈련 (Baseline 로직 - 균등 가중치)
             adapter.train()
 
+            # Debug: 첫 배치 시작 로그
+            if batch_count == 0:
+                logger.info(f"[Rank {rank}] Starting first batch - moving data to device")
+
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
+            # Debug: Forward 시작
+            if batch_count == 0:
+                logger.info(f"[Rank {rank}] Data moved to device, starting forward pass")
+
             # Forward (MTP만, Value head 없음)
             logits = adapter(input_ids)
+
+            # Debug: Forward 완료
+            if batch_count == 0:
+                logger.info(f"[Rank {rank}] Forward pass completed, logits shape: {logits.shape}")
             # logits: [batch, seq, n_future, vocab]
 
             batch_size, seq_len, n_future, vocab_size = logits.shape

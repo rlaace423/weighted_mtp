@@ -340,6 +340,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     current_epoch = 0.0
     batch_count = 0
     next_checkpoint_epoch = save_checkpoint_every
+    train_loss_avg = 0.0  # 초기화 (0 batch 케이스 대응)
 
     # Throughput tracker 초기화 (모든 rank에서 필요)
     throughput_tracker = ThroughputTracker()
@@ -620,7 +621,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             loss_type=config.training.loss_type,
         )
 
-        save_checkpoint(
+        save_critic_checkpoint(
             adapter=adapter,
             optimizer=optimizer,
             epoch=current_epoch,
