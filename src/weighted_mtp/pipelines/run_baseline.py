@@ -99,8 +99,7 @@ def validate_baseline(
             labels = batch["labels"].to(device)
 
             # 2. Forward (MTP만, Value head 없음)
-            # Baseline은 Value head가 없으므로 transformer 직접 호출
-            logits = adapter.transformer(input_ids, start_pos=0, return_all_heads=True)
+            logits = adapter(input_ids)
             # logits: [batch, seq, n_future, vocab]
 
             batch_size, seq_len, n_future, vocab_size = logits.shape
@@ -354,7 +353,7 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             labels = batch["labels"].to(device)
 
             # Forward (MTP만, Value head 없음)
-            logits = adapter.transformer(input_ids, start_pos=0, return_all_heads=True)
+            logits = adapter(input_ids)
             # logits: [batch, seq, n_future, vocab]
 
             batch_size, seq_len, n_future, vocab_size = logits.shape

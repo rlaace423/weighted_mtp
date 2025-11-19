@@ -105,8 +105,8 @@ def validate_critic(
             # 2. is_correct → rewards 변환 (모델 dtype 일치)
             rewards = is_correct.to(model_dtype)
 
-            # 3. trunk_forward
-            outputs = adapter.trunk_forward(input_ids, attention_mask)
+            # 3. Forward (Value head만)
+            outputs = adapter(input_ids, attention_mask, return_value_logits=True)
             value_logits = outputs["value_logits"]
 
             batch_size, seq_len, _ = value_logits.shape
@@ -384,7 +384,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
                 # 모델 dtype 일치
                 rewards = is_correct.to(model_dtype)
-                outputs = adapter.trunk_forward(input_ids, attention_mask)
+                outputs = adapter(input_ids, attention_mask, return_value_logits=True)
                 value_logits = outputs["value_logits"]
 
                 batch_size, seq_len, _ = value_logits.shape

@@ -142,91 +142,83 @@ class MetaLlamaMTPAdapter(nn.Module):
         """
         self.value_head = value_head
 
-    def trunk_forward(
+    def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-    ) -> dict[str, torch.Tensor]:
-        """Stage 1: Value head 학습 전용 forward
+        return_value_logits: bool = False,
+        return_hidden_states: bool = False,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
+        """통일된 forward 인터페이스 (FSDP 호환)
 
-        MTP output heads를 사용하지 않고 Value head만 학습
-        학습 속도 향상 (output heads gradient 없음)
+        모든 파이프라인이 동일한 메서드를 통해 호출
+        FSDP hook이 정상 동작하여 parameter unshard 보장
 
         Args:
             input_ids: [batch, seq] 입력 토큰
             attention_mask: [batch, seq] attention mask (현재 미사용, 향후 확장)
+            return_value_logits: True면 value_logits 반환 (Critic/Verifiable용)
+            return_hidden_states: True면 hidden_states 반환 (Verifiable용)
 
         Returns:
-            {
-                "hidden_states": [batch, seq, hidden_size],
-                "value_logits": [batch, seq, 1],
-            }
+            return_value_logits=False:
+                logits: [batch, seq, n_future_tokens, vocab]
+
+            return_value_logits=True (Critic Stage 1: Value head만):
+                {
+                    "value_logits": [batch, seq, 1],
+                    "hidden_states": [batch, seq, hidden_size],
+                }
+
+            return_value_logits=True + return_hidden_states=True (Verifiable Stage 2):
+                {
+                    "logits": [batch, seq, n_future_tokens, vocab],
+                    "value_logits": [batch, seq, 1],
+                    "hidden_states": [batch, seq, hidden_size],
+                }
 
         Raises:
-            ValueError: Value head가 초기화되지 않음
+            ValueError: return_value_logits=True인데 Value head가 없음
         """
-        if self.value_head is None:
-            raise ValueError("Value head not initialized. Call attach_value_head() first.")
+        if return_value_logits and self.value_head is None:
+            raise ValueError(
+                "Value head not initialized. "
+                "Set initialize_value_head=True in from_pretrained() or call attach_value_head()."
+            )
 
-        # Transformer forward로 hidden_states 추출
-        # return_all_heads=False: MTP heads 계산 생략 (속도 향상)
-        # return_hidden_states=True: Value Head용 h_trunk 반환
-        _, hidden_states = self.transformer(
-            input_ids,
-            start_pos=0,
-            return_all_heads=False,
-            return_hidden_states=True,
-        )
-
-        # Value head
-        value_logits = self.value_head(hidden_states)
-
-        return {
-            "hidden_states": hidden_states,
-            "value_logits": value_logits,
-        }
-
-    def full_forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> dict[str, torch.Tensor]:
-        """Stage 2: Weighted training 전용 forward
-
-        MTP output heads + Value head 모두 사용
-        전체 gradient 계산 (MTP + Value)
-
-        Args:
-            input_ids: [batch, seq] 입력 토큰
-            attention_mask: [batch, seq] attention mask (현재 미사용, 향후 확장)
-
-        Returns:
-            {
-                "logits": [batch, seq, n_future_tokens, vocab],
-                "value_logits": [batch, seq, 1],
-                "hidden_states": [batch, seq, hidden_size],
+        # Critic Stage 1: Value head만 학습 (MTP heads 계산 생략)
+        if return_value_logits and not return_hidden_states:
+            _, hidden_states = self.transformer(
+                input_ids,
+                start_pos=0,
+                return_all_heads=False,
+                return_hidden_states=True,
+            )
+            value_logits = self.value_head(hidden_states)
+            return {
+                "value_logits": value_logits,
+                "hidden_states": hidden_states,
             }
 
-        Raises:
-            ValueError: Value head가 초기화되지 않음
-        """
-        if self.value_head is None:
-            raise ValueError("Value head not initialized. Call attach_value_head() first.")
+        # Verifiable Stage 2: MTP + Value 동시 학습
+        if return_value_logits and return_hidden_states:
+            logits, hidden_states = self.transformer(
+                input_ids,
+                start_pos=0,
+                return_all_heads=True,
+                return_hidden_states=True,
+            )
+            value_logits = self.value_head(hidden_states)
+            return {
+                "logits": logits,
+                "value_logits": value_logits,
+                "hidden_states": hidden_states,
+            }
 
-        # Transformer forward (MTP heads + hidden_states 함께 반환)
-        # return_hidden_states=True로 trunk 중복 계산 방지
-        logits, hidden_states = self.transformer(
+        # Baseline/Rho-1: MTP만 (Value head 없음)
+        logits = self.transformer(
             input_ids,
             start_pos=0,
             return_all_heads=True,
-            return_hidden_states=True,
         )
-
-        # Value head
-        value_logits = self.value_head(hidden_states)
-
-        return {
-            "logits": logits,
-            "value_logits": value_logits,
-            "hidden_states": hidden_states,
-        }
+        return logits

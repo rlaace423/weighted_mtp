@@ -86,6 +86,10 @@ def wrap_model_fsdp(
     )
 
     # FSDP wrapping
+    # use_orig_params=False: PyTorch 표준 방식 (flattened params)
+    # - Embedding layer sharding 호환
+    # - Meta MTP 레퍼런스와 동일
+    # - 안정성 향상 (parameter 관리 단순화)
     wrapped_model = FSDP(
         model,
         auto_wrap_policy=fsdp_auto_wrap_policy,
@@ -94,7 +98,7 @@ def wrap_model_fsdp(
         cpu_offload=cpu_offload_config,
         device_id=device.index if device.type == "cuda" else None,
         sync_module_states=True,
-        use_orig_params=True,
+        use_orig_params=False,
     )
 
     if is_main_process():

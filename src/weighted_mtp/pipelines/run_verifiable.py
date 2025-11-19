@@ -143,8 +143,13 @@ def validate_verifiable(
             # 2. is_correct → rewards 변환 (모델 dtype 일치)
             rewards = is_correct.to(model_dtype)
 
-            # 3. full_forward (MTP + Value)
-            outputs = adapter.full_forward(input_ids, attention_mask)
+            # 3. Forward (MTP + Value)
+            outputs = adapter(
+                input_ids,
+                attention_mask,
+                return_value_logits=True,
+                return_hidden_states=True
+            )
             logits = outputs["logits"]  # [batch, seq, n_future, vocab]
             value_logits = outputs["value_logits"]  # [batch, seq, 1]
 
@@ -495,8 +500,13 @@ def run_verifiable_training(
             # 모델 dtype 일치
             rewards = is_correct.to(model_dtype)
 
-            # full_forward (MTP + Value)
-            outputs = adapter.full_forward(input_ids, attention_mask)
+            # Forward (MTP + Value)
+            outputs = adapter(
+                input_ids,
+                attention_mask,
+                return_value_logits=True,
+                return_hidden_states=True
+            )
             logits = outputs["logits"]
             value_logits = outputs["value_logits"]
 

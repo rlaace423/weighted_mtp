@@ -119,9 +119,7 @@ def validate_rho1(
     Returns:
         Validation metrics (FSDP 환경에서는 all-reduce 적용됨)
     """
-    # DDP unwrap for eval
-    unwrapped_adapter = unwrap_model(adapter)
-    unwrapped_adapter.eval()
+    adapter.eval()
     ref_model.eval()
 
     total_weighted_ce_loss = 0.0
@@ -129,7 +127,7 @@ def validate_rho1(
     n_batches = 0
 
     # 모델 dtype 감지
-    model_dtype = next(unwrapped_adapter.parameters()).dtype
+    model_dtype = next(adapter.parameters()).dtype
 
     with torch.no_grad():
         for batch in dataloader:
@@ -142,8 +140,8 @@ def validate_rho1(
             ref_logits_mtp = ref_model.transformer.forward(input_ids, return_all_heads=False)
             ref_logits = ref_logits_mtp.squeeze(2)  # [batch, seq, 1, vocab] -> [batch, seq, vocab]
 
-            # 3. Policy forward (MTP, value_head 불필요하므로 transformer 직접 호출)
-            policy_logits = unwrapped_adapter.transformer.forward(input_ids, return_all_heads=True)
+            # 3. Policy forward (MTP만)
+            policy_logits = adapter(input_ids)
 
             batch_size, seq_len, n_future, vocab_size = policy_logits.shape
 
@@ -405,8 +403,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 ref_logits_mtp = ref_model.transformer.forward(input_ids, return_all_heads=False)
                 ref_logits = ref_logits_mtp.squeeze(2)  # [batch, seq, 1, vocab] -> [batch, seq, vocab]
 
-            # Policy forward (MTP, value_head 불필요하므로 transformer 직접 호출)
-            policy_logits = adapter.transformer.forward(input_ids, return_all_heads=True)
+            # Policy forward (MTP만)
+            policy_logits = adapter(input_ids)
 
             batch_size, seq_len, n_future, vocab_size = policy_logits.shape
 
