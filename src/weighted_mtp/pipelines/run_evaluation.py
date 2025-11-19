@@ -138,6 +138,7 @@ def run_evaluation(
                 "checkpoint_val_loss": checkpoint_metadata["val_metrics"]["val_loss"],
             })
             logger.info(f"MLflow tracking enabled: {tracking_uri}")
+            logger.info(f"MLflow Run ID: {mlflow.active_run().info.run_id}")
         else:
             logger.warning("MLflow enabled but MLFLOW_TRACKING_URI not set. Skipping MLflow.")
             mlflow_enabled = False

@@ -13,6 +13,7 @@ weighted_mtp/
 │   ├── data/                 # 메타데이터 기반 데이터 로딩
 │   └── value_weighting/      # TD error/Rho-1 weighting
 ├── configs/                  # 설정 파일
+│   ├── ntp/                  # NTP Baseline
 │   ├── baseline/             # Baseline MTP
 │   ├── critic/               # Critic pre-training
 │   ├── verifiable/           # Verifiable WMTP
@@ -40,9 +41,38 @@ pytest tests/integration/  # DDP 테스트는 torchrun 필요
 
 ## 파이프라인
 
-4개의 독립 실행 가능한 학습 파이프라인:
+5개의 독립 실행 가능한 학습 파이프라인:
 
-### 1. Critic Pre-training (Stage 1)
+### 1. NTP Baseline
+표준 Next Token Prediction (MTP 비교 기준선):
+
+```bash
+# VESSL 1-GPU 실행
+bash scripts/vessl/ntp_1gpu.sh
+
+# 로컬 실행
+python -m weighted_mtp.pipelines.run_baseline \
+  --config configs/ntp/ntp.yaml
+```
+
+**설정 (`configs/ntp/ntp.yaml`)**:
+```yaml
+models:
+  policy:
+    params:
+      n_future_tokens: 1  # NTP: 단일 토큰 예측
+
+training:
+  n_epochs: 3.0
+  learning_rate: 1.0e-5
+```
+
+**핵심**:
+- `n_future_tokens=1`로 표준 autoregressive 학습
+- MTP와 동일한 파라미터 수로 공정한 비교
+- `run_baseline.py` 파이프라인 재사용 (코드 중복 없음)
+
+### 2. Critic Pre-training (Stage 1)
 Value head를 사전 학습하여 TD error 계산 기반 마련:
 
 ```bash
@@ -63,7 +93,7 @@ training:
   loss_type: mse
 ```
 
-### 2. Baseline MTP
+### 3. Baseline MTP
 표준 MTP (균등 가중치, 정답만 학습):
 
 ```bash
@@ -82,7 +112,7 @@ training:
   learning_rate: 1.0e-5
 ```
 
-### 3. Verifiable WMTP (Stage 2)
+### 4. Verifiable WMTP (Stage 2)
 TD error 기반 토큰 가중치 + Value head continual learning:
 
 ```bash
@@ -110,7 +140,7 @@ training:
 - Value head continual learning으로 TD error 정확도 유지
 - 정답/오답 균형 샘플링으로 robustness 향상
 
-### 4. Rho-1 WMTP
+### 5. Rho-1 WMTP
 Reference 모델 기반 excess loss weighting:
 
 ```bash
@@ -157,6 +187,7 @@ PYTHONPATH=src python src/weighted_mtp/pipelines/run_evaluation.py \
 - [VESSL.md](docs/VESSL.md): VESSL A100 4-GPU 실행 가이드
 - [MLFLOW.md](docs/MLFLOW.md): MLflow 추적 및 S3 연동
 - [RESEARCH.md](docs/RESEARCH.md): 연구 배경 및 이론
+- [ntp_implementation_plan.md](docs/ntp_implementation_plan.md): NTP 파이프라인 구현 계획
 
 ### 참조 문서
 - [VESSL_CHEATSHEET.md](docs/VESSL_CHEATSHEET.md): VESSL YAML 참조

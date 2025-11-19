@@ -1,0 +1,65 @@
+name: weighted-mtp-ntp-1gpu
+description: NTP Baseline A100 1-GPU 프로덕션 학습
+tags:
+  - weighted-mtp
+  - ntp
+  - baseline
+  - a100
+  - 1gpu
+  - production
+resources:
+  cluster: vessl-kr-a100-80g-sxm
+  preset: gpu-a100-80g-small
+image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+import:
+  /app:
+    git:
+      url: github.com/wooshikwon/weighted_mtp.git
+      ref: main
+  /vessl/models: volume://vessl-storage/models
+  /vessl/datasets: volume://vessl-storage/datasets
+  /vessl/checkpoints: volume://vessl-storage/checkpoints
+env:
+  MLFLOW_TRACKING_USERNAME: "{{MLFLOW_TRACKING_USERNAME}}"
+  MLFLOW_TRACKING_PASSWORD: "{{MLFLOW_TRACKING_PASSWORD}}"
+  AWS_ACCESS_KEY_ID: "{{AWS_ACCESS_KEY_ID}}"
+  AWS_SECRET_ACCESS_KEY: "{{AWS_SECRET_ACCESS_KEY}}"
+  AWS_DEFAULT_REGION: "{{AWS_DEFAULT_REGION}}"
+  HF_TOKEN: "{{HF_TOKEN}}"
+  PYTHONUNBUFFERED: "1"
+  TOKENIZERS_PARALLELISM: "false"
+run:
+  - workdir: /app
+    command: |
+      set -e
+
+      echo "=== 시스템 패키지 설치 ==="
+      apt-get update && apt-get install -y curl git
+
+      echo "=== UV 설치 ==="
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      export PATH="$HOME/.local/bin:$PATH"
+      uv --version
+
+      echo "=== Storage 심볼릭 링크 생성 ==="
+      mkdir -p storage
+      ln -s /vessl/models storage/models
+      ln -s /vessl/datasets storage/datasets
+      ln -s /vessl/checkpoints storage/checkpoints
+      ls -lh storage/
+
+      echo "=== Python 의존성 설치 ==="
+      uv sync --frozen
+
+      echo "=== GPU 정보 확인 ==="
+      nvidia-smi
+
+      echo "=== Storage Volume 확인 ==="
+      echo "Models:"
+      ls -lh storage/models/ | head -5
+      echo "Datasets:"
+      ls -lh storage/datasets/ | head -5
+
+      echo "=== NTP Baseline 학습 시작 (1-GPU) ==="
+      uv run python -m weighted_mtp.pipelines.run_baseline \
+        --config configs/ntp/ntp.yaml
