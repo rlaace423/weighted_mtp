@@ -129,6 +129,9 @@ def validate_verifiable(
     total_loss_sum = 0.0
     n_batches = 0
 
+    # 모델 dtype 감지
+    model_dtype = next(adapter.parameters()).dtype
+
     with torch.no_grad():
         for batch in dataloader:
             # 1. Batch를 device로 이동
@@ -137,8 +140,8 @@ def validate_verifiable(
             labels = batch["labels"].to(device)
             is_correct = batch["is_correct"].to(device)
 
-            # 2. is_correct → rewards 변환
-            rewards = is_correct.float()
+            # 2. is_correct → rewards 변환 (모델 dtype 일치)
+            rewards = is_correct.to(model_dtype)
 
             # 3. full_forward (MTP + Value)
             outputs = adapter.full_forward(input_ids, attention_mask)
@@ -180,17 +183,18 @@ def validate_verifiable(
                     reduction="none",
                 )
 
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.float().reshape(-1)
+                # 모델 dtype 일치
+                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.to(model_dtype).reshape(-1)
 
-                mask_sum_k = mask_k.float().sum()
+                mask_sum_k = mask_k.to(model_dtype).sum()
                 if mask_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
 
             weighted_ce_loss = batch_weighted_ce_loss / n_future
 
-            # 7. Value loss
+            # 7. Value loss (모델 dtype 일치)
             value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
-            loss_mask = attention_mask.unsqueeze(-1).float()
+            loss_mask = attention_mask.unsqueeze(-1).to(model_dtype)
 
             if loss_type == "mse":
                 loss_per_token = F.mse_loss(value_logits, value_targets, reduction="none")
@@ -416,6 +420,9 @@ def run_verifiable_training(
     batch_count = 0
     next_checkpoint_epoch = save_checkpoint_every
 
+    # 모델 dtype 감지
+    model_dtype = next(adapter.parameters()).dtype
+
     # 9. Training loop
     while batch_count < batches_to_run:
         # Checkpoint 경계까지 훈련
@@ -470,7 +477,8 @@ def run_verifiable_training(
             labels = batch["labels"].to(device)
             is_correct = batch["is_correct"].to(device)
 
-            rewards = is_correct.float()
+            # 모델 dtype 일치
+            rewards = is_correct.to(model_dtype)
 
             # full_forward (MTP + Value)
             outputs = adapter.full_forward(input_ids, attention_mask)
@@ -512,17 +520,18 @@ def run_verifiable_training(
                     reduction="none",
                 )
 
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.float().reshape(-1)
+                # 모델 dtype 일치
+                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.to(model_dtype).reshape(-1)
 
-                mask_sum_k = mask_k.float().sum()
+                mask_sum_k = mask_k.to(model_dtype).sum()
                 if mask_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
 
             weighted_ce_loss = batch_weighted_ce_loss / n_future
 
-            # Value loss (Continual Learning)
+            # Value loss (Continual Learning, 모델 dtype 일치)
             value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
-            loss_mask = attention_mask.unsqueeze(-1).float()
+            loss_mask = attention_mask.unsqueeze(-1).to(model_dtype)
 
             if config.training.loss_type == "mse":
                 loss_per_token = F.mse_loss(value_logits, value_targets, reduction="none")

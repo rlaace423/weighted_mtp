@@ -90,6 +90,9 @@ def validate_critic(
     total_target_var = 0.0
     n_batches = 0
 
+    # 모델 dtype 감지
+    model_dtype = next(adapter.parameters()).dtype
+
     with torch.no_grad():
         for batch in dataloader:
             # 1. Batch를 device로 이동
@@ -97,8 +100,8 @@ def validate_critic(
             attention_mask = batch["attention_mask"].to(device)
             is_correct = batch["is_correct"].to(device)
 
-            # 2. is_correct → rewards 변환
-            rewards = is_correct.float()
+            # 2. is_correct → rewards 변환 (모델 dtype 일치)
+            rewards = is_correct.to(model_dtype)
 
             # 3. trunk_forward
             outputs = adapter.trunk_forward(input_ids, attention_mask)
@@ -109,8 +112,8 @@ def validate_critic(
             # 4. Value target 생성
             value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
 
-            # Mask padded tokens
-            loss_mask = attention_mask.unsqueeze(-1).float()
+            # Mask padded tokens (모델 dtype 일치)
+            loss_mask = attention_mask.unsqueeze(-1).to(model_dtype)
 
             # 5. Value loss 계산
             if loss_type == "mse":
@@ -321,6 +324,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         # Throughput tracker 초기화
         throughput_tracker = ThroughputTracker()
 
+        # 모델 dtype 감지
+        model_dtype = next(adapter.parameters()).dtype
+
         while batch_count < batches_to_run:
             # Train 1 epoch (또는 checkpoint 경계까지)
             target_epoch = min(next_checkpoint_epoch, n_epochs)
@@ -352,13 +358,15 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 attention_mask = batch["attention_mask"].to(device)
                 is_correct = batch["is_correct"].to(device)
 
-                rewards = is_correct.float()
+                # 모델 dtype 일치
+                rewards = is_correct.to(model_dtype)
                 outputs = adapter.trunk_forward(input_ids, attention_mask)
                 value_logits = outputs["value_logits"]
 
                 batch_size, seq_len, _ = value_logits.shape
                 value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
-                loss_mask = attention_mask.unsqueeze(-1).float()
+                # 모델 dtype 일치
+                loss_mask = attention_mask.unsqueeze(-1).to(model_dtype)
 
                 if config.training.loss_type == "mse":
                     loss_per_token = torch.nn.functional.mse_loss(

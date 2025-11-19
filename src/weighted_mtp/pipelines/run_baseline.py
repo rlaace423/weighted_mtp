@@ -88,6 +88,9 @@ def validate_baseline(
     total_ce_loss = 0.0
     n_batches = 0
 
+    # 모델 dtype 감지
+    model_dtype = next(adapter.parameters()).dtype
+
     with torch.no_grad():
         for batch in dataloader:
             # 1. Batch를 device로 이동
@@ -118,10 +121,10 @@ def validate_baseline(
                     reduction="none",
                 )
 
-                # 균등 가중치 (weight=1.0)
-                masked_ce_k = ce_loss_k * mask_k.float().reshape(-1)
+                # 균등 가중치 (weight=1.0, 모델 dtype 일치)
+                masked_ce_k = ce_loss_k * mask_k.to(model_dtype).reshape(-1)
 
-                mask_sum_k = mask_k.float().sum()
+                mask_sum_k = mask_k.to(model_dtype).sum()
                 if mask_sum_k > 0:
                     batch_ce_loss += masked_ce_k.sum() / mask_sum_k
 
@@ -306,6 +309,9 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # Throughput tracker 초기화
     throughput_tracker = ThroughputTracker()
 
+    # 모델 dtype 감지
+    model_dtype = next(adapter.parameters()).dtype
+
     # 8. Training loop
     while batch_count < batches_to_run:
         # Checkpoint 경계까지 훈련
@@ -357,10 +363,10 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     reduction="none",
                 )
 
-                # 균등 가중치 (weight=1.0)
-                masked_ce_k = ce_loss_k * mask_k.float().reshape(-1)
+                # 균등 가중치 (weight=1.0, 모델 dtype 일치)
+                masked_ce_k = ce_loss_k * mask_k.to(model_dtype).reshape(-1)
 
-                mask_sum_k = mask_k.float().sum()
+                mask_sum_k = mask_k.to(model_dtype).sum()
                 if mask_sum_k > 0:
                     batch_ce_loss += masked_ce_k.sum() / mask_sum_k
 

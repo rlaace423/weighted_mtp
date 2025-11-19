@@ -128,6 +128,9 @@ def validate_rho1(
     total_excess_loss = 0.0
     n_batches = 0
 
+    # 모델 dtype 감지
+    model_dtype = next(unwrapped_adapter.parameters()).dtype
+
     with torch.no_grad():
         for batch in dataloader:
             # 1. Batch를 device로 이동
@@ -173,9 +176,10 @@ def validate_rho1(
                     reduction="none",
                 )
 
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.float().reshape(-1)
+                # 모델 dtype 일치
+                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.to(model_dtype).reshape(-1)
 
-                mask_sum_k = mask_k.float().sum()
+                mask_sum_k = mask_k.to(model_dtype).sum()
                 if mask_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
 
@@ -351,6 +355,9 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
     batch_count = 0
     next_checkpoint_epoch = save_checkpoint_every
 
+    # 모델 dtype 감지
+    model_dtype = next(adapter.parameters()).dtype
+
     # 8. Training loop
     while batch_count < batches_to_run:
         # Checkpoint 경계까지 훈련
@@ -420,9 +427,10 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     reduction="none",
                 )
 
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.float().reshape(-1)
+                # 모델 dtype 일치
+                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.to(model_dtype).reshape(-1)
 
-                mask_sum_k = mask_k.float().sum()
+                mask_sum_k = mask_k.to(model_dtype).sum()
                 if mask_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
 
