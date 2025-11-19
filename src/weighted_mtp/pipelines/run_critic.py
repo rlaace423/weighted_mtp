@@ -208,6 +208,12 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
     # 6. Resource 로딩
     adapter = load_adapter(config, device)
+
+    # Transformer trunk freeze (value head만 학습)
+    logger.info("Freezing transformer trunk (training value head only)")
+    for param in adapter.transformer.parameters():
+        param.requires_grad = False
+
     adapter = wrap_model_fsdp(
         adapter,
         device,
