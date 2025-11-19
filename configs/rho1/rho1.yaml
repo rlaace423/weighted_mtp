@@ -32,13 +32,13 @@ models:
       intermediate_size: 11008
       rope_theta: 10000.0
       vocab_size: 32000
-    dtype: float16
+    dtype: bfloat16
 
   # Rho-1 Reference model
   reference:
     name: ref-sheared-llama-2.7b
     path: storage/models/ref-sheared-llama-2.7b
-    dtype: float16
+    dtype: bfloat16
 
 # 데이터셋 설정
 dataset:
@@ -102,6 +102,13 @@ runtime:
   device: cuda
   seed: 42
   mixed_precision: true
+
+# 분산학습 설정
+distributed:
+  fsdp:
+    sharding_strategy: FULL_SHARD
+    mixed_precision: true
+    cpu_offload: false
 
 # 스토리지
 storage:

@@ -133,41 +133,58 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        # KV cache 동적 생성 (device-agnostic)
-        if self.cache_k is None or self.cache_k.device != x.device:
-            self.cache_k = torch.zeros(
-                (self.max_batch_size, self.max_seq_len, self.n_kv_heads, self.head_dim),
-                dtype=x.dtype,
-                device=x.device
+        # Training: Flash Attention (start_pos=0, seqlen>1)
+        if start_pos == 0 and seqlen > 1:
+            keys = repeat_kv(xk, self.n_rep)
+            values = repeat_kv(xv, self.n_rep)
+
+            xq = xq.transpose(1, 2)
+            keys = keys.transpose(1, 2)
+            values = values.transpose(1, 2)
+
+            output = F.scaled_dot_product_attention(
+                xq, keys, values,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=True,
             )
-            self.cache_v = torch.zeros(
-                (self.max_batch_size, self.max_seq_len, self.n_kv_heads, self.head_dim),
-                dtype=x.dtype,
-                device=x.device
-            )
+            output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
 
-        # Training 시 computational graph 공유 방지를 위해 detach
-        # xk, xv를 그대로 저장하면 이전 iteration의 graph가 cache에 남아
-        # 다음 backward 시 "backward through the graph a second time" 에러 발생
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk.detach()
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv.detach()
+        # Inference: KV cache 사용
+        else:
+            # KV cache 동적 생성 (device-agnostic)
+            if self.cache_k is None or self.cache_k.device != x.device:
+                self.cache_k = torch.zeros(
+                    (self.max_batch_size, self.max_seq_len, self.n_kv_heads, self.head_dim),
+                    dtype=x.dtype,
+                    device=x.device
+                )
+                self.cache_v = torch.zeros(
+                    (self.max_batch_size, self.max_seq_len, self.n_kv_heads, self.head_dim),
+                    dtype=x.dtype,
+                    device=x.device
+                )
 
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
 
-        keys = repeat_kv(keys, self.n_rep)
-        values = repeat_kv(values, self.n_rep)
+            keys = self.cache_k[:bsz, : start_pos + seqlen]
+            values = self.cache_v[:bsz, : start_pos + seqlen]
 
-        xq = xq.transpose(1, 2)
-        keys = keys.transpose(1, 2)
-        values = values.transpose(1, 2)
+            keys = repeat_kv(keys, self.n_rep)
+            values = repeat_kv(values, self.n_rep)
 
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores + mask
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values)
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+            xq = xq.transpose(1, 2)
+            keys = keys.transpose(1, 2)
+            values = values.transpose(1, 2)
+
+            scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+            if mask is not None:
+                scores = scores + mask
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            output = torch.matmul(scores, values)
+            output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+
         return self.wo(output)
 
 

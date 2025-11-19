@@ -31,7 +31,7 @@ models:
       intermediate_size: 11008
       rope_theta: 10000.0
       vocab_size: 32000
-    dtype: float16
+    dtype: bfloat16
 
 # 데이터셋 설정
 dataset:
@@ -48,11 +48,11 @@ data_sampling:
   difficulty_range: [1, 11]
   seed: 42
 
-# 학습 설정 (A100 1-GPU 최적화)
+# 학습 설정 (A100 1-GPU + Flash Attention 최적화)
 training:
   n_epochs: 1.0  # 명확한 1 epoch (Anthropic fine-tuning 표준)
-  batch_size: 2  # 1-GPU 메모리 제약 (80GB OOM 방지)
-  gradient_accumulation_steps: 8  # Effective batch size = 16
+  batch_size: 4  # Flash Attention 적용 시 최적값
+  gradient_accumulation_steps: 4  # Effective batch size = 16
   learning_rate: 1.0e-4  # Critic은 높은 LR
   max_grad_norm: 0.5
   loss_type: mse
@@ -71,6 +71,13 @@ runtime:
   device: cuda
   seed: 42
   mixed_precision: true
+
+# 분산학습 설정
+distributed:
+  fsdp:
+    sharding_strategy: NO_SHARD
+    mixed_precision: true
+    cpu_offload: false
 
 # 스토리지
 storage:

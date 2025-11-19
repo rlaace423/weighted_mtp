@@ -21,10 +21,10 @@ def save_checkpoint(
     val_metrics: dict[str, float],
     checkpoint_path: Path | str,
 ) -> None:
-    """Checkpoint 저장
+    """Checkpoint 저장 (FSDP 지원)
 
     Args:
-        adapter: MetaLlamaMTPAdapter (Value head 포함)
+        adapter: MetaLlamaMTPAdapter (FSDP-wrapped 또는 일반 모델)
         optimizer: torch.optim.Optimizer
         epoch: 현재 epoch (fractional epoch 지원)
         train_metrics: Training metrics
@@ -41,20 +41,41 @@ def save_checkpoint(
             "val_metrics": dict,
         }
     """
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp.fully_sharded_data_parallel import (
+        StateDictType,
+        FullStateDictConfig,
+    )
+    from weighted_mtp.runtime.fsdp import unwrap_model
+
     checkpoint_path = Path(checkpoint_path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # FSDP Full state dict gathering
+    if isinstance(adapter, FSDP):
+        with FSDP.state_dict_type(
+            adapter,
+            StateDictType.FULL_STATE_DICT,
+            FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+        ):
+            adapter_state_dict = adapter.state_dict()
+    else:
+        # 일반 모델 (single-device 환경)
+        adapter_state_dict = adapter.state_dict()
+
     checkpoint = {
         "epoch": epoch,
-        "adapter_state_dict": adapter.state_dict(),
+        "adapter_state_dict": adapter_state_dict,
         "optimizer_state_dict": optimizer.state_dict(),
         "train_metrics": train_metrics,
         "val_metrics": val_metrics,
     }
 
-    # Value head가 있는 경우만 저장 (Baseline은 value_head=None)
-    if hasattr(adapter, "value_head") and adapter.value_head is not None:
-        checkpoint["value_head_state_dict"] = adapter.value_head.state_dict()
+    # Value head state dict 별도 저장 (FSDP/일반 모델 모두)
+    # unwrap 후 접근하여 FSDP wrapper와 무관하게 동일 처리
+    unwrapped_adapter = unwrap_model(adapter)
+    if hasattr(unwrapped_adapter, "value_head") and unwrapped_adapter.value_head is not None:
+        checkpoint["value_head_state_dict"] = unwrapped_adapter.value_head.state_dict()
 
     torch.save(checkpoint, checkpoint_path)
     logger.info(f"Checkpoint 저장 완료: {checkpoint_path}")

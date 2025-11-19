@@ -42,7 +42,7 @@ from weighted_mtp.runtime import (
     init_distributed,
     setup_environment,
     is_main_process,
-    wrap_model_ddp,
+    wrap_model_fsdp,
     unwrap_model,
     all_reduce_scalar,
     barrier,
@@ -68,6 +68,7 @@ def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
     adapter = MetaLlamaMTPAdapter.from_pretrained(
         model_path=config.models.policy.path,
         device=device,
+        dtype=config.models.policy.dtype,
     )
     return adapter
 
@@ -323,7 +324,13 @@ def run_verifiable_training(
     logger.info("✓ Critic checkpoint loaded successfully")
 
     # 9. DDP wrapping (critic checkpoint 로드 후)
-    adapter = wrap_model_ddp(adapter, device)
+    adapter = wrap_model_fsdp(
+        adapter,
+        device,
+        sharding_strategy=config.distributed.fsdp.sharding_strategy,
+        mixed_precision=config.distributed.fsdp.mixed_precision,
+        cpu_offload=config.distributed.fsdp.cpu_offload,
+    )
 
     # 10. Optimizer (전체 파라미터) - Meta MTP 논문 설정
     optimizer = torch.optim.AdamW(
@@ -691,7 +698,7 @@ def run_verifiable_training(
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}.pt"
 
             save_checkpoint(
-                adapter=unwrap_model(adapter),
+                adapter=adapter,
                 optimizer=optimizer,
                 epoch=current_epoch,
                 train_metrics={
@@ -752,7 +759,7 @@ def run_verifiable_training(
         )
 
         save_checkpoint(
-            adapter=unwrap_model(adapter),
+            adapter=adapter,
             optimizer=optimizer,
             epoch=current_epoch,
             train_metrics={

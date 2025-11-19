@@ -17,19 +17,19 @@ def test_load_defaults_config(project_root: Path):
 
 
 @pytest.mark.parametrize(
-    "recipe_name",
+    "stage,config_name",
     [
-        "recipe.baseline.yaml",
-        "recipe.verifiable.yaml",
-        "recipe.rho1_weighted.yaml",
+        ("baseline", "baseline.yaml"),
+        ("verifiable", "verifiable.yaml"),
+        ("rho1", "rho1.yaml"),
     ],
 )
-def test_load_recipe_configs(project_root: Path, recipe_name: str):
-    """Recipe YAML 로딩"""
-    recipe_path = project_root / "configs" / recipe_name
-    with open(recipe_path) as f:
-        recipe = yaml.safe_load(f)
+def test_load_stage_configs(project_root: Path, stage: str, config_name: str):
+    """Stage config YAML 로딩 (디렉터리 구조)"""
+    config_path = project_root / "configs" / stage / config_name
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
 
-    assert "experiment" in recipe
-    assert "dataset" in recipe
-    assert "training" in recipe
+    assert "experiment" in config
+    assert "dataset" in config
+    assert "training" in config

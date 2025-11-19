@@ -10,14 +10,6 @@ def test_import_weighted_mtp():
     assert weighted_mtp.__version__ == "0.2.0"
 
 
-def test_import_vendor_meta_llama():
-    """vendor.meta_llama import"""
-    from vendor.meta_llama import Transformer, ModelArgs
-
-    assert Transformer is not None
-    assert ModelArgs is not None
-
-
 def test_import_submodules():
     """하위 모듈 import"""
     import weighted_mtp.cli

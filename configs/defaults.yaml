@@ -24,12 +24,12 @@ models:
       intermediate_size: 11008
       rope_theta: 10000.0
       vocab_size: 32000
-    dtype: float16
+    dtype: bfloat16
 
   reference:
     name: ref-sheared-llama-2.7b
     path: storage/models/ref-sheared-llama-2.7b
-    dtype: float16
+    dtype: bfloat16
     # Tokenizer는 policy 모델(meta-llama-mtp)과 공유
     tokenizer_shared_with: meta-llama-mtp
 
@@ -43,6 +43,12 @@ runtime:
   device: cuda
   seed: 42
   mixed_precision: true
+
+distributed:
+  fsdp:
+    sharding_strategy: FULL_SHARD
+    mixed_precision: true
+    cpu_offload: false
 
 training:
   log_interval: 1
