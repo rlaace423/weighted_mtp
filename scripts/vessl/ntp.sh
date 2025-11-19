@@ -69,14 +69,8 @@ if [ "$NGPUS" -eq 1 ]; then
   NCCL_DEBUG=""
 else
   TRAIN_CMD="uv run torchrun --nproc_per_node=$NGPUS --nnodes=1 --node_rank=0 -m weighted_mtp.pipelines.run_baseline --config $CONFIG$OVERRIDE_ARGS"
-# NCCL 디버깅 및 안정화 (Hang 방지)
-export NCCL_DEBUG=INFO
-export NCCL_DEBUG_SUBSYS=ALL
-export NCCL_IB_DISABLE=1
-export NCCL_P2P_DISABLE=1
-export NCCL_NET_GDR_LEVEL=0
-export NCCL_SOCKET_IFNAME=eth0
-  NCCL_DEBUG="\n  NCCL_DEBUG: \"INFO\""
+  # NCCL 환경변수 (Phase 1: 최소 침습적, 성능 저하 없음)
+  NCCL_DEBUG="\n  NCCL_TIMEOUT: \"3600\"\n  NCCL_IB_DISABLE: \"1\"\n  NCCL_SOCKET_IFNAME: \"eth0\"\n  NCCL_DEBUG: \"INFO\""
 fi
 
 # .env 파일 로드
@@ -132,18 +126,16 @@ sed -i.bak "s|{{NGPUS}}|$NGPUS|g" "$TEMP_YAML"
 sed -i.bak "s|{{PRESET}}|$PRESET|g" "$TEMP_YAML"
 sed -i.bak "s|{{TRAIN_COMMAND}}|$TRAIN_CMD|g" "$TEMP_YAML"
 sed -i.bak "s|{{NCCL_DEBUG}}|$NCCL_DEBUG|g" "$TEMP_YAML"
+sed -i.bak "s|{{IMAGE}}|$IMAGE|g" "$TEMP_YAML"
 
-# awk를 사용하여 치환 (가장 안전)
-awk -v image="$IMAGE" -v setup="$SETUP_COMMANDS" '
-  {
-    gsub("{{IMAGE}}", image);
-    if (index($0, "{{SETUP_COMMANDS}}") > 0) {
-      print setup;
-    } else {
-      print $0;
-    }
-  }
-' "$TEMP_YAML" > "${TEMP_YAML}.tmp" && mv "${TEMP_YAML}.tmp" "$TEMP_YAML"
+# SETUP_COMMANDS 치환 (임시 파일 사용 - 개행 및 특수문자 안전 처리)
+SETUP_FILE=$(mktemp)
+printf "%s" "$SETUP_COMMANDS" > "$SETUP_FILE"
+sed -i.bak "/{{SETUP_COMMANDS}}/{
+r $SETUP_FILE
+d
+}" "$TEMP_YAML"
+rm -f "$SETUP_FILE"
 
 # 환경변수 치환
 sed -i.bak "s|{{MLFLOW_TRACKING_USERNAME}}|$MLFLOW_TRACKING_USERNAME|g" "$TEMP_YAML"

@@ -130,31 +130,15 @@ sed -i.bak "s|{{PRESET}}|$PRESET|g" "$TEMP_YAML"
 sed -i.bak "s|{{TRAIN_COMMAND}}|$TRAIN_CMD|g" "$TEMP_YAML"
 sed -i.bak "s|{{NCCL_DEBUG}}|$NCCL_DEBUG|g" "$TEMP_YAML"
 sed -i.bak "s|{{IMAGE}}|$IMAGE|g" "$TEMP_YAML"
-# SETUP_COMMANDS는 여러 줄이므로 다른 구분자 사용 및 개행 처리 주의
-# sed의 대체 구문에 개행이 들어가면 문제가 될 수 있으므로, perl을 사용하거나 setup commands를 파일로 분리하는 것이 좋지만,
-# 여기서는 간단히 sed로 처리하기 위해 개행을 리터럴 \n으로 변경하여 처리하거나,
-# 템플릿 구조상 단순히 문자열 치환을 시도함.
-# 하지만 SETUP_COMMANDS 내부의 따옴표 등이 쉘 변수 확장과 sed 파싱에서 문제를 일으킬 수 있음.
-# 가장 안전한 방법은 awk나 perl을 사용하는 것임.
-# 여기서는 간단하게 SETUP_COMMANDS 내용을 임시 파일에 쓰고 sed로 읽어들이는 방식을 사용하거나,
-# 템플릿에 {{SETUP_COMMANDS}}가 한 줄에 있으므로, 해당 줄을 통째로 교체하는 방식을 사용.
 
-# SETUP_COMMANDS의 줄바꿈을 이스케이프하여 sed에 전달
-ESCAPED_SETUP_COMMANDS=$(echo "$SETUP_COMMANDS" | sed 's/$/\\/g' | sed '$s/\\$//')
-# sed 명령어가 복잡해지므로, perl을 사용하여 치환 (macOS/Linux 호환성 고려)
-# 또는 더 단순하게: 템플릿의 {{SETUP_COMMANDS}} 라인을 찾아서 그 위치에 내용을 삽입.
-
-# awk를 사용하여 치환 (가장 안전)
-awk -v image="$IMAGE" -v setup="$SETUP_COMMANDS" '
-  {
-    gsub("{{IMAGE}}", image);
-    if (index($0, "{{SETUP_COMMANDS}}") > 0) {
-      print setup;
-    } else {
-      print $0;
-    }
-  }
-' "$TEMP_YAML" > "${TEMP_YAML}.tmp" && mv "${TEMP_YAML}.tmp" "$TEMP_YAML"
+# SETUP_COMMANDS 치환 (임시 파일 사용 - 개행 및 특수문자 안전 처리)
+SETUP_FILE=$(mktemp)
+printf "%s" "$SETUP_COMMANDS" > "$SETUP_FILE"
+sed -i.bak "/{{SETUP_COMMANDS}}/{
+r $SETUP_FILE
+d
+}" "$TEMP_YAML"
+rm -f "$SETUP_FILE"
 
 # 환경변수 치환
 sed -i.bak "s|{{MLFLOW_TRACKING_USERNAME}}|$MLFLOW_TRACKING_USERNAME|g" "$TEMP_YAML"
