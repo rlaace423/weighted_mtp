@@ -86,10 +86,11 @@ def wrap_model_fsdp(
     )
 
     # FSDP wrapping
-    # use_orig_params=False: PyTorch 표준 방식 (flattened params)
-    # - Embedding layer sharding 호환
-    # - Meta MTP 레퍼런스와 동일
-    # - 안정성 향상 (parameter 관리 단순화)
+    # use_orig_params=True: 원본 parameter 구조 유지
+    # - FlatParameter 생성 오버헤드 제거 (첫 forward 속도 개선)
+    # - All-gather를 작은 단위로 분산 (NCCL timeout 방지)
+    # - NCCL Socket Fallback 환경에서 안정성 향상
+    # - adapter() 통한 정상적인 FSDP Hook 실행으로 sharded parameter 접근 문제 해결
     wrapped_model = FSDP(
         model,
         auto_wrap_policy=fsdp_auto_wrap_policy,
