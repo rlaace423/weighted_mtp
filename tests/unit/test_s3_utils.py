@@ -65,25 +65,30 @@ def test_upload_to_s3_async_failure(temp_checkpoint, caplog):
 
 
 @patch("weighted_mtp.utils.s3_utils.boto3")
-@patch("weighted_mtp.utils.s3_utils.MlflowClient")
-def test_cleanup_s3_checkpoints_success(mock_mlflow_client_cls, mock_boto3):
+def test_cleanup_s3_checkpoints_success(mock_boto3):
     """S3 checkpoint 정리 성공 케이스"""
-    # Mock 설정
-    mock_client = Mock()
-    mock_mlflow_client_cls.return_value = mock_client
-
+    # Mock S3 클라이언트 설정
     mock_s3 = Mock()
     mock_boto3.client.return_value = mock_s3
 
-    # Artifact 목록 mock (5개 checkpoint, 3개 삭제 대상)
-    mock_artifacts = [
-        Mock(path="checkpoints/checkpoint_epoch_1.00.pt"),
-        Mock(path="checkpoints/checkpoint_epoch_2.00.pt"),
-        Mock(path="checkpoints/checkpoint_epoch_3.00.pt"),
-        Mock(path="checkpoints/checkpoint_epoch_4.00.pt"),
-        Mock(path="checkpoints/checkpoint_epoch_5.00.pt"),
-    ]
-    mock_client.list_artifacts.return_value = mock_artifacts
+    # S3 list_objects_v2 응답 mock (5개 checkpoint)
+    from datetime import datetime, timedelta
+    base_time = datetime(2025, 1, 1)
+
+    mock_s3.list_objects_v2.return_value = {
+        "Contents": [
+            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_1.00.pt",
+             "LastModified": base_time + timedelta(hours=1)},
+            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_2.00.pt",
+             "LastModified": base_time + timedelta(hours=2)},
+            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_3.00.pt",
+             "LastModified": base_time + timedelta(hours=3)},
+            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_4.00.pt",
+             "LastModified": base_time + timedelta(hours=4)},
+            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_5.00.pt",
+             "LastModified": base_time + timedelta(hours=5)},
+        ]
+    }
 
     # S3 정리 실행 (최대 2개 유지 -> 3개 삭제)
     cleanup_s3_checkpoints(
@@ -103,22 +108,24 @@ def test_cleanup_s3_checkpoints_success(mock_mlflow_client_cls, mock_boto3):
 
 
 @patch("weighted_mtp.utils.s3_utils.boto3")
-@patch("weighted_mtp.utils.s3_utils.MlflowClient")
-def test_cleanup_s3_checkpoints_no_deletion(mock_mlflow_client_cls, mock_boto3):
+def test_cleanup_s3_checkpoints_no_deletion(mock_boto3):
     """삭제할 checkpoint가 없는 경우"""
-    # Mock 설정
-    mock_client = Mock()
-    mock_mlflow_client_cls.return_value = mock_client
-
+    # Mock S3 클라이언트 설정
     mock_s3 = Mock()
     mock_boto3.client.return_value = mock_s3
 
-    # Artifact 목록 mock (2개만 존재)
-    mock_artifacts = [
-        Mock(path="checkpoints/checkpoint_epoch_4.00.pt"),
-        Mock(path="checkpoints/checkpoint_epoch_5.00.pt"),
-    ]
-    mock_client.list_artifacts.return_value = mock_artifacts
+    # S3 list_objects_v2 응답 mock (2개만 존재)
+    from datetime import datetime, timedelta
+    base_time = datetime(2025, 1, 1)
+
+    mock_s3.list_objects_v2.return_value = {
+        "Contents": [
+            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_4.00.pt",
+             "LastModified": base_time + timedelta(hours=4)},
+            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_5.00.pt",
+             "LastModified": base_time + timedelta(hours=5)},
+        ]
+    }
 
     # S3 정리 실행 (최대 3개 유지 -> 삭제 없음)
     cleanup_s3_checkpoints(
@@ -131,11 +138,11 @@ def test_cleanup_s3_checkpoints_no_deletion(mock_mlflow_client_cls, mock_boto3):
     mock_s3.delete_object.assert_not_called()
 
 
-@patch("weighted_mtp.utils.s3_utils.MlflowClient")
-def test_cleanup_s3_checkpoints_failure(mock_mlflow_client_cls, caplog):
+@patch("weighted_mtp.utils.s3_utils.boto3")
+def test_cleanup_s3_checkpoints_failure(mock_boto3, caplog):
     """S3 정리 실패 케이스"""
-    # MLflow Client 실패 시뮬레이션
-    mock_mlflow_client_cls.side_effect = Exception("MLflow connection error")
+    # S3 클라이언트 실패 시뮬레이션
+    mock_boto3.client.side_effect = Exception("S3 connection error")
 
     # S3 정리 실행 (예외는 캐치되어야 함)
     cleanup_s3_checkpoints(
@@ -146,7 +153,7 @@ def test_cleanup_s3_checkpoints_failure(mock_mlflow_client_cls, caplog):
 
     # 경고 로그 확인
     assert "S3 cleanup failed" in caplog.text
-    assert "MLflow connection error" in caplog.text
+    assert "S3 connection error" in caplog.text
 
 
 def test_shutdown_s3_executor():

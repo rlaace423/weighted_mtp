@@ -11,7 +11,6 @@ from pathlib import Path
 
 import boto3
 import mlflow
-from mlflow.tracking import MlflowClient
 
 logger = logging.getLogger(__name__)
 
@@ -81,30 +80,35 @@ def cleanup_s3_checkpoints(
         save_total_limit: 유지할 최대 개수
     """
     try:
-        client = MlflowClient()
         s3 = boto3.client("s3")
+        bucket = "wmtp"
+        prefix = f"mlflow-artifacts/{experiment_id}/{run_id}/artifacts/checkpoints/"
 
-        # S3에 있는 모든 checkpoint 목록 가져오기
-        artifacts = client.list_artifacts(run_id, path="checkpoints")
+        # S3에서 checkpoint 목록 직접 조회
+        response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+
+        if "Contents" not in response:
+            return  # checkpoint가 없으면 종료
 
         # checkpoint_epoch_*.pt 파일만 필터링
-        epoch_checkpoints = [
-            a for a in artifacts if a.path.startswith("checkpoints/checkpoint_epoch_")
-        ]
+        epoch_checkpoints = []
+        for obj in response["Contents"]:
+            key = obj["Key"]
+            filename = key.split("/")[-1]
+            if filename.startswith("checkpoint_epoch_") and filename.endswith(".pt"):
+                epoch_checkpoints.append({"key": key, "last_modified": obj["LastModified"]})
 
-        # 시간순 정렬 (파일명 기준)
-        epoch_checkpoints.sort(key=lambda x: x.path)
+        # 시간순 정렬 (LastModified 기준)
+        epoch_checkpoints.sort(key=lambda x: x["last_modified"])
 
         # 삭제할 파일 개수 계산
         n_to_delete = len(epoch_checkpoints) - save_total_limit
 
         if n_to_delete > 0:
-            bucket = "wmtp"
-            for artifact in epoch_checkpoints[:n_to_delete]:
-                # boto3로 S3 파일 직접 삭제
-                s3_key = f"mlflow-artifacts/{experiment_id}/{run_id}/artifacts/{artifact.path}"
-                s3.delete_object(Bucket=bucket, Key=s3_key)
-                logger.info(f"S3 checkpoint deleted: {artifact.path}")
+            for checkpoint in epoch_checkpoints[:n_to_delete]:
+                s3.delete_object(Bucket=bucket, Key=checkpoint["key"])
+                filename = checkpoint["key"].split("/")[-1]
+                logger.info(f"S3 checkpoint deleted: {filename}")
 
     except Exception as e:
         logger.warning(f"S3 cleanup failed: {e}")
