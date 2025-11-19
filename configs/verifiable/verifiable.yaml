@@ -16,7 +16,7 @@ experiment:
     - verifiable
     - wmtp
     - production
-  critic_checkpoint: storage/checkpoints/critic/critic-pretrain/checkpoint_best.pt
+  critic_checkpoint: storage/checkpoints/critic/critic-pretrain-s3/checkpoint_value_head_only.pt
 
 # 모델 설정
 models:

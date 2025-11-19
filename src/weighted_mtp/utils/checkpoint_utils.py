@@ -83,6 +83,63 @@ def save_checkpoint(
     logger.info(f"  Val loss: {val_metrics.get('val_loss', 'N/A')}")
 
 
+def save_critic_checkpoint(
+    adapter,
+    optimizer: torch.optim.Optimizer,
+    epoch: int | float,
+    train_metrics: dict[str, float],
+    val_metrics: dict[str, float],
+    checkpoint_path: Path | str,
+) -> None:
+    """Critic checkpoint 저장 (value_head만 저장)
+
+    Critic 학습에서는 value_head만 학습하므로, value_head state dict만 저장
+    전체 adapter 대신 value_head만 저장하여 checkpoint 크기 대폭 감소 (13GB → ~50MB)
+
+    Args:
+        adapter: MetaLlamaMTPAdapter (FSDP-wrapped 또는 일반 모델)
+        optimizer: torch.optim.Optimizer (value_head 파라미터만 학습)
+        epoch: 현재 epoch (fractional epoch 지원)
+        train_metrics: Training metrics
+        val_metrics: Validation metrics
+        checkpoint_path: 저장 경로
+
+    Saved checkpoint format:
+        {
+            "epoch": float,
+            "value_head_state_dict": dict,  # Value head만
+            "optimizer_state_dict": dict,
+            "train_metrics": dict,
+            "val_metrics": dict,
+        }
+    """
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from weighted_mtp.runtime.fsdp import unwrap_model
+
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Unwrap하여 value_head에 직접 접근
+    unwrapped_adapter = unwrap_model(adapter)
+
+    if not hasattr(unwrapped_adapter, "value_head") or unwrapped_adapter.value_head is None:
+        raise ValueError("Adapter에 value_head가 없습니다. Critic checkpoint는 value_head가 필요합니다.")
+
+    # Value head state dict만 저장
+    checkpoint = {
+        "epoch": epoch,
+        "value_head_state_dict": unwrapped_adapter.value_head.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "train_metrics": train_metrics,
+        "val_metrics": val_metrics,
+    }
+
+    torch.save(checkpoint, checkpoint_path)
+    logger.info(f"Critic checkpoint 저장 완료 (value_head만): {checkpoint_path}")
+    logger.info(f"  Epoch: {epoch}")
+    logger.info(f"  Val loss: {val_metrics.get('val_loss', 'N/A')}")
+
+
 def load_critic_checkpoint(
     checkpoint_path: str,
     adapter,

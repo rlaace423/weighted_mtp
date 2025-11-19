@@ -227,8 +227,8 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 }
             )
 
-        # GPU monitor 초기화
-        gpu_monitor = GPUMonitor(device)
+    # GPU monitor 초기화 (모든 rank에서 필요)
+    gpu_monitor = GPUMonitor(device)
 
     # 5. Dataset & DataLoader 생성
     logger.info(f"Dataset: {config.dataset.name}")

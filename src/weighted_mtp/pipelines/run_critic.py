@@ -32,7 +32,7 @@ from weighted_mtp.utils import (
     get_model_size,
     get_system_info,
     s3_upload_executor,
-    save_checkpoint,
+    save_critic_checkpoint,
     shutdown_s3_executor,
     upload_to_s3_async,
 )
@@ -249,390 +249,391 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 }
             )
 
-        # GPU monitor 초기화
-        gpu_monitor = GPUMonitor(device)
+    # GPU monitor 초기화 (모든 rank에서 필요)
+    gpu_monitor = GPUMonitor(device)
 
-        # 5. Dataset & DataLoader 생성
-        logger.info(f"Dataset: {config.dataset.name}")
-        logger.info(f"Train: {config.dataset.train}")
-        logger.info(f"Validation: {config.dataset.validation}")
+    # 5. Dataset & DataLoader 생성
+    logger.info(f"Dataset: {config.dataset.name}")
+    logger.info(f"Train: {config.dataset.train}")
+    logger.info(f"Validation: {config.dataset.validation}")
 
-        train_loader = create_dataloader(
-            dataset_path=config.dataset.train,
-            tokenizer=tokenizer,
-            batch_size=config.training.batch_size,
-            max_length=config.dataset.max_length,
-            n_samples=config.data_sampling.n_samples,
-            balance_correct=config.data_sampling.balance_correct,
-            correct_ratio=config.data_sampling.correct_ratio,
-            difficulty_weights=None,
-            difficulty_bins=None,
-            seed=config.data_sampling.seed,
-            shuffle=True,
+    train_loader = create_dataloader(
+        dataset_path=config.dataset.train,
+        tokenizer=tokenizer,
+        batch_size=config.training.batch_size,
+        max_length=config.dataset.max_length,
+        n_samples=config.data_sampling.n_samples,
+        balance_correct=config.data_sampling.balance_correct,
+        correct_ratio=config.data_sampling.correct_ratio,
+        difficulty_weights=None,
+        difficulty_bins=None,
+        seed=config.data_sampling.seed,
+        shuffle=True,
+    )
+
+    # Validation 샘플 수: train의 5% 또는 최소 100개
+    val_n_samples = max(100, config.data_sampling.n_samples // 20)
+
+    val_loader = create_dataloader(
+        dataset_path=config.dataset.validation,
+        tokenizer=tokenizer,
+        batch_size=config.training.batch_size,
+        max_length=config.dataset.max_length,
+        n_samples=val_n_samples,
+        balance_correct=config.data_sampling.balance_correct,
+        correct_ratio=config.data_sampling.correct_ratio,
+        difficulty_weights=None,
+        difficulty_bins=None,
+        seed=config.data_sampling.seed,
+        shuffle=False,
+    )
+
+    logger.info(f"Train batches: {len(train_loader)}")
+    logger.info(f"Validation batches: {len(val_loader)}")
+
+    # Dataset statistics 로깅
+    if is_main_process() and use_mlflow:
+        mlflow.log_params(
+            {
+                "dataset_train_samples": len(train_loader.dataset),
+                "dataset_val_samples": len(val_loader.dataset),
+                "dataset_train_batches": len(train_loader),
+                "dataset_val_batches": len(val_loader),
+            }
         )
 
-        # Validation 샘플 수: train의 5% 또는 최소 100개
-        val_n_samples = max(100, config.data_sampling.n_samples // 20)
+    # 6. Optimizer (Value head only) - Meta MTP 논문 설정
+    optimizer = torch.optim.AdamW(
+        adapter.value_head.parameters(),
+        lr=config.training.learning_rate,
+        betas=(0.9, 0.95),
+        weight_decay=0.01,
+    )
 
-        val_loader = create_dataloader(
-            dataset_path=config.dataset.validation,
-            tokenizer=tokenizer,
-            batch_size=config.training.batch_size,
-            max_length=config.dataset.max_length,
-            n_samples=val_n_samples,
-            balance_correct=config.data_sampling.balance_correct,
-            correct_ratio=config.data_sampling.correct_ratio,
-            difficulty_weights=None,
-            difficulty_bins=None,
-            seed=config.data_sampling.seed,
-            shuffle=False,
-        )
+    # 7. Training loop
+    best_val_loss = float("inf")
+    global_step = 0
 
-        logger.info(f"Train batches: {len(train_loader)}")
-        logger.info(f"Validation batches: {len(val_loader)}")
+    checkpoint_dir = Path(config.checkpoint.save_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Dataset statistics 로깅
-        if use_mlflow:
-            mlflow.log_params(
-                {
-                    "dataset_train_samples": len(train_loader.dataset),
-                    "dataset_val_samples": len(val_loader.dataset),
-                    "dataset_train_batches": len(train_loader),
-                    "dataset_val_batches": len(val_loader),
-                }
-            )
+    n_epochs = config.training.n_epochs
+    save_checkpoint_every = config.checkpoint.save_checkpoint_every
 
-        # 6. Optimizer (Value head only) - Meta MTP 논문 설정
-        optimizer = torch.optim.AdamW(
-            adapter.value_head.parameters(),
-            lr=config.training.learning_rate,
-            betas=(0.9, 0.95),
-            weight_decay=0.01,
-        )
+    # Fractional epoch 처리
+    total_batches = len(train_loader)
+    batches_to_run = int(total_batches * n_epochs)
 
-        # 7. Training loop
-        best_val_loss = float("inf")
-        global_step = 0
+    # Gradient accumulation 초기화
+    accumulation_counter = 0
+    gradient_accumulation_steps = config.training.gradient_accumulation_steps
 
-        checkpoint_dir = Path(config.checkpoint.save_dir)
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    # Optimization steps 계산
+    total_optimization_steps = (batches_to_run + gradient_accumulation_steps - 1) // gradient_accumulation_steps
 
-        n_epochs = config.training.n_epochs
-        save_checkpoint_every = config.checkpoint.save_checkpoint_every
+    logger.info(f"Total epochs: {n_epochs}")
+    logger.info(f"Total batches to run: {batches_to_run}")
+    logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    logger.info(f"Total optimization steps: {total_optimization_steps}")
+    logger.info(f"Validation & Checkpoint every: {save_checkpoint_every} epochs")
 
-        # Fractional epoch 처리
-        total_batches = len(train_loader)
-        batches_to_run = int(total_batches * n_epochs)
+    current_epoch = 0.0
+    batch_count = 0
+    next_checkpoint_epoch = save_checkpoint_every
 
-        # Gradient accumulation 초기화
-        accumulation_counter = 0
-        gradient_accumulation_steps = config.training.gradient_accumulation_steps
+    # Throughput tracker 초기화 (모든 rank에서 필요)
+    throughput_tracker = ThroughputTracker()
 
-        # Optimization steps 계산
-        total_optimization_steps = (batches_to_run + gradient_accumulation_steps - 1) // gradient_accumulation_steps
+    # 모델 dtype 감지
+    model_dtype = next(adapter.parameters()).dtype
 
-        logger.info(f"Total epochs: {n_epochs}")
-        logger.info(f"Total batches to run: {batches_to_run}")
-        logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
-        logger.info(f"Total optimization steps: {total_optimization_steps}")
-        logger.info(f"Validation & Checkpoint every: {save_checkpoint_every} epochs")
+    # Optimizer 초기화 (gradient accumulation을 위해 while loop 시작 전)
+    optimizer.zero_grad()
 
-        current_epoch = 0.0
-        batch_count = 0
-        next_checkpoint_epoch = save_checkpoint_every
+    # 7. Training loop (모든 rank 실행)
+    while batch_count < batches_to_run:
+        # Train 1 epoch (또는 checkpoint 경계까지)
+        target_epoch = min(next_checkpoint_epoch, n_epochs)
+        target_batches = int(target_epoch * total_batches)
+        batches_this_period = target_batches - batch_count
 
-        # Throughput tracker 초기화
-        throughput_tracker = ThroughputTracker()
+        logger.info(f"--- Training to epoch {target_epoch:.2f} ---")
 
-        # 모델 dtype 감지
-        model_dtype = next(adapter.parameters()).dtype
+        # Throughput tracking 시작
+        throughput_tracker.start_epoch()
 
-        # Optimizer 초기화 (gradient accumulation을 위해 while loop 시작 전)
-        optimizer.zero_grad()
+        # DataLoader에서 필요한 만큼만 사용
+        epoch_train_loader = iter(train_loader)
+        period_metrics_sum = {"train_loss": 0.0}
+        period_batches = 0
 
-        while batch_count < batches_to_run:
-            # Train 1 epoch (또는 checkpoint 경계까지)
-            target_epoch = min(next_checkpoint_epoch, n_epochs)
-            target_batches = int(target_epoch * total_batches)
-            batches_this_period = target_batches - batch_count
+        for _ in range(batches_this_period):
+            try:
+                batch = next(epoch_train_loader)
+            except StopIteration:
+                # DataLoader 재시작
+                epoch_train_loader = iter(train_loader)
+                batch = next(epoch_train_loader)
 
-            logger.info(f"--- Training to epoch {target_epoch:.2f} ---")
+            # 1 batch 훈련
+            adapter.train()
 
-            # Throughput tracking 시작
-            throughput_tracker.start_epoch()
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+            is_correct = batch["is_correct"].to(device)
 
-            # DataLoader에서 필요한 만큼만 사용
-            epoch_train_loader = iter(train_loader)
-            period_metrics_sum = {"train_loss": 0.0}
-            period_batches = 0
+            # 모델 dtype 일치
+            rewards = is_correct.to(model_dtype)
+            outputs = adapter(input_ids, attention_mask, return_value_logits=True)
+            value_logits = outputs["value_logits"]
 
-            for _ in range(batches_this_period):
-                try:
-                    batch = next(epoch_train_loader)
-                except StopIteration:
-                    # DataLoader 재시작
-                    epoch_train_loader = iter(train_loader)
-                    batch = next(epoch_train_loader)
+            batch_size, seq_len, _ = value_logits.shape
+            value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
+            # Mask padded tokens AND instruction tokens (labels != -100)
+            # labels != -100 means it's a target token (output)
+            valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
+            loss_mask = valid_label_mask
 
-                # 1 batch 훈련
-                adapter.train()
+            if config.training.loss_type == "mse":
+                loss_per_token = torch.nn.functional.mse_loss(
+                    value_logits, value_targets, reduction="none"
+                )
+            elif config.training.loss_type == "huber":
+                loss_per_token = torch.nn.functional.smooth_l1_loss(
+                    value_logits, value_targets, reduction="none"
+                )
+            else:
+                raise ValueError(f"Unknown loss_type: {config.training.loss_type}")
 
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
-                labels = batch["labels"].to(device)
-                is_correct = batch["is_correct"].to(device)
+            masked_loss = loss_per_token * loss_mask
+            value_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)
 
-                # 모델 dtype 일치
-                rewards = is_correct.to(model_dtype)
-                outputs = adapter(input_ids, attention_mask, return_value_logits=True)
-                value_logits = outputs["value_logits"]
+            # Loss scaling (gradient accumulation 적용)
+            scaled_loss = value_loss / gradient_accumulation_steps
+            scaled_loss.backward()
 
-                batch_size, seq_len, _ = value_logits.shape
-                value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
-                # Mask padded tokens AND instruction tokens (labels != -100)
-                # labels != -100 means it's a target token (output)
-                valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
-                loss_mask = valid_label_mask
+            accumulation_counter += 1
+            batch_count += 1
+            period_batches += 1
 
-                if config.training.loss_type == "mse":
-                    loss_per_token = torch.nn.functional.mse_loss(
-                        value_logits, value_targets, reduction="none"
-                    )
-                elif config.training.loss_type == "huber":
-                    loss_per_token = torch.nn.functional.smooth_l1_loss(
-                        value_logits, value_targets, reduction="none"
-                    )
-                else:
-                    raise ValueError(f"Unknown loss_type: {config.training.loss_type}")
+            # Throughput tracking (batch 단위)
+            batch_size_actual = input_ids.size(0)
+            n_tokens = attention_mask.sum().item()
+            throughput_tracker.update(batch_size_actual, int(n_tokens))
 
-                masked_loss = loss_per_token * loss_mask
-                value_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)
+            # Period metrics 누적 (batch 단위)
+            period_metrics_sum["train_loss"] += value_loss.item()
 
-                # Loss scaling (gradient accumulation 적용)
-                scaled_loss = value_loss / gradient_accumulation_steps
-                scaled_loss.backward()
-
-                accumulation_counter += 1
-                batch_count += 1
-                period_batches += 1
-
-                # Throughput tracking (batch 단위)
-                batch_size_actual = input_ids.size(0)
-                n_tokens = attention_mask.sum().item()
-                throughput_tracker.update(batch_size_actual, int(n_tokens))
-
-                # Period metrics 누적 (batch 단위)
-                period_metrics_sum["train_loss"] += value_loss.item()
-
-                # Optimizer step (accumulation 완료 시에만)
-                if accumulation_counter >= gradient_accumulation_steps:
-                    # Gradient clipping (누적된 gradient에 적용)
-                    if config.training.max_grad_norm > 0:
-                        params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
-                        grad_clip_stats = compute_gradient_clip_stats(
-                            params_with_grad,
-                            config.training.max_grad_norm,
-                        )
-                    else:
-                        grad_norm_dict = compute_gradient_norm(adapter)
-                        grad_clip_stats = {
-                            "grad_norm_pre_clip": grad_norm_dict["grad_norm"],
-                            "grad_norm_post_clip": grad_norm_dict["grad_norm"],
-                            "grad_clip_ratio": 1.0,
-                        }
-
-                    optimizer.step()
-                    optimizer.zero_grad()
-
-                    global_step += 1
-                    accumulation_counter = 0
-
-                    # Step-level logging (optimizer step 시에만)
-                    if global_step % config.training.log_interval == 0:
-                        # GPU metrics
-                        gpu_metrics = gpu_monitor.get_metrics()
-
-                        # Value function statistics
-                        value_stats = compute_value_function_stats(
-                            values=value_logits.squeeze(-1),
-                            returns=value_targets.squeeze(-1),
-                        )
-
-                        # Metric aggregation (DDP)
-                        avg_loss = all_reduce_scalar(value_loss.item())
-                        avg_grad_norm_post = all_reduce_scalar(grad_clip_stats["grad_norm_post_clip"])
-                        avg_grad_norm_pre = all_reduce_scalar(grad_clip_stats["grad_norm_pre_clip"])
-                        avg_grad_clip_ratio = all_reduce_scalar(grad_clip_stats["grad_clip_ratio"])
-                        avg_value_mean = all_reduce_scalar(value_stats["value_mean"])
-                        avg_value_std = all_reduce_scalar(value_stats["value_std"])
-
-                        if is_main_process():
-                            if use_mlflow:
-                                mlflow.log_metrics(
-                                    {
-                                        "train/loss": avg_loss,
-                                        "train/grad_norm": avg_grad_norm_post,
-                                        "train/grad_norm_pre_clip": avg_grad_norm_pre,
-                                        "train/grad_clip_ratio": avg_grad_clip_ratio,
-                                        "train/learning_rate": optimizer.param_groups[0]["lr"],
-                                        "value/mean_prediction": avg_value_mean,
-                                        "value/std_prediction": avg_value_std,
-                                        "value/mse": value_stats["value_mse"],
-                                        "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
-                                        "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
-                                    },
-                                    step=global_step,
-                                )
-                        logger.info(
-                            f"Step {global_step}/{total_optimization_steps}, "
-                            f"Loss: {avg_loss:.4f}, "
-                            f"Grad Norm: {avg_grad_norm_post:.4f} (Clip Ratio: {avg_grad_clip_ratio:.2f})"
-                        )
-
-            # Period loop 종료
-
-            # Incomplete accumulation 처리 (validation 전)
-            if accumulation_counter > 0:
-                logger.info(f"Processing incomplete accumulation ({accumulation_counter} batches before validation)")
-
-                # Gradient clipping
+            # Optimizer step (accumulation 완료 시에만)
+            if accumulation_counter >= gradient_accumulation_steps:
+                # Gradient clipping (누적된 gradient에 적용)
                 if config.training.max_grad_norm > 0:
                     params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
                     grad_clip_stats = compute_gradient_clip_stats(
                         params_with_grad,
                         config.training.max_grad_norm,
                     )
+                else:
+                    grad_norm_dict = compute_gradient_norm(adapter)
+                    grad_clip_stats = {
+                        "grad_norm_pre_clip": grad_norm_dict["grad_norm"],
+                        "grad_norm_post_clip": grad_norm_dict["grad_norm"],
+                        "grad_clip_ratio": 1.0,
+                    }
 
                 optimizer.step()
                 optimizer.zero_grad()
+
                 global_step += 1
                 accumulation_counter = 0
 
-            # Epoch 경계 도달
-            current_epoch = batch_count / total_batches
+                # Step-level logging (optimizer step 시에만)
+                if global_step % config.training.log_interval == 0:
+                    # GPU metrics
+                    gpu_metrics = gpu_monitor.get_metrics()
 
-            # Period-level metrics 계산
-            train_loss_avg = period_metrics_sum["train_loss"] / period_batches
-            train_loss_avg = all_reduce_scalar(train_loss_avg)
-
-            logger.info(
-                f"Epoch {current_epoch:.2f} 도달 - "
-                f"Train Loss: {train_loss_avg:.4f}"
-            )
-
-            # Throughput metrics 계산
-            throughput_metrics = throughput_tracker.get_epoch_metrics()
-
-            # Validation 실행 (epoch 경계에서)
-            logger.info(f"--- Validation at epoch {current_epoch:.2f} ---")
-
-            val_metrics = validate_critic(
-                adapter=adapter,
-                dataloader=val_loader,
-                device=device,
-                loss_type=config.training.loss_type,
-            )
-
-            # Validation metrics aggregation
-            avg_val_loss = all_reduce_scalar(val_metrics["val_loss"])
-            avg_val_explained_var = all_reduce_scalar(val_metrics["val_explained_variance"])
-
-            # GPU metrics (epoch-level)
-            gpu_metrics_epoch = gpu_monitor.get_metrics()
-
-            # Epoch-level 로깅
-            if is_main_process():
-                if use_mlflow:
-                    mlflow.log_metrics(
-                        {
-                            "train/epoch_loss": train_loss_avg,
-                            "val/loss": avg_val_loss,
-                            "val/explained_variance": avg_val_explained_var,
-                        "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
-                        "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
-                        "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
-                        "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
-                    },
-                    step=int(current_epoch * 100),  # Epoch을 정수로 변환 (0.5 -> 50)
+                    # Value function statistics
+                    value_stats = compute_value_function_stats(
+                        values=value_logits.squeeze(-1),
+                        returns=value_targets.squeeze(-1),
                     )
 
-            logger.info(
-                f"Validation - Loss: {val_metrics['val_loss']:.4f}, "
-                f"Explained Variance: {val_metrics['val_explained_variance']:.4f}"
-            )
+                    # Metric aggregation (DDP)
+                    avg_loss = all_reduce_scalar(value_loss.item())
+                    avg_grad_norm_post = all_reduce_scalar(grad_clip_stats["grad_norm_post_clip"])
+                    avg_grad_norm_pre = all_reduce_scalar(grad_clip_stats["grad_norm_pre_clip"])
+                    avg_grad_clip_ratio = all_reduce_scalar(grad_clip_stats["grad_clip_ratio"])
+                    avg_value_mean = all_reduce_scalar(value_stats["value_mean"])
+                    avg_value_std = all_reduce_scalar(value_stats["value_std"])
 
-            # Checkpoint 저장 (validation loss 개선 시만)
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}.pt"
+                    if is_main_process():
+                        if use_mlflow:
+                            mlflow.log_metrics(
+                                {
+                                    "train/loss": avg_loss,
+                                    "train/grad_norm": avg_grad_norm_post,
+                                    "train/grad_norm_pre_clip": avg_grad_norm_pre,
+                                    "train/grad_clip_ratio": avg_grad_clip_ratio,
+                                    "train/learning_rate": optimizer.param_groups[0]["lr"],
+                                    "value/mean_prediction": avg_value_mean,
+                                    "value/std_prediction": avg_value_std,
+                                    "value/mse": value_stats["value_mse"],
+                                    "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
+                                    "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
+                                },
+                                step=global_step,
+                            )
+                    logger.info(
+                        f"Step {global_step}/{total_optimization_steps}, "
+                        f"Loss: {avg_loss:.4f}, "
+                        f"Grad Norm: {avg_grad_norm_post:.4f} (Clip Ratio: {avg_grad_clip_ratio:.2f})"
+                    )
 
-                save_checkpoint(
-                    adapter=adapter,
-                    optimizer=optimizer,
-                    epoch=current_epoch,
-                    train_metrics={"train_loss": train_loss_avg},
-                    val_metrics=val_metrics,
-                    checkpoint_path=checkpoint_path,
+        # Period loop 종료
+
+        # Incomplete accumulation 처리 (validation 전)
+        if accumulation_counter > 0:
+            logger.info(f"Processing incomplete accumulation ({accumulation_counter} batches before validation)")
+
+            # Gradient clipping
+            if config.training.max_grad_norm > 0:
+                params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
+                grad_clip_stats = compute_gradient_clip_stats(
+                    params_with_grad,
+                    config.training.max_grad_norm,
                 )
 
-                # 모든 GPU가 checkpoint 저장 완료까지 대기
-                barrier()
+            optimizer.step()
+            optimizer.zero_grad()
+            global_step += 1
+            accumulation_counter = 0
 
-                if is_main_process():
-                    logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
+        # Epoch 경계 도달
+        current_epoch = batch_count / total_batches
 
-                # S3 업로드 (비동기)
-                if is_main_process() and use_mlflow:
-                    s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_mlflow)
+        # Period-level metrics 계산
+        train_loss_avg = period_metrics_sum["train_loss"] / period_batches
+        train_loss_avg = all_reduce_scalar(train_loss_avg)
 
-                # 오래된 checkpoint 정리 (최대 3개 유지)
-                if config.checkpoint.save_total_limit:
-                    cleanup_old_checkpoints(
-                        checkpoint_dir=checkpoint_dir,
-                        save_total_limit=config.checkpoint.save_total_limit,
-                    )
+        logger.info(
+            f"Epoch {current_epoch:.2f} 도달 - "
+            f"Train Loss: {train_loss_avg:.4f}"
+        )
 
-                    # S3 정리 (비동기)
-                    if is_main_process() and use_mlflow:
-                        s3_upload_executor.submit(
-                            cleanup_s3_checkpoints,
-                            experiment_id=mlflow.active_run().info.experiment_id,
-                            run_id=mlflow.active_run().info.run_id,
-                            save_total_limit=config.checkpoint.save_total_limit,
-                        )
-            else:
-                logger.info(f"Validation loss did not improve ({avg_val_loss:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
+        # Throughput metrics 계산
+        throughput_metrics = throughput_tracker.get_epoch_metrics()
 
-            # 다음 checkpoint 경계 설정
-            next_checkpoint_epoch += save_checkpoint_every
+        # Validation 실행 (epoch 경계에서)
+        logger.info(f"--- Validation at epoch {current_epoch:.2f} ---")
 
-        # 8. Final checkpoint
-        if config.checkpoint.save_final:
-            final_path = checkpoint_dir / "checkpoint_final.pt"
+        val_metrics = validate_critic(
+            adapter=adapter,
+            dataloader=val_loader,
+            device=device,
+            loss_type=config.training.loss_type,
+        )
 
-            # 최종 validation 실행
-            logger.info("--- Final Validation ---")
-            final_val_metrics = validate_critic(
-                adapter=adapter,
-                dataloader=val_loader,
-                device=device,
-                loss_type=config.training.loss_type,
-            )
+        # Validation metrics aggregation
+        avg_val_loss = all_reduce_scalar(val_metrics["val_loss"])
+        avg_val_explained_var = all_reduce_scalar(val_metrics["val_explained_variance"])
 
-            save_checkpoint(
+        # GPU metrics (epoch-level)
+        gpu_metrics_epoch = gpu_monitor.get_metrics()
+
+        # Epoch-level 로깅
+        if is_main_process():
+            if use_mlflow:
+                mlflow.log_metrics(
+                    {
+                        "train/epoch_loss": train_loss_avg,
+                        "val/loss": avg_val_loss,
+                        "val/explained_variance": avg_val_explained_var,
+                    "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
+                    "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
+                    "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
+                    "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
+                },
+                step=int(current_epoch * 100),  # Epoch을 정수로 변환 (0.5 -> 50)
+                )
+
+        logger.info(
+            f"Validation - Loss: {val_metrics['val_loss']:.4f}, "
+            f"Explained Variance: {val_metrics['val_explained_variance']:.4f}"
+        )
+
+        # Checkpoint 저장 (validation loss 개선 시만)
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}.pt"
+
+            save_critic_checkpoint(
                 adapter=adapter,
                 optimizer=optimizer,
                 epoch=current_epoch,
                 train_metrics={"train_loss": train_loss_avg},
-                val_metrics=final_val_metrics,
-                checkpoint_path=final_path,
+                val_metrics=val_metrics,
+                checkpoint_path=checkpoint_path,
             )
 
-            # 모든 GPU가 final checkpoint 저장 완료까지 대기
+            # 모든 GPU가 checkpoint 저장 완료까지 대기
             barrier()
 
             if is_main_process():
-                logger.info(f"Final checkpoint saved: {final_path.name}")
+                logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
+
+            # S3 업로드 (비동기)
+            if is_main_process() and use_mlflow:
+                s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_mlflow)
+
+            # 오래된 checkpoint 정리 (최대 3개 유지)
+            if config.checkpoint.save_total_limit:
+                cleanup_old_checkpoints(
+                    checkpoint_dir=checkpoint_dir,
+                    save_total_limit=config.checkpoint.save_total_limit,
+                )
+
+                # S3 정리 (비동기)
+                if is_main_process() and use_mlflow:
+                    s3_upload_executor.submit(
+                        cleanup_s3_checkpoints,
+                        experiment_id=mlflow.active_run().info.experiment_id,
+                        run_id=mlflow.active_run().info.run_id,
+                        save_total_limit=config.checkpoint.save_total_limit,
+                    )
+        else:
+            logger.info(f"Validation loss did not improve ({avg_val_loss:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
+
+        # 다음 checkpoint 경계 설정
+        next_checkpoint_epoch += save_checkpoint_every
+
+    # 8. Final checkpoint
+    if config.checkpoint.save_final:
+        final_path = checkpoint_dir / "checkpoint_final.pt"
+
+        # 최종 validation 실행
+        logger.info("--- Final Validation ---")
+        final_val_metrics = validate_critic(
+            adapter=adapter,
+            dataloader=val_loader,
+            device=device,
+            loss_type=config.training.loss_type,
+        )
+
+        save_checkpoint(
+            adapter=adapter,
+            optimizer=optimizer,
+            epoch=current_epoch,
+            train_metrics={"train_loss": train_loss_avg},
+            val_metrics=final_val_metrics,
+            checkpoint_path=final_path,
+        )
+
+        # 모든 GPU가 final checkpoint 저장 완료까지 대기
+        barrier()
+
+        if is_main_process():
+            logger.info(f"Final checkpoint saved: {final_path.name}")
 
     # 9. 모든 S3 업로드 완료 대기 및 MLflow 종료
     shutdown_s3_executor()
