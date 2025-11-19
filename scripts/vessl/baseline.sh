@@ -66,10 +66,14 @@ fi
 # Train command 생성
 if [ "$NGPUS" -eq 1 ]; then
   TRAIN_CMD="uv run python -m weighted_mtp.pipelines.run_baseline --config $CONFIG$OVERRIDE_ARGS"
-  NCCL_DEBUG=""
+  NCCL_ENV_VARS=""
 else
   TRAIN_CMD="uv run torchrun --nproc_per_node=$NGPUS --nnodes=1 --node_rank=0 -m weighted_mtp.pipelines.run_baseline --config $CONFIG$OVERRIDE_ARGS"
-  NCCL_DEBUG="\n  NCCL_DEBUG: \"INFO\""
+  # NCCL 환경변수 (Phase 1: 최소 침습적, 성능 저하 없음)
+  NCCL_ENV_VARS="\n  NCCL_TIMEOUT: \"3600\"
+  NCCL_IB_DISABLE: \"1\"
+  NCCL_SOCKET_IFNAME: \"eth0\"
+  NCCL_DEBUG: \"INFO\""
 fi
 
 # .env 파일 로드

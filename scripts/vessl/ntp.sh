@@ -69,6 +69,13 @@ if [ "$NGPUS" -eq 1 ]; then
   NCCL_DEBUG=""
 else
   TRAIN_CMD="uv run torchrun --nproc_per_node=$NGPUS --nnodes=1 --node_rank=0 -m weighted_mtp.pipelines.run_baseline --config $CONFIG$OVERRIDE_ARGS"
+# NCCL 디버깅 및 안정화 (Hang 방지)
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=ALL
+export NCCL_IB_DISABLE=1
+export NCCL_P2P_DISABLE=1
+export NCCL_NET_GDR_LEVEL=0
+export NCCL_SOCKET_IFNAME=eth0
   NCCL_DEBUG="\n  NCCL_DEBUG: \"INFO\""
 fi
 
