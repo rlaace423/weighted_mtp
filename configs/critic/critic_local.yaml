@@ -37,7 +37,7 @@ data_sampling:
 training:
   n_epochs: 0.1
   batch_size: 2
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 4
   learning_rate: 1.0e-4
   max_grad_norm: 0.5
   loss_type: mse

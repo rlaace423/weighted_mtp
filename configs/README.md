@@ -329,7 +329,7 @@ data_sampling:
 
 training:
   n_epochs: 0.5
-  batch_size: 8
+  batch_size: 4
   learning_rate: 1.0e-4
   loss_type: mse               # Value loss type
 ```

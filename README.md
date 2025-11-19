@@ -88,7 +88,7 @@ PYTHONPATH=src python src/weighted_mtp/pipelines/run_critic.py \
 ```yaml
 training:
   n_epochs: 1.0
-  batch_size: 8  # Per GPU
+  batch_size: 4  # Per GPU
   learning_rate: 1.0e-4
   loss_type: mse
 ```

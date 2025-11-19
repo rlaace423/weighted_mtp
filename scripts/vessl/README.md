@@ -299,7 +299,7 @@ training:
 
 # Override 후
 training:
-  batch_size: 8          # 덮어쓰기됨
+  batch_size: 4          # 덮어쓰기됨
   gradient_accumulation_steps: 3  # 덮어쓰기됨
 ```
 
