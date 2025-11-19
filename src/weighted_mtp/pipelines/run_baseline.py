@@ -248,8 +248,8 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
         shuffle=True,
     )
 
-    # Validation 샘플 수: train의 10% 또는 최소 100개
-    val_n_samples = max(100, config.data_sampling.n_samples // 10)
+    # Validation 샘플 수: train의 5% 또는 최소 100개
+    val_n_samples = max(100, config.data_sampling.n_samples // 20)
 
     val_loader = create_dataloader(
         dataset_path=config.dataset.validation,
