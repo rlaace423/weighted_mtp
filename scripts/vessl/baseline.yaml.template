@@ -9,7 +9,7 @@ tags:
 resources:
   cluster: vessl-kr-a100-80g-sxm
   preset: {{PRESET}}
-image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+image: {{IMAGE}}
 import:
   /app:
     git:
@@ -32,23 +32,7 @@ run:
     command: |
       set -e
 
-      echo "=== 시스템 패키지 설치 ==="
-      apt-get update && apt-get install -y curl git
-
-      echo "=== UV 설치 ==="
-      curl -LsSf https://astral.sh/uv/install.sh | sh
-      export PATH="$HOME/.local/bin:$PATH"
-      uv --version
-
-      echo "=== Storage 심볼릭 링크 생성 ==="
-      mkdir -p storage
-      ln -s /vessl/models storage/models
-      ln -s /vessl/datasets storage/datasets
-      ln -s /vessl/checkpoints storage/checkpoints
-      ls -lh storage/
-
-      echo "=== Python 의존성 설치 ==="
-      uv sync --frozen
+{{SETUP_COMMANDS}}
 
       echo "=== GPU 정보 확인 ==="
       nvidia-smi

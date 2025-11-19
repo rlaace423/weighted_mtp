@@ -11,6 +11,7 @@ set -e
 NGPUS=4
 BATCH_SIZE=""
 GRAD_ACCUM=""
+USE_CUSTOM_IMAGE=false
 
 # CLI 인자 파싱
 while [[ $# -gt 0 ]]; do
@@ -27,9 +28,13 @@ while [[ $# -gt 0 ]]; do
       GRAD_ACCUM="$2"
       shift 2
       ;;
+    --use-custom-image)
+      USE_CUSTOM_IMAGE=true
+      shift 1
+      ;;
     *)
       echo "알 수 없는 옵션: $1"
-      echo "사용법: $0 --ngpus <1|2|4> [--batch-size N] [--grad-accum N]"
+      echo "사용법: $0 --ngpus <1|2|4> [--batch-size N] [--grad-accum N] [--use-custom-image]"
       exit 1
       ;;
   esac
@@ -81,10 +86,71 @@ TEMP_YAML=$(mktemp)
 cp scripts/vessl/baseline.yaml.template "$TEMP_YAML"
 
 # 변수 치환
+# Image 및 Setup Command 설정
+if [ "$USE_CUSTOM_IMAGE" = true ]; then
+  IMAGE="ghcr.io/wooshikwon/weighted_mtp:main"
+  SETUP_COMMANDS="
+      echo \"=== Storage 심볼릭 링크 생성 ===\"
+      mkdir -p storage
+      ln -s /vessl/models storage/models
+      ln -s /vessl/datasets storage/datasets
+      ln -s /vessl/checkpoints storage/checkpoints
+      ls -lh storage/
+  "
+else
+  IMAGE="pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel"
+  SETUP_COMMANDS="
+      echo \"=== 시스템 패키지 설치 ===\"
+      apt-get update && apt-get install -y curl git
+
+      echo \"=== UV 설치 ===\"
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      export PATH=\"\$HOME/.local/bin:\$PATH\"
+      uv --version
+
+      echo \"=== Storage 심볼릭 링크 생성 ===\"
+      mkdir -p storage
+      ln -s /vessl/models storage/models
+      ln -s /vessl/datasets storage/datasets
+      ln -s /vessl/checkpoints storage/checkpoints
+      ls -lh storage/
+
+      echo \"=== Python 의존성 설치 ===\"
+      uv sync --frozen
+  "
+fi
+
+# 변수 치환
 sed -i.bak "s|{{NGPUS}}|$NGPUS|g" "$TEMP_YAML"
 sed -i.bak "s|{{PRESET}}|$PRESET|g" "$TEMP_YAML"
 sed -i.bak "s|{{TRAIN_COMMAND}}|$TRAIN_CMD|g" "$TEMP_YAML"
 sed -i.bak "s|{{NCCL_DEBUG}}|$NCCL_DEBUG|g" "$TEMP_YAML"
+sed -i.bak "s|{{IMAGE}}|$IMAGE|g" "$TEMP_YAML"
+# SETUP_COMMANDS는 여러 줄이므로 다른 구분자 사용 및 개행 처리 주의
+# sed의 대체 구문에 개행이 들어가면 문제가 될 수 있으므로, perl을 사용하거나 setup commands를 파일로 분리하는 것이 좋지만,
+# 여기서는 간단히 sed로 처리하기 위해 개행을 리터럴 \n으로 변경하여 처리하거나,
+# 템플릿 구조상 단순히 문자열 치환을 시도함.
+# 하지만 SETUP_COMMANDS 내부의 따옴표 등이 쉘 변수 확장과 sed 파싱에서 문제를 일으킬 수 있음.
+# 가장 안전한 방법은 awk나 perl을 사용하는 것임.
+# 여기서는 간단하게 SETUP_COMMANDS 내용을 임시 파일에 쓰고 sed로 읽어들이는 방식을 사용하거나,
+# 템플릿에 {{SETUP_COMMANDS}}가 한 줄에 있으므로, 해당 줄을 통째로 교체하는 방식을 사용.
+
+# SETUP_COMMANDS의 줄바꿈을 이스케이프하여 sed에 전달
+ESCAPED_SETUP_COMMANDS=$(echo "$SETUP_COMMANDS" | sed 's/$/\\/g' | sed '$s/\\$//')
+# sed 명령어가 복잡해지므로, perl을 사용하여 치환 (macOS/Linux 호환성 고려)
+# 또는 더 단순하게: 템플릿의 {{SETUP_COMMANDS}} 라인을 찾아서 그 위치에 내용을 삽입.
+
+# awk를 사용하여 치환 (가장 안전)
+awk -v image="$IMAGE" -v setup="$SETUP_COMMANDS" '
+  {
+    gsub("{{IMAGE}}", image);
+    if (index($0, "{{SETUP_COMMANDS}}") > 0) {
+      print setup;
+    } else {
+      print $0;
+    }
+  }
+' "$TEMP_YAML" > "${TEMP_YAML}.tmp" && mv "${TEMP_YAML}.tmp" "$TEMP_YAML"
 
 # 환경변수 치환
 sed -i.bak "s|{{MLFLOW_TRACKING_USERNAME}}|$MLFLOW_TRACKING_USERNAME|g" "$TEMP_YAML"
