@@ -75,14 +75,15 @@ def cleanup_s3_checkpoints(
     checkpoint_best.pt와 checkpoint_final.pt는 유지
 
     Args:
-        experiment_id: MLflow experiment ID
+        experiment_id: MLflow experiment ID (사용되지 않음, 호환성 유지)
         run_id: MLflow run ID
         save_total_limit: 유지할 최대 개수
     """
     try:
         s3 = boto3.client("s3")
         bucket = "wmtp"
-        prefix = f"mlflow-artifacts/{experiment_id}/{run_id}/artifacts/checkpoints/"
+        # MLflow artifact URI 구조: s3://wmtp/mlflow-artifacts/{run_id}/artifacts/
+        prefix = f"mlflow-artifacts/{run_id}/artifacts/checkpoints/"
 
         # S3에서 checkpoint 목록 직접 조회
         response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)

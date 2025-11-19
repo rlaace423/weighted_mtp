@@ -77,15 +77,15 @@ def test_cleanup_s3_checkpoints_success(mock_boto3):
 
     mock_s3.list_objects_v2.return_value = {
         "Contents": [
-            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_1.00.pt",
+            {"Key": "mlflow-artifacts/abc123/artifacts/checkpoints/checkpoint_epoch_1.00.pt",
              "LastModified": base_time + timedelta(hours=1)},
-            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_2.00.pt",
+            {"Key": "mlflow-artifacts/abc123/artifacts/checkpoints/checkpoint_epoch_2.00.pt",
              "LastModified": base_time + timedelta(hours=2)},
-            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_3.00.pt",
+            {"Key": "mlflow-artifacts/abc123/artifacts/checkpoints/checkpoint_epoch_3.00.pt",
              "LastModified": base_time + timedelta(hours=3)},
-            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_4.00.pt",
+            {"Key": "mlflow-artifacts/abc123/artifacts/checkpoints/checkpoint_epoch_4.00.pt",
              "LastModified": base_time + timedelta(hours=4)},
-            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_5.00.pt",
+            {"Key": "mlflow-artifacts/abc123/artifacts/checkpoints/checkpoint_epoch_5.00.pt",
              "LastModified": base_time + timedelta(hours=5)},
         ]
     }
@@ -102,9 +102,9 @@ def test_cleanup_s3_checkpoints_success(mock_boto3):
 
     # 삭제된 파일 확인
     deleted_keys = [call.kwargs["Key"] for call in mock_s3.delete_object.call_args_list]
-    assert "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_1.00.pt" in deleted_keys
-    assert "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_2.00.pt" in deleted_keys
-    assert "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_3.00.pt" in deleted_keys
+    assert "mlflow-artifacts/abc123/artifacts/checkpoints/checkpoint_epoch_1.00.pt" in deleted_keys
+    assert "mlflow-artifacts/abc123/artifacts/checkpoints/checkpoint_epoch_2.00.pt" in deleted_keys
+    assert "mlflow-artifacts/abc123/artifacts/checkpoints/checkpoint_epoch_3.00.pt" in deleted_keys
 
 
 @patch("weighted_mtp.utils.s3_utils.boto3")
@@ -120,9 +120,9 @@ def test_cleanup_s3_checkpoints_no_deletion(mock_boto3):
 
     mock_s3.list_objects_v2.return_value = {
         "Contents": [
-            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_4.00.pt",
+            {"Key": "mlflow-artifacts/abc123/artifacts/checkpoints/checkpoint_epoch_4.00.pt",
              "LastModified": base_time + timedelta(hours=4)},
-            {"Key": "mlflow-artifacts/1/abc123/artifacts/checkpoints/checkpoint_epoch_5.00.pt",
+            {"Key": "mlflow-artifacts/abc123/artifacts/checkpoints/checkpoint_epoch_5.00.pt",
              "LastModified": base_time + timedelta(hours=5)},
         ]
     }
