@@ -151,8 +151,8 @@ data_sampling:
 ```yaml
 training:
   n_epochs: 2.5                # Epoch 수
-  batch_size: 4                # Batch size (per GPU)
-  gradient_accumulation_steps: 4  # Gradient accumulation
+  batch_size: 8                # Batch size (per GPU)
+  gradient_accumulation_steps: 2  # Gradient accumulation
   learning_rate: 1.0e-5        # Learning rate
   max_grad_norm: 0.5           # Gradient clipping
   log_interval: 1             # 로깅 간격 (steps)
@@ -306,7 +306,7 @@ data_sampling:
 
 training:
   n_epochs: 2.5
-  batch_size: 4
+  batch_size: 8
   learning_rate: 1.0e-5
 ```
 
@@ -329,7 +329,7 @@ data_sampling:
 
 training:
   n_epochs: 0.5
-  batch_size: 4
+  batch_size: 8
   learning_rate: 1.0e-4
   loss_type: mse               # Value loss type
 ```

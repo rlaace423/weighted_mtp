@@ -295,11 +295,11 @@ Python 파이프라인에서 `apply_overrides()` 함수가 config를 동적으�
 # configs/critic/critic.yaml
 training:
   batch_size: 6          # 기본값
-  gradient_accumulation_steps: 4  # 기본값
+  gradient_accumulation_steps: 2  # 기본값
 
 # Override 후
 training:
-  batch_size: 4          # 덮어쓰기됨
+  batch_size: 8          # 덮어쓰기됨
   gradient_accumulation_steps: 3  # 덮어쓰기됨
 ```
 

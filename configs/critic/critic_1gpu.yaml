@@ -51,8 +51,8 @@ data_sampling:
 # 학습 설정 (A100 1-GPU + Flash Attention 최적화)
 training:
   n_epochs: 1.0  # 명확한 1 epoch (Anthropic fine-tuning 표준)
-  batch_size: 4  # Flash Attention 적용 시 최적값
-  gradient_accumulation_steps: 4  # Effective batch size = 16
+  batch_size: 8  # Flash Attention 적용 시 최적값
+  gradient_accumulation_steps: 2  # Effective batch size = 16
   learning_rate: 1.0e-4  # Critic은 높은 LR
   max_grad_norm: 0.5
   loss_type: mse

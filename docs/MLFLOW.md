@@ -92,7 +92,7 @@ weighted-mtp/
 ```python
 # 예시
 training.learning_rate: 1e-5
-training.batch_size: 4
+training.batch_size: 8
 experiment.name: verifiable-a100-4gpu
 data_sampling.n_samples: 100000
 ```
