@@ -49,7 +49,7 @@ def compute_gradient_clip_stats(
     """Gradient clipping 전후 통계 계산
 
     Args:
-        parameters: 모델 파라미터 iterator
+        parameters: 모델 파라미터 iterator (optimizer.param_groups에서 추출 권장)
         max_grad_norm: Gradient clipping threshold
 
     Returns:
@@ -58,20 +58,23 @@ def compute_gradient_clip_stats(
             - grad_norm_post_clip: Clipping 후 gradient norm
             - grad_clip_ratio: Clipping 비율 (post/pre)
     """
+    # Generator를 list로 변환하여 재사용 가능하게 함
+    params_list = list(parameters)
+
     # Clipping 전 gradient norm
     total_norm_pre = 0.0
-    for p in parameters:
+    for p in params_list:
         if p.grad is not None:
             param_norm = p.grad.data.norm(2)
             total_norm_pre += param_norm.item() ** 2
     grad_norm_pre = total_norm_pre**0.5
 
     # Clipping 수행
-    torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm)
+    torch.nn.utils.clip_grad_norm_(params_list, max_grad_norm)
 
     # Clipping 후 gradient norm
     total_norm_post = 0.0
-    for p in parameters:
+    for p in params_list:
         if p.grad is not None:
             param_norm = p.grad.data.norm(2)
             total_norm_post += param_norm.item() ** 2

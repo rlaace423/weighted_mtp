@@ -394,8 +394,10 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
                 # Gradient clipping with statistics
                 if config.training.max_grad_norm > 0:
+                    # Optimizer에 등록된 파라미터만 추적 (Frozen 파라미터 제외 및 Generator 소진 방지)
+                    params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
                     grad_clip_stats = compute_gradient_clip_stats(
-                        adapter.parameters(),
+                        params_with_grad,
                         config.training.max_grad_norm,
                     )
                 else:
