@@ -1,15 +1,15 @@
-name: weighted-mtp-rho1-4gpu
-description: Rho-1 WMTP A100 4-GPU 프로덕션 학습 (Reference-based Weighting)
+name: weighted-mtp-rho1-{{NGPUS}}gpu
+description: Rho-1 WMTP A100 {{NGPUS}}-GPU 프로덕션 학습
 tags:
   - weighted-mtp
   - rho1
   - reference-weighting
   - a100
-  - 4gpu
+  - {{NGPUS}}gpu
   - production
 resources:
   cluster: vessl-kr-a100-80g-sxm
-  preset: gpu-a100-80g-large
+  preset: {{PRESET}}
 image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 import:
   /app:
@@ -27,8 +27,7 @@ env:
   AWS_DEFAULT_REGION: "{{AWS_DEFAULT_REGION}}"
   HF_TOKEN: "{{HF_TOKEN}}"
   PYTHONUNBUFFERED: "1"
-  TOKENIZERS_PARALLELISM: "false"
-  NCCL_DEBUG: "INFO"
+  TOKENIZERS_PARALLELISM: "false"{{NCCL_DEBUG}}
 run:
   - workdir: /app
     command: |
@@ -61,13 +60,5 @@ run:
       echo "Datasets:"
       ls -lh storage/datasets/ | head -5
 
-      echo "=== Reference Model 확인 ==="
-      ls -lh storage/models/ref-sheared-llama-2.7b/ || echo "경고: Reference model이 존재하지 않습니다"
-
-      echo "=== Rho-1 WMTP 학습 시작 (4-GPU Distributed) ==="
-      uv run torchrun \
-        --nproc_per_node=4 \
-        --nnodes=1 \
-        --node_rank=0 \
-        -m weighted_mtp.pipelines.run_rho1 \
-        --config configs/rho1/rho1.yaml
+      echo "=== Rho-1 WMTP 학습 시작 ({{NGPUS}}-GPU) ==="
+      {{TRAIN_COMMAND}}

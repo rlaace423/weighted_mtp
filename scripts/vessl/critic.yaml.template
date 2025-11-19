@@ -1,15 +1,15 @@
-name: weighted-mtp-critic-4gpu
-description: Critic Pretraining A100 4-GPU 프로덕션 학습
+name: weighted-mtp-critic-{{NGPUS}}gpu
+description: Critic Pretraining A100 {{NGPUS}}-GPU 프로덕션 학습
 tags:
   - weighted-mtp
   - critic
   - value-head
   - a100
-  - 4gpu
+  - {{NGPUS}}gpu
   - production
 resources:
   cluster: vessl-kr-a100-80g-sxm
-  preset: gpu-a100-80g-large
+  preset: {{PRESET}}
 image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 import:
   /app:
@@ -27,8 +27,7 @@ env:
   AWS_DEFAULT_REGION: "{{AWS_DEFAULT_REGION}}"
   HF_TOKEN: "{{HF_TOKEN}}"
   PYTHONUNBUFFERED: "1"
-  TOKENIZERS_PARALLELISM: "false"
-  NCCL_DEBUG: "INFO"
+  TOKENIZERS_PARALLELISM: "false"{{NCCL_DEBUG}}
 run:
   - workdir: /app
     command: |
@@ -61,10 +60,5 @@ run:
       echo "Datasets:"
       ls -lh storage/datasets/ | head -5
 
-      echo "=== Critic Pretraining 시작 (4-GPU Distributed) ==="
-      uv run torchrun \
-        --nproc_per_node=4 \
-        --nnodes=1 \
-        --node_rank=0 \
-        -m weighted_mtp.pipelines.run_critic \
-        --config configs/critic/critic.yaml
+      echo "=== Critic Pretraining 시작 ({{NGPUS}}-GPU) ==="
+      {{TRAIN_COMMAND}}

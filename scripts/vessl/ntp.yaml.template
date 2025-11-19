@@ -1,15 +1,15 @@
-name: weighted-mtp-verifiable-4gpu
-description: Verifiable WMTP A100 4-GPU 프로덕션 학습 (TD Error Weighting)
+name: weighted-mtp-ntp-{{NGPUS}}gpu
+description: NTP Baseline A100 {{NGPUS}}-GPU 프로덕션 학습
 tags:
   - weighted-mtp
-  - verifiable
-  - td-weighting
+  - ntp
+  - baseline
   - a100
-  - 4gpu
+  - {{NGPUS}}gpu
   - production
 resources:
   cluster: vessl-kr-a100-80g-sxm
-  preset: gpu-a100-80g-large
+  preset: {{PRESET}}
 image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 import:
   /app:
@@ -27,9 +27,7 @@ env:
   AWS_DEFAULT_REGION: "{{AWS_DEFAULT_REGION}}"
   HF_TOKEN: "{{HF_TOKEN}}"
   PYTHONUNBUFFERED: "1"
-  TOKENIZERS_PARALLELISM: "false"
-  NCCL_DEBUG: "INFO"
-  CRITIC_CHECKPOINT: "{{CRITIC_CHECKPOINT}}"
+  TOKENIZERS_PARALLELISM: "false"{{NCCL_DEBUG}}
 run:
   - workdir: /app
     command: |
@@ -61,23 +59,6 @@ run:
       ls -lh storage/models/ | head -5
       echo "Datasets:"
       ls -lh storage/datasets/ | head -5
-      echo "Checkpoints:"
-      ls -lh storage/checkpoints/ | head -5
 
-      echo "=== Critic Checkpoint 확인 ==="
-      if [ -z "$CRITIC_CHECKPOINT" ]; then
-        echo "경고: CRITIC_CHECKPOINT 환경변수가 설정되지 않았습니다"
-        echo "기본값 사용: storage/checkpoints/critic/critic-pretrain/checkpoint_best.pt"
-        CRITIC_CHECKPOINT="storage/checkpoints/critic/critic-pretrain/checkpoint_best.pt"
-      fi
-      echo "Critic checkpoint: $CRITIC_CHECKPOINT"
-      ls -lh "$CRITIC_CHECKPOINT" || echo "경고: Checkpoint 파일이 존재하지 않습니다"
-
-      echo "=== Verifiable WMTP 학습 시작 (4-GPU Distributed) ==="
-      uv run torchrun \
-        --nproc_per_node=4 \
-        --nnodes=1 \
-        --node_rank=0 \
-        -m weighted_mtp.pipelines.run_verifiable \
-        --config configs/verifiable/verifiable.yaml \
-        --override experiment.critic_checkpoint="$CRITIC_CHECKPOINT"
+      echo "=== NTP Baseline 학습 시작 ({{NGPUS}}-GPU) ==="
+      {{TRAIN_COMMAND}}

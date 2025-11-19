@@ -1,0 +1,118 @@
+#!/bin/bash
+# VESSL Run: Rho-1 WMTP (Unified)
+#
+# 사용법:
+#   ./scripts/vessl/rho1.sh --ngpus 4
+#   ./scripts/vessl/rho1.sh --ngpus 2 --batch-size 8 --grad-accum 2
+
+set -e
+
+# 기본값
+NGPUS=4
+BATCH_SIZE=""
+GRAD_ACCUM=""
+
+# CLI 인자 파싱
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --ngpus)
+      NGPUS="$2"
+      shift 2
+      ;;
+    --batch-size)
+      BATCH_SIZE="$2"
+      shift 2
+      ;;
+    --grad-accum)
+      GRAD_ACCUM="$2"
+      shift 2
+      ;;
+    *)
+      echo "알 수 없는 옵션: $1"
+      echo "사용법: $0 --ngpus <1|2|4> [--batch-size N] [--grad-accum N]"
+      exit 1
+      ;;
+  esac
+done
+
+# Preset 자동 선택
+case $NGPUS in
+  1) PRESET="gpu-a100-80g-small" ;;
+  2) PRESET="gpu-a100-80g-medium" ;;
+  4) PRESET="gpu-a100-80g-large" ;;
+  *)
+    echo "오류: NGPUS=$NGPUS (1, 2, 4만 지원)"
+    exit 1
+    ;;
+esac
+
+# Config (모든 GPU 수에 대해 동일)
+CONFIG="configs/rho1/rho1.yaml"
+
+# Override 인자 생성
+OVERRIDE_ARGS=""
+if [ -n "$BATCH_SIZE" ]; then
+  OVERRIDE_ARGS="$OVERRIDE_ARGS --override training.batch_size=$BATCH_SIZE"
+fi
+if [ -n "$GRAD_ACCUM" ]; then
+  OVERRIDE_ARGS="$OVERRIDE_ARGS --override training.gradient_accumulation_steps=$GRAD_ACCUM"
+fi
+
+# Train command 생성
+if [ "$NGPUS" -eq 1 ]; then
+  TRAIN_CMD="uv run python -m weighted_mtp.pipelines.run_rho1 --config $CONFIG$OVERRIDE_ARGS"
+  NCCL_DEBUG=""
+else
+  TRAIN_CMD="uv run torchrun --nproc_per_node=$NGPUS --nnodes=1 --node_rank=0 -m weighted_mtp.pipelines.run_rho1 --config $CONFIG$OVERRIDE_ARGS"
+  NCCL_DEBUG="\n  NCCL_DEBUG: \"INFO\""
+fi
+
+# .env 파일 로드
+if [ -f .env ]; then
+    source .env
+    echo "환경변수 로드 완료: .env"
+else
+    echo "오류: .env 파일을 찾을 수 없습니다"
+    exit 1
+fi
+
+# 임시 YAML 파일 생성
+TEMP_YAML=$(mktemp)
+cp scripts/vessl/rho1.yaml.template "$TEMP_YAML"
+
+# 변수 치환
+sed -i.bak "s|{{NGPUS}}|$NGPUS|g" "$TEMP_YAML"
+sed -i.bak "s|{{PRESET}}|$PRESET|g" "$TEMP_YAML"
+sed -i.bak "s|{{TRAIN_COMMAND}}|$TRAIN_CMD|g" "$TEMP_YAML"
+sed -i.bak "s|{{NCCL_DEBUG}}|$NCCL_DEBUG|g" "$TEMP_YAML"
+
+# 환경변수 치환
+sed -i.bak "s|{{MLFLOW_TRACKING_USERNAME}}|$MLFLOW_TRACKING_USERNAME|g" "$TEMP_YAML"
+sed -i.bak "s|{{MLFLOW_TRACKING_PASSWORD}}|$MLFLOW_TRACKING_PASSWORD|g" "$TEMP_YAML"
+sed -i.bak "s|{{AWS_ACCESS_KEY_ID}}|$AWS_ACCESS_KEY_ID|g" "$TEMP_YAML"
+sed -i.bak "s|{{AWS_SECRET_ACCESS_KEY}}|$AWS_SECRET_ACCESS_KEY|g" "$TEMP_YAML"
+sed -i.bak "s|{{AWS_DEFAULT_REGION}}|$AWS_DEFAULT_REGION|g" "$TEMP_YAML"
+sed -i.bak "s|{{HF_TOKEN}}|$HF_TOKEN|g" "$TEMP_YAML"
+
+echo "환경변수 치환 완료"
+echo "임시 YAML: $TEMP_YAML"
+
+# 설정 요약 출력
+echo ""
+echo "=== 실행 설정 ==="
+echo "GPU 개수: $NGPUS"
+[ -n "$BATCH_SIZE" ] && echo "Batch Size: $BATCH_SIZE (override)"
+[ -n "$GRAD_ACCUM" ] && echo "Gradient Accumulation: $GRAD_ACCUM (override)"
+
+# VESSL Run 실행
+echo ""
+echo "=== VESSL Run 실행: Rho-1 WMTP ($NGPUS-GPU) ==="
+vessl run create -f "$TEMP_YAML"
+
+# 정리
+rm -f "$TEMP_YAML" "${TEMP_YAML}.bak"
+
+echo ""
+echo "=== 실행 완료 ==="
+echo "VESSL 웹 UI에서 실행 상태를 확인하세요: https://vessl.ai"
+echo "MLflow UI: http://13.50.240.176"

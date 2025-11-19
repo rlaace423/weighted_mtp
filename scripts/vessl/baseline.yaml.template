@@ -1,15 +1,14 @@
-name: weighted-mtp-ntp-1gpu
-description: NTP Baseline A100 1-GPU 프로덕션 학습
+name: weighted-mtp-baseline-{{NGPUS}}gpu
+description: Baseline MTP A100 {{NGPUS}}-GPU 프로덕션 학습
 tags:
   - weighted-mtp
-  - ntp
   - baseline
   - a100
-  - 1gpu
+  - {{NGPUS}}gpu
   - production
 resources:
   cluster: vessl-kr-a100-80g-sxm
-  preset: gpu-a100-80g-small
+  preset: {{PRESET}}
 image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 import:
   /app:
@@ -27,7 +26,7 @@ env:
   AWS_DEFAULT_REGION: "{{AWS_DEFAULT_REGION}}"
   HF_TOKEN: "{{HF_TOKEN}}"
   PYTHONUNBUFFERED: "1"
-  TOKENIZERS_PARALLELISM: "false"
+  TOKENIZERS_PARALLELISM: "false"{{NCCL_DEBUG}}
 run:
   - workdir: /app
     command: |
@@ -60,6 +59,5 @@ run:
       echo "Datasets:"
       ls -lh storage/datasets/ | head -5
 
-      echo "=== NTP Baseline 학습 시작 (1-GPU) ==="
-      uv run python -m weighted_mtp.pipelines.run_baseline \
-        --config configs/ntp/ntp.yaml
+      echo "=== Baseline MTP 학습 시작 ({{NGPUS}}-GPU) ==="
+      {{TRAIN_COMMAND}}
