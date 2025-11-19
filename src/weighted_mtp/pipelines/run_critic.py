@@ -26,6 +26,7 @@ from weighted_mtp.utils import (
     ThroughputTracker,
     cleanup_old_checkpoints,
     cleanup_s3_checkpoints,
+    compute_gradient_clip_stats,
     compute_gradient_norm,
     compute_value_function_stats,
     get_model_size,
@@ -98,6 +99,7 @@ def validate_critic(
             # 1. Batch를 device로 이동
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
             is_correct = batch["is_correct"].to(device)
 
             # 2. is_correct → rewards 변환 (모델 dtype 일치)
@@ -112,8 +114,10 @@ def validate_critic(
             # 4. Value target 생성
             value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
 
-            # Mask padded tokens (모델 dtype 일치)
-            loss_mask = attention_mask.unsqueeze(-1).to(model_dtype)
+            # Mask padded tokens AND instruction tokens (labels != -100)
+            # labels != -100 means it's a target token (output)
+            valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
+            loss_mask = valid_label_mask
 
             # 5. Value loss 계산
             if loss_type == "mse":
@@ -129,7 +133,7 @@ def validate_critic(
 
             # Masked loss
             masked_loss = loss_per_token * loss_mask
-            value_loss = masked_loss.sum() / loss_mask.sum()
+            value_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)
 
             # 6. Metrics 수집
             total_loss += value_loss.item()
@@ -356,6 +360,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
+                labels = batch["labels"].to(device)
                 is_correct = batch["is_correct"].to(device)
 
                 # 모델 dtype 일치
@@ -365,8 +370,10 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
                 batch_size, seq_len, _ = value_logits.shape
                 value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
-                # 모델 dtype 일치
-                loss_mask = attention_mask.unsqueeze(-1).to(model_dtype)
+                # Mask padded tokens AND instruction tokens (labels != -100)
+                # labels != -100 means it's a target token (output)
+                valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
+                loss_mask = valid_label_mask
 
                 if config.training.loss_type == "mse":
                     loss_per_token = torch.nn.functional.mse_loss(
@@ -380,13 +387,24 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     raise ValueError(f"Unknown loss_type: {config.training.loss_type}")
 
                 masked_loss = loss_per_token * loss_mask
-                value_loss = masked_loss.sum() / loss_mask.sum()
+                value_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)  # Prevent division by zero
 
                 optimizer.zero_grad()
                 value_loss.backward()
 
-                # Gradient norm 계산 (clipping 전)
-                grad_norm_dict = compute_gradient_norm(adapter)
+                # Gradient clipping with statistics
+                if config.training.max_grad_norm > 0:
+                    grad_clip_stats = compute_gradient_clip_stats(
+                        adapter.parameters(),
+                        config.training.max_grad_norm,
+                    )
+                else:
+                    grad_norm_dict = compute_gradient_norm(adapter)
+                    grad_clip_stats = {
+                        "grad_norm_pre_clip": grad_norm_dict["grad_norm"],
+                        "grad_norm_post_clip": grad_norm_dict["grad_norm"],
+                        "grad_clip_ratio": 1.0,
+                    }
 
                 optimizer.step()
 
@@ -415,7 +433,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
                     # Metric aggregation (DDP)
                     avg_loss = all_reduce_scalar(value_loss.item())
-                    avg_grad_norm = all_reduce_scalar(grad_norm_dict["grad_norm"])
+                    avg_grad_norm_post = all_reduce_scalar(grad_clip_stats["grad_norm_post_clip"])
+                    avg_grad_norm_pre = all_reduce_scalar(grad_clip_stats["grad_norm_pre_clip"])
+                    avg_grad_clip_ratio = all_reduce_scalar(grad_clip_stats["grad_clip_ratio"])
                     avg_value_mean = all_reduce_scalar(value_stats["value_mean"])
                     avg_value_std = all_reduce_scalar(value_stats["value_std"])
 
@@ -424,7 +444,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                             mlflow.log_metrics(
                                 {
                                     "train/loss": avg_loss,
-                                    "train/grad_norm": avg_grad_norm,
+                                    "train/grad_norm": avg_grad_norm_post,
+                                    "train/grad_norm_pre_clip": avg_grad_norm_pre,
+                                    "train/grad_clip_ratio": avg_grad_clip_ratio,
                                     "train/learning_rate": optimizer.param_groups[0]["lr"],
                                     "value/mean_prediction": avg_value_mean,
                                     "value/std_prediction": avg_value_std,
@@ -437,7 +459,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     logger.info(
                         f"Step {global_step}/{batches_to_run}, "
                         f"Loss: {avg_loss:.4f}, "
-                        f"Grad Norm: {avg_grad_norm:.4f}"
+                        f"Grad Norm: {avg_grad_norm_post:.4f} (Clip Ratio: {avg_grad_clip_ratio:.2f})"
                     )
 
             # Epoch 경계 도달

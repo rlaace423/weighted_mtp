@@ -23,6 +23,7 @@ build/
 
 # Logs & temp
 *.log
+*.txt
 *.tmp
 *.bak
 

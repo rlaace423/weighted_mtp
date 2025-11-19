@@ -61,8 +61,18 @@ runtime:
   mixed_precision: false
 
 storage:
+  root: storage
+  models_dir: storage/models
+  datasets_dir: storage/datasets
+  checkpoints_dir: storage/checkpoints
   s3_bucket: "s3://wmtp"
   s3_checkpoints_prefix: "checkpoints/rho1"
+
+distributed:
+  fsdp:
+    sharding_strategy: NO_SHARD
+    mixed_precision: false
+    cpu_offload: false
 
 mlflow:
   tracking_uri: ""
@@ -71,3 +81,4 @@ mlflow:
 
 logging:
   level: INFO
+  format: "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"

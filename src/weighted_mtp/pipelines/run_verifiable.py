@@ -194,7 +194,10 @@ def validate_verifiable(
 
             # 7. Value loss (모델 dtype 일치)
             value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
-            loss_mask = attention_mask.unsqueeze(-1).to(model_dtype)
+            
+            # Mask padded tokens AND instruction tokens (labels != -100)
+            valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
+            loss_mask = valid_label_mask
 
             if loss_type == "mse":
                 loss_per_token = F.mse_loss(value_logits, value_targets, reduction="none")
@@ -204,7 +207,7 @@ def validate_verifiable(
                 raise ValueError(f"Unknown loss_type: {loss_type}")
 
             masked_value_loss = loss_per_token * loss_mask
-            value_loss = masked_value_loss.sum() / loss_mask.sum()
+            value_loss = masked_value_loss.sum() / (loss_mask.sum() + 1e-8)
 
             # 8. Total loss
             total_loss = weighted_ce_loss + value_coef * value_loss
@@ -531,7 +534,10 @@ def run_verifiable_training(
 
             # Value loss (Continual Learning, 모델 dtype 일치)
             value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
-            loss_mask = attention_mask.unsqueeze(-1).to(model_dtype)
+            
+            # Mask padded tokens AND instruction tokens (labels != -100)
+            valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
+            loss_mask = valid_label_mask
 
             if config.training.loss_type == "mse":
                 loss_per_token = F.mse_loss(value_logits, value_targets, reduction="none")
@@ -543,7 +549,7 @@ def run_verifiable_training(
                 raise ValueError(f"Unknown loss_type: {config.training.loss_type}")
 
             masked_value_loss = loss_per_token * loss_mask
-            value_loss = masked_value_loss.sum() / loss_mask.sum()
+            value_loss = masked_value_loss.sum() / (loss_mask.sum() + 1e-8)
 
             # Total loss
             total_loss = weighted_ce_loss + config.training.value_coef * value_loss
