@@ -226,6 +226,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         mixed_precision=config.distributed.fsdp.mixed_precision,
         cpu_offload=config.distributed.fsdp.cpu_offload,
         activation_checkpointing=config.distributed.fsdp.get("activation_checkpointing", False),
+        ignored_modules=[adapter.value_head],
     )
     tokenizer = load_tokenizer_from_config(config)
 

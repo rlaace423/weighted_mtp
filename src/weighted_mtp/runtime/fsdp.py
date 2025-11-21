@@ -32,6 +32,7 @@ def wrap_model_fsdp(
     mixed_precision: bool = True,
     cpu_offload: bool = False,
     activation_checkpointing: bool = False,
+    ignored_modules: list[torch.nn.Module] | None = None,
 ) -> torch.nn.Module:
     """FSDP로 모델 래핑
 
@@ -47,6 +48,7 @@ def wrap_model_fsdp(
         mixed_precision: FP16 mixed precision 사용 여부
         cpu_offload: CPU 오프로드 (메모리 부족 시)
         activation_checkpointing: Activation checkpointing 적용 여부 (메모리 절감)
+        ignored_modules: FSDP wrapping에서 제외할 모듈 리스트 (개별 학습 필요 시)
 
     Returns:
         FSDP-wrapped model (또는 원본 model if not distributed)
@@ -107,6 +109,7 @@ def wrap_model_fsdp(
         device_id=device.index if device.type == "cuda" else None,
         sync_module_states=True,
         use_orig_params=True,
+        ignored_modules=ignored_modules,
     )
 
     # Activation Checkpointing 적용 (FSDP wrapping 후)
