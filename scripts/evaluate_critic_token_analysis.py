@@ -183,15 +183,15 @@ def main():
     # 5. 데이터 로딩
     # 샘플링 설정
     if args.incorrect_only:
-        balance_correct = False
+        auto_data_balancing = False
         correct_ratio = 0.0
         logger.info("오답 샘플만 로딩")
     elif args.correct_only:
-        balance_correct = False
+        auto_data_balancing = False
         correct_ratio = 1.0
         logger.info("정답 샘플만 로딩")
     else:
-        balance_correct = True
+        auto_data_balancing = True
         correct_ratio = 0.5
         logger.info("정답/오답 균형 샘플링")
 
@@ -200,7 +200,7 @@ def main():
         dataset_name=args.dataset,
         split=args.split,
         n_samples=args.n_samples,
-        balance_correct=balance_correct,
+        auto_data_balancing=auto_data_balancing,
         correct_ratio=correct_ratio,
         seed=42,
     )

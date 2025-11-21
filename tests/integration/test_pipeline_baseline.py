@@ -114,7 +114,7 @@ def test_baseline_config_validation():
 
     # Baseline 특화 검증
     assert config.experiment.stage == "baseline", "Should be baseline stage"
-    assert config.data_sampling.balance_correct == False, "Baseline doesn't balance"
+    assert config.data_sampling.auto_data_balancing == False, "Baseline doesn't balance"
     assert config.data_sampling.correct_ratio == 1.0, "Baseline uses only correct samples"
     assert config.runtime.device == "mps", "Should use MPS for local test"
 

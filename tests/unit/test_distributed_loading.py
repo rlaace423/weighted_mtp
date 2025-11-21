@@ -27,7 +27,7 @@ class TestDistributedLoading:
             dataset_name="mbpp",
             split="train",
             n_samples=total_samples,
-            balance_correct=False,
+            auto_data_balancing=False,
             correct_ratio=1.0,
             rank=rank,
             world_size=world_size,

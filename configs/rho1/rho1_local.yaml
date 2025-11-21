@@ -34,7 +34,7 @@ dataset:
 
 data_sampling:
   n_samples: 500
-  balance_correct: false
+  auto_data_balancing: false
   correct_ratio: 1.0
   seed: 42
 

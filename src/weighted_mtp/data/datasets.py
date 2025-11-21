@@ -4,7 +4,7 @@
 - 전체 데이터 로드 없이 메타데이터만으로 샘플 선택
 - Config 파라미터 기반 자동 샘플링 전략 결정:
   1. difficulty_weights 있음 → Difficulty-based sampling
-  2. balance_correct=True → Balanced correct/incorrect sampling
+  2. auto_data_balancing=True → Balanced correct/incorrect sampling
   3. correct_ratio=1.0 → Correct-only sampling
   4. 기본값 → Random sampling
 - 메모리 사용량 99% 절감
@@ -29,7 +29,7 @@ def load_dataset(
     dataset_name: str,
     split: str,
     n_samples: int,
-    balance_correct: bool = False,
+    auto_data_balancing: bool = False,
     correct_ratio: float = 0.5,
     difficulty_weights: Optional[dict] = None,
     difficulty_bins: Optional[dict] = None,
@@ -48,7 +48,7 @@ def load_dataset(
 
     샘플링 전략은 Config 파라미터에 의해 자동 결정됩니다:
     - difficulty_weights가 있으면 → Difficulty-based curriculum learning
-    - balance_correct=True이면 → Balanced correct/incorrect sampling
+    - auto_data_balancing=True이면 → Balanced correct/incorrect sampling
     - correct_ratio=1.0이면 → Correct-only sampling
     - 기본값 → Random sampling
 
@@ -56,7 +56,7 @@ def load_dataset(
         dataset_name: 데이터셋 이름 (codecontests, mbpp, humaneval)
         split: 데이터 스플릿 (train, validation, test)
         n_samples: 샘플링할 샘플 수 (전체 크기, 분산 환경에서는 자동 분할)
-        balance_correct: is_correct 균형 샘플링 여부
+        auto_data_balancing: is_correct 균형 샘플링 여부
         correct_ratio: correct 샘플 비율 (기본 0.5)
         difficulty_weights: 난이도별 가중치 (Difficulty-based sampling용)
         difficulty_bins: 난이도 구간 정의 (Difficulty-based sampling용)
@@ -83,7 +83,7 @@ def load_dataset(
     all_indices = _compute_sampling_indices_from_metadata(
         metadata=metadata,
         n_samples=n_samples,
-        balance_correct=balance_correct,
+        auto_data_balancing=auto_data_balancing,
         correct_ratio=correct_ratio,
         difficulty_weights=difficulty_weights,
         difficulty_bins=difficulty_bins,
@@ -228,7 +228,7 @@ def _load_metadata(
 def _compute_sampling_indices_from_metadata(
     metadata: list[dict],
     n_samples: int,
-    balance_correct: bool,
+    auto_data_balancing: bool,
     correct_ratio: float,
     difficulty_weights: Optional[dict],
     difficulty_bins: Optional[dict],
@@ -241,14 +241,14 @@ def _compute_sampling_indices_from_metadata(
 
     샘플링 전략 우선순위:
     1. difficulty_weights가 있으면 → Difficulty-based sampling
-    2. balance_correct=True면 → Balanced sampling
+    2. auto_data_balancing=True면 → Balanced sampling
     3. correct_ratio=1.0이면 → Correct-only sampling
     4. 기본값 → Random sampling
 
     Args:
         metadata: 메타데이터 리스트
         n_samples: 샘플링할 샘플 수
-        balance_correct: is_correct 균형 샘플링 여부
+        auto_data_balancing: is_correct 균형 샘플링 여부
         correct_ratio: correct 샘플 비율
         difficulty_weights: 난이도별 가중치
         difficulty_bins: 난이도 구간 정의
@@ -267,11 +267,11 @@ def _compute_sampling_indices_from_metadata(
         logger.info("샘플링 전략: Difficulty-based curriculum learning")
         return _sample_by_difficulty(
             metadata, n_samples, difficulty_weights, difficulty_bins,
-            balance_correct, correct_ratio, seed
+            auto_data_balancing, correct_ratio, seed
         )
 
     # 2. Balanced correct/incorrect sampling
-    if balance_correct:
+    if auto_data_balancing:
         logger.info(f"샘플링 전략: Balanced sampling (correct_ratio={correct_ratio})")
         return _sample_balanced(
             metadata, n_samples, correct_ratio, seed
@@ -296,7 +296,7 @@ def _sample_by_difficulty(
     n_samples: int,
     difficulty_weights: dict,
     difficulty_bins: dict,
-    balance_correct: bool,
+    auto_data_balancing: bool,
     correct_ratio: float,
     seed: int,
 ) -> list[int]:
@@ -309,7 +309,7 @@ def _sample_by_difficulty(
         n_samples: 샘플링할 샘플 수
         difficulty_weights: 난이도별 가중치 (예: {"low": 0.7, "medium": 0.3, "high": 0.0})
         difficulty_bins: 난이도 구간 (예: {"low": [1,3], "medium": [4,7], "high": [8,11]})
-        balance_correct: is_correct 균형 샘플링 여부
+        auto_data_balancing: is_correct 균형 샘플링 여부
         correct_ratio: correct 샘플 비율
         seed: 랜덤 시드
 
@@ -323,10 +323,10 @@ def _sample_by_difficulty(
         logger.warning("difficulty 필드가 없습니다. 랜덤 샘플링으로 전환합니다.")
         return random.sample(range(len(metadata)), min(n_samples, len(metadata)))
 
-    # is_correct 필드 확인 (balance_correct=True인 경우)
-    if balance_correct and "is_correct" not in metadata[0]:
+    # is_correct 필드 확인 (auto_data_balancing=True인 경우)
+    if auto_data_balancing and "is_correct" not in metadata[0]:
         logger.warning("is_correct 필드가 없어 균형 샘플링을 비활성화합니다.")
-        balance_correct = False
+        auto_data_balancing = False
 
     # === 샘플링 계획 로깅 ===
     bins_str = ", ".join([f"{name}[{r[0]}-{r[1]}]" for name, r in difficulty_bins.items()])
@@ -336,58 +336,34 @@ def _sample_by_difficulty(
     logger.info(f"difficulty_bins: {bins_str}")
     logger.info(f"weights: {weights_str}")
 
-    # 난이도 구간별 인덱스 분리
-    if balance_correct:
-        # 각 bin별로 correct/incorrect 인덱스 분리
-        bin_indices = {
-            bin_name: {"correct": [], "incorrect": []}
-            for bin_name in difficulty_bins.keys()
-        }
+    # 난이도 구간별 인덱스 분리 (correct/incorrect 구분)
+    bin_indices = {
+        bin_name: {"correct": [], "incorrect": []}
+        for bin_name in difficulty_bins.keys()
+    }
 
-        for idx, meta in enumerate(metadata):
-            difficulty = meta.get("difficulty")
-            is_correct = meta.get("is_correct")
+    for idx, meta in enumerate(metadata):
+        difficulty = meta.get("difficulty")
+        is_correct = meta.get("is_correct")
 
-            if difficulty is None:
-                continue
+        if difficulty is None:
+            continue
 
-            # 해당 난이도가 어느 bin에 속하는지 판단
-            for bin_name, (min_diff, max_diff) in difficulty_bins.items():
-                if min_diff <= difficulty <= max_diff:
-                    if is_correct:
-                        bin_indices[bin_name]["correct"].append(idx)
-                    else:
-                        bin_indices[bin_name]["incorrect"].append(idx)
-                    break
+        for bin_name, (min_diff, max_diff) in difficulty_bins.items():
+            if min_diff <= difficulty <= max_diff:
+                if is_correct:
+                    bin_indices[bin_name]["correct"].append(idx)
+                else:
+                    bin_indices[bin_name]["incorrect"].append(idx)
+                break
 
-        # === 가용 데이터 로깅 ===
-        logger.info(f"=== 가용 데이터 ===")
-        for bin_name in difficulty_bins.keys():
-            indices_dict = bin_indices.get(bin_name, {"correct": [], "incorrect": []})
-            n_correct = len(indices_dict["correct"])
-            n_incorrect = len(indices_dict["incorrect"])
-            logger.info(f"{bin_name}: C={n_correct:,}, I={n_incorrect:,}")
-    else:
-        # 균형 샘플링 없이 난이도만 분리
-        bin_indices = {bin_name: [] for bin_name in difficulty_bins.keys()}
-
-        for idx, meta in enumerate(metadata):
-            difficulty = meta.get("difficulty")
-
-            if difficulty is None:
-                continue
-
-            # 해당 난이도가 어느 bin에 속하는지 판단
-            for bin_name, (min_diff, max_diff) in difficulty_bins.items():
-                if min_diff <= difficulty <= max_diff:
-                    bin_indices[bin_name].append(idx)
-                    break
-
-        # === 가용 데이터 로깅 ===
-        logger.info(f"=== 가용 데이터 ===")
-        for bin_name in difficulty_bins.keys():
-            n_available = len(bin_indices.get(bin_name, []))
-            logger.info(f"{bin_name}: {n_available:,}")
+    # === 가용 데이터 로깅 ===
+    logger.info(f"=== 가용 데이터 ===")
+    for bin_name in difficulty_bins.keys():
+        indices_dict = bin_indices.get(bin_name, {"correct": [], "incorrect": []})
+        n_correct = len(indices_dict["correct"])
+        n_incorrect = len(indices_dict["incorrect"])
+        logger.info(f"{bin_name}: C={n_correct:,}, I={n_incorrect:,}")
 
     # 가중치에 따라 각 bin에서 샘플링
     selected_indices = []
@@ -399,7 +375,7 @@ def _sample_by_difficulty(
 
         bin_n_samples = int(n_samples * weight)
 
-        if balance_correct:
+        if auto_data_balancing:
             # 균형 샘플링
             indices_dict = bin_indices.get(bin_name, {"correct": [], "incorrect": []})
             correct_indices = indices_dict["correct"]
@@ -450,8 +426,36 @@ def _sample_by_difficulty(
                 "incorrect": n_incorrect_actual
             }
         else:
-            # 균형 샘플링 없이 랜덤 샘플링
-            available_indices = bin_indices.get(bin_name, [])
+            # auto_data_balancing = false: correct_ratio에 따라 필터링, 보충 없음
+            indices_dict = bin_indices.get(bin_name, {"correct": [], "incorrect": []})
+            correct_indices = indices_dict["correct"]
+            incorrect_indices = indices_dict["incorrect"]
+
+            # correct_ratio에 따라 사용할 인덱스 결정
+            if correct_ratio == 1.0:
+                available_indices = correct_indices
+            elif correct_ratio == 0.0:
+                available_indices = incorrect_indices
+            else:
+                # 0 < ratio < 1: 비율에 맞게 샘플링 (보충 없음)
+                n_correct_target = int(bin_n_samples * correct_ratio)
+                n_incorrect_target = bin_n_samples - n_correct_target
+
+                n_correct_actual = min(n_correct_target, len(correct_indices))
+                n_incorrect_actual = min(n_incorrect_target, len(incorrect_indices))
+
+                sampled_correct = random.sample(correct_indices, n_correct_actual) if n_correct_actual > 0 else []
+                sampled_incorrect = random.sample(incorrect_indices, n_incorrect_actual) if n_incorrect_actual > 0 else []
+
+                selected_indices.extend(sampled_correct)
+                selected_indices.extend(sampled_incorrect)
+
+                sampling_results[bin_name] = {
+                    "target": bin_n_samples,
+                    "correct": n_correct_actual,
+                    "incorrect": n_incorrect_actual
+                }
+                continue
 
             if len(available_indices) == 0:
                 sampling_results[bin_name] = {"target": bin_n_samples, "actual": 0}
@@ -465,8 +469,8 @@ def _sample_by_difficulty(
 
             sampling_results[bin_name] = {"target": bin_n_samples, "actual": len(sampled)}
 
-    # Bin 간 보충: 부족한 샘플을 다른 bin에서 보충
-    if len(selected_indices) < n_samples:
+    # Bin 간 보충: auto_data_balancing = true일 때만 수행
+    if auto_data_balancing and len(selected_indices) < n_samples:
         shortage = n_samples - len(selected_indices)
         selected_set = set(selected_indices)
 
@@ -482,14 +486,11 @@ def _sample_by_difficulty(
             if supplemented >= shortage:
                 break
 
-            if balance_correct:
-                indices_dict = bin_indices.get(bin_name, {"correct": [], "incorrect": []})
-                # 이미 선택되지 않은 인덱스에서 보충
-                available_c = [i for i in indices_dict["correct"] if i not in selected_set]
-                available_i = [i for i in indices_dict["incorrect"] if i not in selected_set]
-                available = available_c + available_i
-            else:
-                available = [i for i in bin_indices.get(bin_name, []) if i not in selected_set]
+            indices_dict = bin_indices.get(bin_name, {"correct": [], "incorrect": []})
+            # 이미 선택되지 않은 인덱스에서 보충
+            available_c = [i for i in indices_dict["correct"] if i not in selected_set]
+            available_i = [i for i in indices_dict["incorrect"] if i not in selected_set]
+            available = available_c + available_i
 
             if available:
                 to_add = min(shortage - supplemented, len(available))
@@ -539,7 +540,7 @@ def _sample_by_difficulty(
 
     # 최종 summary
     final_total = len(selected_indices)
-    if balance_correct:
+    if auto_data_balancing:
         final_ratio = total_correct / (total_correct + total_incorrect) if (total_correct + total_incorrect) > 0 else 0
         logger.info(f"--- 합계: {final_total:,}개, Correct: {total_correct:,} ({final_ratio:.1%})")
     else:

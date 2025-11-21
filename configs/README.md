@@ -124,7 +124,7 @@ dataset:
 data_sampling:
   n_samples: 100000            # 샘플 개수
   correct_ratio: 1.0           # Correct 샘플 비율 (Baseline: 1.0, Critic: 0.5)
-  balance_correct: false       # Correct/Incorrect 균형 샘플링 여부
+  auto_data_balancing: false       # Correct/Incorrect 균형 샘플링 여부
   seed: 42                     # Random seed
 
   # Verifiable 전용 (Curriculum learning)
@@ -143,7 +143,7 @@ data_sampling:
 
 **Stage별 차이**:
 - **Baseline**: `correct_ratio: 1.0` (정답만 학습)
-- **Critic/Verifiable**: `correct_ratio: 0.5`, `balance_correct: true`
+- **Critic/Verifiable**: `correct_ratio: 0.5`, `auto_data_balancing: true`
 - **Verifiable**: `curriculum_learning` 설정 추가
 
 ### 3.5 training (학습 설정)
@@ -302,7 +302,7 @@ experiment:
 
 data_sampling:
   correct_ratio: 1.0           # 정답만 학습
-  balance_correct: false
+  auto_data_balancing: false
 
 training:
   n_epochs: 2.5
@@ -325,7 +325,7 @@ experiment:
 
 data_sampling:
   correct_ratio: 0.5           # Correct/Incorrect 균형
-  balance_correct: true
+  auto_data_balancing: true
 
 training:
   n_epochs: 0.5
@@ -350,7 +350,7 @@ experiment:
 
 data_sampling:
   correct_ratio: 0.5
-  balance_correct: true
+  auto_data_balancing: true
   curriculum_learning: true
   curriculum_schedule:
     - epoch_range: [0.0, 0.3]

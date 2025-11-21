@@ -44,7 +44,7 @@ dataset:
 # 데이터 샘플링
 data_sampling:
   n_samples: 150000
-  balance_correct: false
+  auto_data_balancing: false
   correct_ratio: 1.0  # 정답만 학습
   curriculum_learning: true
   difficulty_bins:

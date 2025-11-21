@@ -21,7 +21,7 @@ def create_dataloader(
     batch_size: int,
     max_length: int,
     n_samples: int,
-    balance_correct: bool = False,
+    auto_data_balancing: bool = False,
     correct_ratio: float = 0.5,
     difficulty_weights: Optional[dict] = None,
     difficulty_bins: Optional[dict] = None,
@@ -39,7 +39,7 @@ def create_dataloader(
         batch_size: 배치 크기 (per GPU)
         max_length: 최대 시퀀스 길이
         n_samples: 전체 샘플 수
-        balance_correct: is_correct 균형 샘플링 여부
+        auto_data_balancing: is_correct 균형 샘플링 여부
         correct_ratio: correct 샘플 비율 (0.5 = 50:50)
         difficulty_weights: 난이도별 가중치 (curriculum learning용, Optional)
         difficulty_bins: 난이도 구간 정의 (Optional)
@@ -54,14 +54,14 @@ def create_dataloader(
         >>> loader = create_dataloader(
         ...     "storage/datasets/codecontests/processed/train.jsonl",
         ...     tokenizer, batch_size=4, max_length=2048,
-        ...     n_samples=100000, balance_correct=False, correct_ratio=1.0
+        ...     n_samples=100000, auto_data_balancing=False, correct_ratio=1.0
         ... )
         >>>
         >>> # Verifiable: Curriculum learning
         >>> loader = create_dataloader(
         ...     "storage/datasets/codecontests/processed/train.jsonl",
         ...     tokenizer, batch_size=4, max_length=2048,
-        ...     n_samples=100000, balance_correct=True, correct_ratio=0.5,
+        ...     n_samples=100000, auto_data_balancing=True, correct_ratio=0.5,
         ...     difficulty_weights={"low": 0.7, "medium": 0.3, "high": 0.0},
         ...     difficulty_bins={"low": [1,3], "medium": [4,7], "high": [8,11]}
         ... )
@@ -87,7 +87,7 @@ def create_dataloader(
         dataset_name=dataset_name,
         split=split,
         n_samples=n_samples,
-        balance_correct=balance_correct,
+        auto_data_balancing=auto_data_balancing,
         correct_ratio=correct_ratio,
         difficulty_weights=difficulty_weights,
         difficulty_bins=difficulty_bins,

@@ -129,7 +129,7 @@ PYTHONPATH=src python src/weighted_mtp/pipelines/run_verifiable.py \
 **설정 (`configs/verifiable/verifiable.yaml`)**:
 ```yaml
 data_sampling:
-  balance_correct: true
+  auto_data_balancing: true
   correct_ratio: 0.5  # 정답/오답 50:50
   curriculum_learning: true
 

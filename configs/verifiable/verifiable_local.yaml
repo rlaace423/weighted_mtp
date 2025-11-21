@@ -30,7 +30,7 @@ dataset:
 
 data_sampling:
   n_samples: 500
-  balance_correct: true
+  auto_data_balancing: true
   correct_ratio: 0.5
   curriculum_learning: false
   seed: 42

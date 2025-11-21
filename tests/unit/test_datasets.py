@@ -3,7 +3,7 @@
 핵심 검증 항목:
 - 데이터셋 로딩 기본 기능
 - Config-driven 샘플링 전략 자동 선택
-- Balanced sampling (balance_correct=True)
+- Balanced sampling (auto_data_balancing=True)
 - Correct-only sampling (correct_ratio=1.0)
 - Difficulty-based sampling (difficulty_weights 있음)
 - 재현성 (seed 고정)
@@ -23,7 +23,7 @@ def small_dataset():
         "codecontests",
         split="train",
         n_samples=50,
-        balance_correct=False,
+        auto_data_balancing=False,
         correct_ratio=0.5,
         seed=42
     )
@@ -71,7 +71,7 @@ class TestBalancedSampling:
             "codecontests",
             split="train",
             n_samples=100,
-            balance_correct=True,
+            auto_data_balancing=True,
             correct_ratio=0.5,
             seed=42
         )
@@ -92,7 +92,7 @@ class TestBalancedSampling:
             "codecontests",
             split="train",
             n_samples=100,
-            balance_correct=True,
+            auto_data_balancing=True,
             correct_ratio=0.7,
             seed=42
         )
@@ -113,7 +113,7 @@ class TestCorrectOnlySampling:
             "codecontests",
             split="train",
             n_samples=50,
-            balance_correct=False,
+            auto_data_balancing=False,
             correct_ratio=1.0,
             seed=42
         )
@@ -137,7 +137,7 @@ class TestDifficultyBasedSampling:
             "codecontests",
             split="train",
             n_samples=50,
-            balance_correct=False,
+            auto_data_balancing=True,
             correct_ratio=0.5,
             difficulty_weights=difficulty_weights,
             difficulty_bins=difficulty_bins,
@@ -160,7 +160,7 @@ class TestDifficultyBasedSampling:
             "codecontests",
             split="train",
             n_samples=100,
-            balance_correct=False,
+            auto_data_balancing=True,
             correct_ratio=0.5,
             difficulty_weights=difficulty_weights,
             difficulty_bins=difficulty_bins,
@@ -191,7 +191,7 @@ class TestReproducibility:
             "codecontests",
             split="train",
             n_samples=20,
-            balance_correct=True,
+            auto_data_balancing=True,
             correct_ratio=0.5,
             seed=42
         )
@@ -200,7 +200,7 @@ class TestReproducibility:
             "codecontests",
             split="train",
             n_samples=20,
-            balance_correct=True,
+            auto_data_balancing=True,
             correct_ratio=0.5,
             seed=42
         )
@@ -217,7 +217,7 @@ class TestReproducibility:
             "codecontests",
             split="train",
             n_samples=20,
-            balance_correct=True,
+            auto_data_balancing=True,
             correct_ratio=0.5,
             seed=42
         )
@@ -226,7 +226,7 @@ class TestReproducibility:
             "codecontests",
             split="train",
             n_samples=20,
-            balance_correct=True,
+            auto_data_balancing=True,
             correct_ratio=0.5,
             seed=999
         )
@@ -246,7 +246,7 @@ class TestSplits:
             "codecontests",
             split="train",
             n_samples=10,
-            balance_correct=False,
+            auto_data_balancing=False,
             seed=42
         )
         assert len(dataset) == 10
@@ -257,7 +257,7 @@ class TestSplits:
             "codecontests",
             split="validation",
             n_samples=10,
-            balance_correct=False,
+            auto_data_balancing=False,
             seed=42
         )
         assert len(dataset) == 10
@@ -268,7 +268,7 @@ class TestSplits:
             "codecontests",
             split="test",
             n_samples=10,
-            balance_correct=False,
+            auto_data_balancing=False,
             seed=42
         )
         assert len(dataset) == 10

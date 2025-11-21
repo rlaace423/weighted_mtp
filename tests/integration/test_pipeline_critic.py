@@ -114,7 +114,7 @@ def test_critic_config_validation():
 
     # Critic 특화 검증
     assert config.experiment.stage == "critic", "Should be critic stage"
-    assert config.data_sampling.balance_correct == True, "Critic needs balanced sampling"
+    assert config.data_sampling.auto_data_balancing == True, "Critic needs balanced sampling"
     assert config.data_sampling.correct_ratio == 0.5, "Critic uses 50:50 ratio"
     assert config.runtime.device == "mps", "Should use MPS for local test"
 

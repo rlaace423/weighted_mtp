@@ -127,7 +127,7 @@ def test_verifiable_config_validation():
     # Verifiable 특화 검증
     assert config.experiment.stage == "verifiable", "Should be verifiable stage"
     assert hasattr(config.experiment, "critic_checkpoint"), "Should have critic_checkpoint"
-    assert config.data_sampling.balance_correct == True, "Verifiable uses balanced sampling"
+    assert config.data_sampling.auto_data_balancing == True, "Verifiable uses balanced sampling"
     assert config.data_sampling.correct_ratio == 0.5, "Verifiable uses 50:50 ratio"
     assert config.runtime.device == "mps", "Should use MPS for local test"
 

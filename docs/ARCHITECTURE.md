@@ -104,7 +104,7 @@ for batch in dataloader:
 metadata = json.load(open(f"{dataset}_metadata.json"))
 
 # 2. Config 기반 샘플링 인덱스 계산
-if balance_correct:  # Critic, Verifiable
+if auto_data_balancing:  # Critic, Verifiable
     indices = balanced_sample(metadata, correct_ratio=0.5)
 elif correct_ratio == 1.0:  # Baseline, Rho-1
     indices = filter_correct_samples(metadata)
