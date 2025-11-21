@@ -477,8 +477,9 @@ def _sample_by_difficulty(
     # 샘플 수가 부족하면 랜덤으로 추가
     if len(selected_indices) < n_samples:
         remaining = n_samples - len(selected_indices)
-        all_indices = list(range(len(metadata)))
-        available = [idx for idx in all_indices if idx not in selected_indices]
+        # set 변환으로 O(1) 검색 (리스트 O(n) 검색 대비 성능 개선)
+        selected_set = set(selected_indices)
+        available = [idx for idx in range(len(metadata)) if idx not in selected_set]
 
         if available:
             additional = random.sample(available, min(remaining, len(available)))
