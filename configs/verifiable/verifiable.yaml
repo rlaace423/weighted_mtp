@@ -78,7 +78,7 @@ training:
   max_grad_norm: 1.0
 
   # TD error weighting
-  beta: 0.9  # TD error temperature
+  beta: 0.2  # TD error temperature
   value_coef: 0.5  # Value loss coefficient
   weight_clip_min: 0.1  # 최소 가중치
   weight_clip_max: 3.0  # 최대 가중치

@@ -41,7 +41,7 @@ training:
   gradient_accumulation_steps: 2
   learning_rate: 1.0e-5
   max_grad_norm: 1.0
-  beta: 0.9
+  beta: 0.2
   value_coef: 0.5
   weight_clip_min: 0.1
   weight_clip_max: 3.0

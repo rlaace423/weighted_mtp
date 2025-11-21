@@ -158,7 +158,7 @@ training:
   log_interval: 1             # 로깅 간격 (steps)
 
   # Verifiable 전용 (TD error weighting)
-  beta: 0.9                    # TD error temperature
+  beta: 0.2                    # TD error temperature
   value_coef: 0.5              # Value loss coefficient
   weight_clip_min: 0.1         # 최소 가중치
   weight_clip_max: 5.0         # 최대 가중치
@@ -357,7 +357,7 @@ data_sampling:
       difficulty_weights: {low: 0.7, medium: 0.3, high: 0.0}
 
 training:
-  beta: 0.9                    # TD error temperature
+  beta: 0.2                    # TD error temperature
   value_coef: 0.5              # Value loss coefficient
   weight_clip_min: 0.1
   weight_clip_max: 5.0

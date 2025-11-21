@@ -134,7 +134,7 @@ data_sampling:
   curriculum_learning: true
 
 training:
-  beta: 0.9              # TD error temperature
+  beta: 0.2              # TD error temperature
   value_coef: 0.5        # Value loss coefficient
   weight_clip_min: 0.1   # 최소 토큰 가중치
   weight_clip_max: 3.0   # 최대 토큰 가중치
