@@ -51,12 +51,8 @@ case $NGPUS in
     ;;
 esac
 
-# Config 자동 선택
-if [ "$NGPUS" -eq 1 ]; then
-  CONFIG="configs/critic/critic_1gpu.yaml"
-else
-  CONFIG="configs/critic/critic.yaml"
-fi
+# Config 설정 (항상 critic.yaml 사용)
+CONFIG="configs/critic/critic.yaml"
 
 # Override 인자 생성
 OVERRIDE_ARGS=""

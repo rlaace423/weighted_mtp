@@ -28,18 +28,28 @@ w_{t,k} = 1.0 (모든 k)
 
 데이터셋의 검증 가능한 레이블(is_correct)을 reward signal로 사용.
 
-**Stage 1: Probabilistic Value Learning (MSE Loss)**:
+**Stage 1: GAE 기반 Value Learning (MSE Loss)**:
 ```python
 # Value Head 학습: V(s_t) → E[R | s_t] = P(Success | s_t)
-# Target: 모든 토큰에 동일한 reward (R_terminal) 부여
-value_targets = rewards.unsqueeze(1).expand(batch_size, seq_len, 1)
-value_loss = F.mse_loss(value_logits, value_targets)
+# GAE (Generalized Advantage Estimation) 기반 TD targets 계산
+td_targets = compute_td_targets(
+    value_logits=value_logits,
+    rewards=rewards,
+    attention_mask=attention_mask,
+    gamma=gamma,  # 0.99
+    lam=lam,      # 0.95 (GAE lambda)
+)
+value_loss = F.mse_loss(value_logits, td_targets)
 
-# 학습 원리:
-# - Correct 샘플 (R=1.0): V → 1.0
-# - Incorrect 샘플 (R=0.0): V → 0.0
-# - 동일 prefix가 correct/incorrect 모두에 나타나면 V → 확률값
-# → MSE 최적해 = E[R | s] = P(Success | s)
+# GAE 알고리즘:
+# - δ_t = r_t + γV(s_{t+1}) - V(s_t)  (TD error)
+# - A_t = δ_t + γλ * A_{t+1}  (역방향 계산)
+# - Target_t = V(s_t) + A_t
+
+# lam 파라미터:
+# - 0.0: TD(0) - 한 스텝 bootstrapping
+# - 0.95: GAE - 권장값, variance-bias 균형
+# - 1.0: Monte Carlo
 ```
 
 **Stage 2: TD Error-based Weighting**:
@@ -64,15 +74,16 @@ total_loss = weighted_ce_loss + value_coef * value_loss
 ```
 
 **특징**:
-- **Value 학습**: MSE loss로 P(Success | s) 학습 (TD error 아님)
-- **TD error**: Weight 계산에만 사용
+- **Value 학습**: GAE 기반 TD targets + MSE loss로 P(Success | s) 학습
+- **TD error**: Weight 계산에 사용
 - **데이터**: 정답+오답 모두 학습 (3.7M samples)
 - **RM 불필요**: ~28GB VRAM 절약
 - **객관적 보상**: 실행 결과/정답 기반
 - **2단계 학습**: Stage 1 (Value Head Pretrain 0.5 epoch) + Stage 2 (Weighted Training 2.5 epoch)
+- **GAE lambda**: 0.95 (variance-bias 균형)
 
 **이론적 근거**:
-- Probabilistic Value Learning: MSE 최적해 = E[R | s] = P(Success | s)
+- GAE Value Learning: Schulman et al. (2015) - variance-bias tradeoff 조절
 - TD error weighting: IQL/AWR exponential weighting (`exp(advantage/β)`)
 - Critic Continual Learning: PPO best practice (value_coef=0.5)
 
@@ -107,14 +118,14 @@ for head_idx in range(1, n_future_tokens):
 | 특성 | Baseline | Verifiable Critic | Rho-1 Weighted |
 |------|----------|-------------------|----------------|
 | **가중치 산출** | 상수 (1.0) | TD error → exp weighting | Reference loss 차이 |
-| **Value 학습** | 없음 | MSE loss (Probabilistic) | 없음 |
+| **Value 학습** | 없음 | GAE + MSE loss | 없음 |
 | **TD error 용도** | 없음 | Weight 계산용 | 없음 |
 | **외부 모델** | 불필요 | 불필요 (RM 제거) | 필요 (Reference) |
 | **메모리 효율** | 표준 | 높음 (~28GB 절약) | 표준 |
 | **데이터 요구** | 정답만 | 정답+오답 (3.7M) | 정답만 |
 | **학습 안정성** | 높음 | 중간 (Continual Learning) | 높음 |
 | **구현 복잡도** | 낮음 | 높음 (2단계) | 중간 |
-| **이론적 기반** | 표준 SFT | MSE + TD weighting | 정보 이론 |
+| **이론적 기반** | 표준 SFT | GAE + TD weighting | 정보 이론 |
 | **Negative signal** | 미사용 | 활용 (weight < 1) | 미사용 |
 
 ---
@@ -160,6 +171,11 @@ for head_idx in range(1, n_future_tokens):
 ## 안정화 메커니즘
 
 ### Verifiable Critic
+
+**GAE 기반 Value Learning**:
+- GAE lambda (lam=0.95): variance-bias tradeoff 조절
+- TD(0) (lam=0.0)부터 Monte Carlo (lam=1.0)까지 스펙트럼
+- 권장값 0.95로 빠른 수렴 + 안정성 확보
 
 **Critic Continual Learning**:
 - Stage2에서 Value Loss를 Auxiliary Loss로 추가

@@ -197,7 +197,6 @@ mp_policy = MixedPrecision(
 | 최적화 | 메모리 효과 | 속도 효과 | 적용 대상 |
 |--------|-----------|----------|----------|
 | **FSDP FULL_SHARD** | 75% 절감 (90GB→30GB) | 6-10% 느림 | Verifiable/Baseline/Rho-1 |
-| **FSDP NO_SHARD** | DDP 동일 | DDP 동일 | Critic |
 | **BFloat16** | 동일 (vs Float16) | A100 최적화 | 모든 파이프라인 |
 | **Flash Attention** | 30-40% 절감 | 2-4배 빠름 | Training (start_pos=0) |
 
