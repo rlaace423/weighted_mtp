@@ -15,7 +15,8 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf, DictConfig
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
+from torch import nn
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from weighted_mtp.core.env import ensure_env_loaded
 from weighted_mtp.core.logging import setup_logging
@@ -70,23 +71,29 @@ def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
     return adapter
 
 
-def load_reference_model(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
-    """Reference model 로드 (커스텀 Meta LLaMA MTP 모델)
+def load_reference_model(config: dict, device: torch.device) -> nn.Module:
+    """Reference model 로드 (HuggingFace LlamaForCausalLM)
+
+    Rho-1에서 Reference 모델은 NTP loss 계산용으로만 사용되므로
+    HuggingFace 모델을 직접 로드합니다.
 
     Args:
         config: 모델 설정
         device: 디바이스
 
     Returns:
-        Reference model (eval mode, MetaLlamaMTPAdapter)
+        Reference model (eval mode, HuggingFace LlamaForCausalLM)
     """
-    # MetaLlamaMTPAdapter로 로드 (Value head 불필요)
-    ref_model = MetaLlamaMTPAdapter.from_pretrained(
-        model_path=config.models.reference.path,
-        device=device,
-        dtype=config.models.reference.dtype,
-        initialize_value_head=False,
-    )
+    # dtype 변환
+    dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
+    dtype = dtype_map.get(config.models.reference.dtype, torch.bfloat16)
+
+    # HuggingFace 모델 로드
+    ref_model = AutoModelForCausalLM.from_pretrained(
+        config.models.reference.path,
+        torch_dtype=dtype,
+        low_cpu_mem_usage=True,
+    ).to(device)
 
     # Eval mode (gradient 불필요)
     ref_model.eval()
@@ -102,7 +109,7 @@ def load_reference_model(config: dict, device: torch.device) -> MetaLlamaMTPAdap
 
 def validate_rho1(
     adapter: MetaLlamaMTPAdapter,
-    ref_model: MetaLlamaMTPAdapter,
+    ref_model: nn.Module,
     dataloader: DataLoader,
     device: torch.device,
     k_percent: float,
@@ -111,7 +118,7 @@ def validate_rho1(
 
     Args:
         adapter: Adapter (FSDP-wrapped 가능)
-        ref_model: Reference model (MetaLlamaMTPAdapter, eval mode)
+        ref_model: Reference model (HuggingFace LlamaForCausalLM, eval mode)
         dataloader: Validation DataLoader
         device: 디바이스
         k_percent: Top-k selection ratio (0~1)
@@ -136,9 +143,9 @@ def validate_rho1(
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            # 2. Reference forward (NTP mode: 첫 번째 head만 사용)
-            ref_logits_mtp = ref_model.transformer.forward(input_ids, return_all_heads=False)
-            ref_logits = ref_logits_mtp.squeeze(2)  # [batch, seq, 1, vocab] -> [batch, seq, vocab]
+            # 2. Reference forward (HuggingFace 모델)
+            ref_outputs = ref_model(input_ids)
+            ref_logits = ref_outputs.logits  # [batch, seq, vocab]
 
             # 3. Policy forward (MTP만)
             policy_logits = adapter(input_ids)
@@ -399,10 +406,10 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            # Reference forward (no grad, NTP mode)
+            # Reference forward (no grad, HuggingFace 모델)
             with torch.no_grad():
-                ref_logits_mtp = ref_model.transformer.forward(input_ids, return_all_heads=False)
-                ref_logits = ref_logits_mtp.squeeze(2)  # [batch, seq, 1, vocab] -> [batch, seq, vocab]
+                ref_outputs = ref_model(input_ids)
+                ref_logits = ref_outputs.logits  # [batch, seq, vocab]
 
             # Policy forward (MTP만)
             policy_logits = adapter(input_ids)

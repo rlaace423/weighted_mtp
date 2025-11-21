@@ -34,10 +34,10 @@ models:
       vocab_size: 32000
     dtype: bfloat16
 
-  # Rho-1 Reference model
+  # Rho-1 Reference model (HuggingFace 형식)
   reference:
     name: ref-sheared-llama-2.7b
-    path: storage/models/ref-sheared-llama-2.7b
+    path: storage/models/ref-sheared-llama-2.7b/raw
     dtype: bfloat16
 
 # 데이터셋 설정
