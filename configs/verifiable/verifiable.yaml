@@ -84,7 +84,7 @@ training:
   weight_clip_max: 3.0  # 최대 가중치
   loss_type: mse
   gamma: 1.0
-  lam: 0.95  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
+  lam: 1.0  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
 
   log_interval: 1
 

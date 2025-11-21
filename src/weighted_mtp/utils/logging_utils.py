@@ -84,6 +84,8 @@ def compute_gradient_clip_stats(
     grad_norm_pre = total_norm_pre**0.5
 
     # Clipping 수행
+    # DEBUG: max_grad_norm 값 확인
+    # print(f"DEBUG: compute_gradient_clip_stats called with max_grad_norm={max_grad_norm}")
     torch.nn.utils.clip_grad_norm_(params_list, max_grad_norm)
 
     # Clipping 후 gradient norm
