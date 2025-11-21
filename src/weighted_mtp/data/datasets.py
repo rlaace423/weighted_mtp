@@ -328,6 +328,14 @@ def _sample_by_difficulty(
         logger.warning("is_correct 필드가 없어 균형 샘플링을 비활성화합니다.")
         balance_correct = False
 
+    # === 샘플링 계획 로깅 ===
+    bins_str = ", ".join([f"{name}[{r[0]}-{r[1]}]" for name, r in difficulty_bins.items()])
+    weights_str = ", ".join([f"{name}={w:.2f}" for name, w in difficulty_weights.items() if w > 0])
+    logger.info(f"=== 샘플링 계획 ===")
+    logger.info(f"목표: {n_samples:,}개, correct_ratio: {correct_ratio}")
+    logger.info(f"difficulty_bins: {bins_str}")
+    logger.info(f"weights: {weights_str}")
+
     # 난이도 구간별 인덱스 분리
     if balance_correct:
         # 각 bin별로 correct/incorrect 인덱스 분리
@@ -352,13 +360,13 @@ def _sample_by_difficulty(
                         bin_indices[bin_name]["incorrect"].append(idx)
                     break
 
-        # 각 bin별 샘플 수 로그
-        for bin_name, indices_dict in bin_indices.items():
+        # === 가용 데이터 로깅 ===
+        logger.info(f"=== 가용 데이터 ===")
+        for bin_name in difficulty_bins.keys():
+            indices_dict = bin_indices.get(bin_name, {"correct": [], "incorrect": []})
             n_correct = len(indices_dict["correct"])
             n_incorrect = len(indices_dict["incorrect"])
-            logger.info(
-                f"{bin_name} bin: correct={n_correct:,}, incorrect={n_incorrect:,}"
-            )
+            logger.info(f"{bin_name}: C={n_correct:,}, I={n_incorrect:,}")
     else:
         # 균형 샘플링 없이 난이도만 분리
         bin_indices = {bin_name: [] for bin_name in difficulty_bins.keys()}
@@ -375,14 +383,15 @@ def _sample_by_difficulty(
                     bin_indices[bin_name].append(idx)
                     break
 
-        # 각 bin별 샘플 수 로그
-        bin_stats = ", ".join(
-            [f"{name}: {len(indices):,}" for name, indices in bin_indices.items()]
-        )
-        logger.info(f"난이도 분포: {bin_stats}")
+        # === 가용 데이터 로깅 ===
+        logger.info(f"=== 가용 데이터 ===")
+        for bin_name in difficulty_bins.keys():
+            n_available = len(bin_indices.get(bin_name, []))
+            logger.info(f"{bin_name}: {n_available:,}")
 
     # 가중치에 따라 각 bin에서 샘플링
     selected_indices = []
+    sampling_results = {}  # 결과 수집용
 
     for bin_name, weight in difficulty_weights.items():
         if weight <= 0:
@@ -397,7 +406,7 @@ def _sample_by_difficulty(
             incorrect_indices = indices_dict["incorrect"]
 
             if len(correct_indices) == 0 and len(incorrect_indices) == 0:
-                logger.warning(f"{bin_name} bin에 샘플이 없습니다.")
+                sampling_results[bin_name] = {"target": bin_n_samples, "correct": 0, "incorrect": 0}
                 continue
 
             # 목표 샘플 수 계산
@@ -435,21 +444,17 @@ def _sample_by_difficulty(
             selected_indices.extend(sampled_correct)
             selected_indices.extend(sampled_incorrect)
 
-            actual_ratio = (
-                n_correct_actual / (n_correct_actual + n_incorrect_actual)
-                if (n_correct_actual + n_incorrect_actual) > 0
-                else 0
-            )
-            logger.info(
-                f"{bin_name} bin: correct={n_correct_actual}, incorrect={n_incorrect_actual}, "
-                f"total={n_correct_actual + n_incorrect_actual} (목표: {bin_n_samples}, 비율: {actual_ratio:.2%})"
-            )
+            sampling_results[bin_name] = {
+                "target": bin_n_samples,
+                "correct": n_correct_actual,
+                "incorrect": n_incorrect_actual
+            }
         else:
             # 균형 샘플링 없이 랜덤 샘플링
             available_indices = bin_indices.get(bin_name, [])
 
             if len(available_indices) == 0:
-                logger.warning(f"{bin_name} bin에 샘플이 없습니다.")
+                sampling_results[bin_name] = {"target": bin_n_samples, "actual": 0}
                 continue
 
             # 샘플링
@@ -458,9 +463,10 @@ def _sample_by_difficulty(
             )
             selected_indices.extend(sampled)
 
-            logger.info(f"{bin_name} bin에서 {len(sampled)} 인덱스 선택 (목표: {bin_n_samples})")
+            sampling_results[bin_name] = {"target": bin_n_samples, "actual": len(sampled)}
 
     # 샘플 수가 부족하면 랜덤으로 추가
+    n_random_added = 0
     if len(selected_indices) < n_samples:
         remaining = n_samples - len(selected_indices)
         # set 변환으로 O(1) 검색 (리스트 O(n) 검색 대비 성능 개선)
@@ -470,7 +476,7 @@ def _sample_by_difficulty(
         if available:
             additional = random.sample(available, min(remaining, len(available)))
             selected_indices.extend(additional)
-            logger.warning(f"샘플 부족으로 {len(additional)} 인덱스 추가 (랜덤)")
+            n_random_added = len(additional)
 
     # 섞기
     random.shuffle(selected_indices)
@@ -478,7 +484,40 @@ def _sample_by_difficulty(
     # 정확히 n_samples 개수 맞추기
     selected_indices = selected_indices[:n_samples]
 
-    logger.info(f"Difficulty-based 샘플링 완료: {len(selected_indices)} 인덱스")
+    # === 샘플링 결과 로깅 ===
+    logger.info(f"=== 샘플링 결과 ===")
+
+    total_correct = 0
+    total_incorrect = 0
+    total_actual = 0
+
+    for bin_name, result in sampling_results.items():
+        target = result["target"]
+        if "correct" in result:
+            correct = result["correct"]
+            incorrect = result["incorrect"]
+            actual = correct + incorrect
+            total_correct += correct
+            total_incorrect += incorrect
+            ratio_str = f"C:{correct:,}, I:{incorrect:,}"
+        else:
+            actual = result["actual"]
+            ratio_str = f"{actual:,}"
+
+        total_actual += actual
+        pct = (actual / target * 100) if target > 0 else 0
+        logger.info(f"{bin_name}: 목표={target:,}, 실제={actual:,} ({pct:.0f}%) [{ratio_str}]")
+
+    if n_random_added > 0:
+        logger.warning(f"랜덤 추가: {n_random_added:,}개 (bin 외 데이터)")
+
+    # 최종 summary
+    final_total = len(selected_indices)
+    if balance_correct:
+        final_ratio = total_correct / (total_correct + total_incorrect) if (total_correct + total_incorrect) > 0 else 0
+        logger.info(f"--- 합계: {final_total:,}개, Correct: {total_correct:,} ({final_ratio:.1%})")
+    else:
+        logger.info(f"--- 합계: {final_total:,}개")
 
     return selected_indices
 

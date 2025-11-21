@@ -252,10 +252,21 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     tokenizer = load_tokenizer_from_config(config)
 
     # Model size 로깅
-    model_size = get_model_size(unwrap_model(adapter))
+    model_size_local = get_model_size(unwrap_model(adapter))
 
-    # Trainable params breakdown 계산
-    trainable_breakdown = {
+    # FSDP FULL_SHARD 시 world_size를 곱해 실제 전체 파라미터 수 계산
+    sharding_strategy = config.distributed.fsdp.sharding_strategy
+    if sharding_strategy == "FULL_SHARD" and world_size > 1:
+        model_size = {
+            "total_params": model_size_local["total_params"] * world_size,
+            "trainable_params": model_size_local["trainable_params"] * world_size,
+            "non_trainable_params": model_size_local["non_trainable_params"] * world_size,
+        }
+    else:
+        model_size = model_size_local
+
+    # Trainable params breakdown 계산 (FSDP sharding 고려)
+    trainable_breakdown_local = {
         "value_head": sum(p.numel() for p in adapter.value_head.parameters() if p.requires_grad),
         "trunk_blocks": sum(
             p.numel() for layer in adapter.transformer.layers[-num_unfrozen:]
@@ -265,6 +276,16 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             p.numel() for p in adapter.transformer.norm.parameters() if p.requires_grad
         ) if num_unfrozen > 0 else 0,
     }
+
+    if sharding_strategy == "FULL_SHARD" and world_size > 1:
+        # value_head는 ignored_modules로 FSDP에서 제외되어 sharding 안 됨
+        trainable_breakdown = {
+            "value_head": trainable_breakdown_local["value_head"],  # 그대로
+            "trunk_blocks": trainable_breakdown_local["trunk_blocks"] * world_size,
+            "norm": trainable_breakdown_local["norm"] * world_size,
+        }
+    else:
+        trainable_breakdown = trainable_breakdown_local
 
     if is_main_process():
         if use_mlflow:

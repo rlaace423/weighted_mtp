@@ -71,8 +71,8 @@ data_sampling:
     - epoch_range: [0.7, 1.0]
       difficulty_weights:
         easy: 0.1
-        medium: 0.4
-        hard: 0.5
+        medium: 0.6
+        hard: 0.3
   seed: 42
 
 # 학습 설정 (A100 4-GPU 최적화)
