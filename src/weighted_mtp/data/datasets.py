@@ -640,10 +640,6 @@ def _read_jsonl_by_indices(
 
                 current_line += 1
 
-                # Progress logging
-                if line_idx > 0 and line_idx % 100000 == 0:
-                    logger.info(f"JSONL reading... processed {line_idx:,} lines, found {current_line:,}/{len(indices):,} samples")
-
                 # 모든 목표 샘플을 찾았으면 종료
                 if current_line >= len(indices):
                     break

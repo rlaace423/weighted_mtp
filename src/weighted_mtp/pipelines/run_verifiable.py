@@ -472,6 +472,9 @@ def run_verifiable_training(
                 shuffle=True,
             )
 
+        # 모든 rank가 DataLoader 생성 완료까지 동기화
+        barrier()
+
         # DataLoader에서 필요한 만큼만 사용
         epoch_train_loader = iter(train_loader)
         period_metrics_sum = {
