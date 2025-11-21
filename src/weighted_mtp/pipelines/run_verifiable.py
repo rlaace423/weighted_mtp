@@ -441,6 +441,28 @@ def run_verifiable_training(
     # 모델 dtype 감지
     model_dtype = next(adapter.parameters()).dtype
 
+    # Curriculum learning: 이전 weights 추적 (중복 DataLoader 생성 방지)
+    prev_curriculum_weights = initial_weights
+
+    # FSDP 워밍업: 첫 forward에서 all-gather 동기화 문제 방지
+    logger.info("FSDP warmup forward pass 시작...")
+    adapter.eval()
+    with torch.no_grad():
+        # 더미 입력으로 FSDP parameter sharding 동기화
+        dummy_batch_size = 1
+        dummy_seq_len = 16
+        dummy_input = torch.ones(dummy_batch_size, dummy_seq_len, dtype=torch.long, device=device)
+        dummy_mask = torch.ones(dummy_batch_size, dummy_seq_len, dtype=torch.long, device=device)
+        try:
+            _ = adapter(dummy_input, dummy_mask, return_value_logits=True)
+            logger.info("FSDP warmup forward pass 완료")
+        except Exception as e:
+            logger.warning(f"FSDP warmup 중 예외 발생 (무시): {e}")
+
+    # 모든 rank가 워밍업 완료까지 동기화
+    barrier()
+    logger.info("모든 rank FSDP 워밍업 동기화 완료")
+
     # 9. Training loop
     optimizer.zero_grad()
 
@@ -457,23 +479,28 @@ def run_verifiable_training(
             current_weights = get_curriculum_weights(current_epoch, curriculum_schedule)
             logger.info(f"Curriculum weights: {current_weights}")
 
-            # DataLoader 재생성 (새 difficulty_weights로 샘플링)
-            train_loader = create_dataloader(
-                dataset_path=config.dataset.train,
-                tokenizer=tokenizer,
-                batch_size=config.training.batch_size,
-                max_length=config.dataset.max_length,
-                n_samples=config.data_sampling.n_samples,
-                balance_correct=config.data_sampling.balance_correct,
-                correct_ratio=config.data_sampling.correct_ratio,
-                difficulty_weights=current_weights,
-                difficulty_bins=difficulty_bins,
-                seed=config.data_sampling.seed + int(current_epoch * 1000),  # Seed 변경
-                shuffle=True,
-            )
+            # weights가 변경된 경우에만 DataLoader 재생성
+            if current_weights != prev_curriculum_weights:
+                logger.info("Curriculum weights 변경 감지, DataLoader 재생성")
+                train_loader = create_dataloader(
+                    dataset_path=config.dataset.train,
+                    tokenizer=tokenizer,
+                    batch_size=config.training.batch_size,
+                    max_length=config.dataset.max_length,
+                    n_samples=config.data_sampling.n_samples,
+                    balance_correct=config.data_sampling.balance_correct,
+                    correct_ratio=config.data_sampling.correct_ratio,
+                    difficulty_weights=current_weights,
+                    difficulty_bins=difficulty_bins,
+                    seed=config.data_sampling.seed + int(current_epoch * 1000),
+                    shuffle=True,
+                )
+                prev_curriculum_weights = current_weights
 
-        # 모든 rank가 DataLoader 생성 완료까지 동기화
-        barrier()
+                # DataLoader 재생성 후 동기화
+                barrier()
+            else:
+                logger.info("Curriculum weights 동일, 기존 DataLoader 재사용")
 
         # DataLoader에서 필요한 만큼만 사용
         epoch_train_loader = iter(train_loader)

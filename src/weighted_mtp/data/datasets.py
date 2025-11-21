@@ -16,10 +16,13 @@ import logging
 import random
 import json
 
-from datasets import Dataset, DatasetDict
+from datasets import Dataset
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# 메타데이터 전역 캐시 (DataLoader 재생성 시 중복 로딩 방지)
+_metadata_cache: dict[str, list[dict]] = {}
 
 
 def load_dataset(
@@ -63,39 +66,6 @@ def load_dataset(
 
     Returns:
         Dataset (분산 환경에서는 1/world_size 크기)
-
-    Examples:
-        >>> # Critic: Balanced correct/incorrect (50:50)
-        >>> dataset = load_dataset(
-        ...     "codecontests",
-        ...     split="train",
-        ...     n_samples=30000,
-        ...     balance_correct=True,
-        ...     correct_ratio=0.5,
-        ...     seed=42
-        ... )
-        >>>
-        >>> # Verifiable: Difficulty-based curriculum
-        >>> dataset = load_dataset(
-        ...     "codecontests",
-        ...     split="train",
-        ...     n_samples=100000,
-        ...     balance_correct=True,
-        ...     correct_ratio=0.5,
-        ...     difficulty_weights={"low": 0.7, "medium": 0.3, "high": 0.0},
-        ...     difficulty_bins={"low": [1,3], "medium": [4,7], "high": [8,11]},
-        ...     seed=42
-        ... )
-        >>>
-        >>> # Rho-1 / Baseline: Correct-only
-        >>> dataset = load_dataset(
-        ...     "codecontests",
-        ...     split="train",
-        ...     n_samples=100000,
-        ...     balance_correct=False,
-        ...     correct_ratio=1.0,
-        ...     seed=42
-        ... )
     """
     # 메타데이터 로드
     metadata = _load_metadata(dataset_name, split)
@@ -191,7 +161,10 @@ def _load_metadata(
     dataset_name: str,
     split: str,
 ) -> Optional[list[dict]]:
-    """메타데이터 파일 로드
+    """메타데이터 파일 로드 (캐싱 지원)
+
+    동일한 데이터셋/스플릿의 메타데이터는 캐시에서 재사용하여
+    DataLoader 재생성 시 중복 로딩을 방지합니다.
 
     Args:
         dataset_name: 데이터셋 이름
@@ -200,6 +173,15 @@ def _load_metadata(
     Returns:
         메타데이터 리스트 또는 None (파일이 없는 경우)
     """
+    # 캐시 키 생성
+    cache_key = f"{dataset_name}/{split}"
+
+    # 캐시에서 조회
+    if cache_key in _metadata_cache:
+        cached_metadata = _metadata_cache[cache_key]
+        logger.info(f"메타데이터 캐시 히트: {len(cached_metadata):,} 샘플 ({cache_key})")
+        return cached_metadata
+
     base_dir = Path("storage/datasets")
     dataset_dir = base_dir / dataset_name / "processed"
 
@@ -232,6 +214,10 @@ def _load_metadata(
 
         metadata = data.get("metadata", [])
         logger.info(f"메타데이터 로드 완료: {len(metadata):,} 샘플 ({metadata_path.name})")
+
+        # 캐시에 저장
+        _metadata_cache[cache_key] = metadata
+        logger.info(f"메타데이터 캐시 저장: {cache_key}")
 
         return metadata
     except Exception as e:

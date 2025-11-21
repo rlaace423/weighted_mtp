@@ -101,6 +101,9 @@ def get_device(
         if rank is None:
             rank = get_local_rank()  # 노드 내 local rank 사용
 
+        # 현재 프로세스의 기본 CUDA device 설정 (barrier 데드락 방지)
+        torch.cuda.set_device(rank)
+
         device = torch.device(f"cuda:{rank}")
 
         if is_main_process():
