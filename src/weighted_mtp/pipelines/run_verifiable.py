@@ -665,7 +665,7 @@ def run_verifiable_training(
                 # Value function statistics
                 value_func_stats = compute_value_function_stats(
                     values=value_logits.squeeze(-1),
-                    returns=value_targets.squeeze(-1),
+                    returns=td_targets.squeeze(-1),
                 )
 
                 # Weight distribution statistics

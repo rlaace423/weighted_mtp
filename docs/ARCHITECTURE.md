@@ -59,10 +59,10 @@ def forward(self, tokens):
 
 | Pipeline | Value Head | 데이터 샘플링 | Weight 메커니즘 | LOC |
 |----------|-----------|--------------|----------------|-----|
-| **Baseline** | ❌ | 정답만 (150K) | Uniform (1.0) | 583 |
-| **Critic** | ✅ 학습 대상 | 50:50 균형 (50K) | N/A (Value loss만) | 703 |
-| **Verifiable** | ✅ Continual | Curriculum (150K, 50:50) | `exp(td_error/β)` | 810 |
-| **Rho-1** | ❌ | 정답만 (150K) | Top-k binary | 662 |
+| **Baseline** | ❌ | 정답만 (150K) | Uniform (1.0) | 653 |
+| **Critic** | ✅ 학습 대상 | 50:50 균형 (50K) | GAE-based TD targets | 684 |
+| **Verifiable** | ✅ Continual | Curriculum (150K, 50:50) | `exp(td_error/β)` | 918 |
+| **Rho-1** | ❌ | 정답만 (150K) | Top-k binary | 718 |
 
 ### 공통 흐름
 
@@ -157,7 +157,9 @@ model = wrap_model_fsdp(
     sharding_strategy=config.distributed.fsdp.sharding_strategy,
     mixed_precision=config.distributed.fsdp.mixed_precision,
 )
-# → FSDP wrapper 적용 (파이프라인별 sharding 전략)
+# → FSDP wrapper 적용 (TransformerBlock 단위)
+# → use_orig_params=True로 optimizer 호환성 확보
+# → Activation checkpointing 지원
 ```
 
 ### Sharding Strategies
@@ -256,14 +258,21 @@ else:
 
 ## Value Weighting
 
-### Critic: Probabilistic Value Learning
+### Critic: GAE 기반 Value Learning
 
-**Value Head 학습 (MSE Loss)**:
+**GAE (Generalized Advantage Estimation) 기반 TD Targets**:
 ```python
 # Stage 1 (Critic Pretrain): Value Head 단독 학습
-# Target: 모든 토큰에 동일한 reward (R_terminal) 부여
-value_targets = rewards.unsqueeze(1).expand(batch_size, seq_len, 1)
-value_loss = F.mse_loss(value_logits, value_targets)
+# GAE 기반 TD targets 계산 (lam=0.95 기본값)
+# lam=0.0: TD(0), lam=0.95: GAE, lam=1.0: Monte Carlo
+td_targets = compute_td_targets(
+    values=value_logits,
+    rewards=rewards,
+    attention_mask=attention_mask,
+    gamma=gamma,  # 0.99
+    lam=lam,      # 0.95
+)
+value_loss = F.mse_loss(value_logits, td_targets)
 
 # 학습 원리: V(s_t) → E[R | s_t] = P(Success | s_t) 자동 수렴
 # - Correct 샘플: R=1.0 → V → 1.0 (성공 확률 100%)
@@ -272,9 +281,10 @@ value_loss = F.mse_loss(value_logits, value_targets)
 ```
 
 **특징**:
-- MSE loss로 Probabilistic value 학습 (TD error 아님)
+- GAE 기반 TD targets으로 학습 (variance-bias 균형)
 - Binary reward [0,1] → V(s_t) 자연 bounded [0,1]
 - RM 불필요 (~28GB VRAM 절약)
+- `lam` 파라미터로 TD(0)부터 Monte Carlo까지 조절 가능
 
 ### Verifiable: TD Error Weighting
 
@@ -334,33 +344,39 @@ for head_idx in range(1, n_future_tokens):
 
 ```
 weighted_mtp/
-├── configs/              # 계층적 config (defaults + 실험별)
-│   ├── defaults.yaml     # 공통 설정
+├── configs/              # 실험별 독립 config (각 파일이 완전한 설정 포함)
+│   ├── ntp/              # Next Token Prediction
 │   ├── baseline/
 │   ├── critic/
 │   ├── verifiable/
 │   └── rho1/
 ├── src/weighted_mtp/
+│   ├── core/             # 환경변수, 로깅, 타입 정의
+│   ├── cli/              # CLI 진입점 (train.py, evaluate.py)
 │   ├── models/meta_mtp/  # Pure PyTorch Transformer
-│   ├── pipelines/        # 4개 독립 파이프라인
+│   ├── pipelines/        # 파이프라인 (baseline, critic, verifiable, rho1, evaluation)
 │   ├── data/             # 메타데이터 로딩
 │   ├── runtime/          # 분산학습 (FSDP)
-│   ├── utils/            # S3, checkpoint
-│   └── value_weighting/  # TD error, Rho-1
+│   ├── utils/            # S3, checkpoint, config
+│   ├── value_weighting/  # TD error, Rho-1
+│   └── analysis/         # 토큰 값 분석, 시각화, 메트릭
 ├── storage/
 │   ├── models/           # Safetensors 모델
 │   ├── datasets/         # JSONL + 메타데이터
 │   └── checkpoints/      # 학습 checkpoint
 └── tests/
-    ├── unit/             # 15개 단위 테스트
-    └── integration/      # 5개 통합 테스트
+    ├── unit/             # 단위 테스트
+    └── integration/      # 통합 테스트
 ```
 
 ---
 
 ## 참고
 
-- **구현**: `src/weighted_mtp/models/meta_mtp/transformer.py` (358 lines)
-- **메타데이터**: `src/weighted_mtp/data/datasets.py`
-- **분산학습**: `src/weighted_mtp/runtime/distributed.py`
-- **Value Weighting**: `src/weighted_mtp/value_weighting/`
+- **Transformer 구현**: `src/weighted_mtp/models/meta_mtp/transformer.py` (345 lines)
+- **Adapter**: `src/weighted_mtp/models/meta_mtp/adapter.py`
+- **메타데이터 로딩**: `src/weighted_mtp/data/datasets.py`
+- **분산학습**: `src/weighted_mtp/runtime/distributed.py`, `fsdp.py`, `environment.py`
+- **Value Weighting**: `src/weighted_mtp/value_weighting/td_weighting.py` (GAE 지원), `rho1_weighting.py`
+- **분석 도구**: `src/weighted_mtp/analysis/` (token_value_analyzer.py, visualizer.py, metrics.py)
+- **CLI 진입점**: `src/weighted_mtp/cli/train.py`, `evaluate.py`

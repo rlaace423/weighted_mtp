@@ -8,10 +8,15 @@ Meta LLaMA MTP 네이티브 파이프라인을 사용하는 Weighted MTP 구현.
 weighted_mtp/
 ├── vendor/meta_llama/        # Meta 레퍼런스 코드
 ├── src/weighted_mtp/         # 프로젝트 소스
-│   ├── pipelines/            # 4개 학습 파이프라인
+│   ├── pipelines/            # 5개 학습/평가 파이프라인
 │   ├── models/               # Pure PyTorch Transformer
 │   ├── data/                 # 메타데이터 기반 데이터 로딩
-│   └── value_weighting/      # TD error/Rho-1 weighting
+│   ├── value_weighting/      # TD error/Rho-1 weighting
+│   ├── utils/                # 유틸리티 (로깅, 체크포인트, S3 등)
+│   ├── runtime/              # 분산학습 (DDP, FSDP)
+│   ├── core/                 # 환경설정, 타입 정의
+│   ├── cli/                  # CLI 인터페이스
+│   └── analysis/             # 분석 및 시각화
 ├── configs/                  # 설정 파일
 │   ├── ntp/                  # NTP Baseline
 │   ├── baseline/             # Baseline MTP
@@ -51,7 +56,7 @@ pytest tests/integration/  # DDP 테스트는 torchrun 필요
 bash scripts/vessl/ntp_1gpu.sh
 
 # 로컬 실행
-python -m weighted_mtp.pipelines.run_baseline \
+PYTHONPATH=src python src/weighted_mtp/pipelines/run_baseline.py \
   --config configs/ntp/ntp.yaml
 ```
 
@@ -90,7 +95,8 @@ training:
   n_epochs: 1.0
   batch_size: 8  # Per GPU
   learning_rate: 1.0e-4
-  loss_type: mse
+  gamma: 1.0
+  lam: 0.95  # GAE lambda
 ```
 
 ### 3. Baseline MTP
@@ -131,8 +137,9 @@ training:
   beta: 0.9              # TD error temperature
   value_coef: 0.5        # Value loss coefficient
   weight_clip_min: 0.1   # 최소 토큰 가중치
-  weight_clip_max: 5.0   # 최대 토큰 가중치
-  loss_type: mse
+  weight_clip_max: 3.0   # 최대 토큰 가중치
+  gamma: 1.0
+  lam: 0.95              # GAE lambda
 ```
 
 **핵심 메커니즘**:
@@ -153,7 +160,8 @@ PYTHONPATH=src python src/weighted_mtp/pipelines/run_rho1.py \
 models:
   reference:
     name: ref-sheared-llama-2.7b
-    path: storage/models/ref-sheared-llama-2.7b
+    path: storage/models/ref-sheared-llama-2.7b/raw
+    dtype: bfloat16
 
 training:
   temperature: 1.0  # Excess loss temperature

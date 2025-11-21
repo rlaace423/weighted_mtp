@@ -461,7 +461,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     # Value function statistics
                     value_stats = compute_value_function_stats(
                         values=value_logits.squeeze(-1),
-                        returns=value_targets.squeeze(-1),
+                        returns=td_targets.squeeze(-1),
                     )
 
                     # Metric aggregation (DDP)
