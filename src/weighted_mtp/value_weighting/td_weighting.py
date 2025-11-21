@@ -59,7 +59,10 @@ def compute_td_targets(
     values = value_logits.squeeze(-1).detach()
 
     # Terminal indices: 각 시퀀스의 마지막 유효 토큰 위치
-    terminal_indices = attention_mask.sum(dim=1).long() - 1
+    # 왼쪽 패딩을 지원하기 위해 마지막 1의 인덱스를 직접 찾음
+    seq_indices = torch.arange(seq_len, device=device).unsqueeze(0)
+    masked_indices = seq_indices * attention_mask
+    terminal_indices = masked_indices.max(dim=1).values.long()
 
     # TD targets 초기화 (모델 dtype 유지)
     td_targets = torch.zeros(batch_size, seq_len, device=device, dtype=dtype)
@@ -147,9 +150,10 @@ def compute_td_errors(
     values = value_logits.squeeze(-1)
 
     # Terminal indices 계산: 각 시퀀스의 마지막 유효 토큰 위치
-    # attention_mask.sum(dim=1): [batch] 각 시퀀스의 유효 토큰 수
-    # -1: 0-indexed로 변환
-    terminal_indices = attention_mask.sum(dim=1).long() - 1
+    # 왼쪽 패딩을 지원하기 위해 마지막 1의 인덱스를 직접 찾음
+    seq_indices = torch.arange(seq_len, device=values.device).unsqueeze(0)
+    masked_indices = seq_indices * attention_mask
+    terminal_indices = masked_indices.max(dim=1).values.long()
 
     # TD errors 초기화 (전체를 Intermediate로 계산)
     td_errors = torch.zeros_like(values)
