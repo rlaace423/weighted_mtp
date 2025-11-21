@@ -8,6 +8,7 @@
 from .td_weighting import (
     build_weights as build_td_weights,
     compute_td_errors,
+    compute_td_targets,
     compute_td_stats,
     compute_weight_stats,
 )
@@ -19,6 +20,7 @@ from .rho1_weighting import (
 __all__ = [
     # TD Error 기반 (Verifiable)
     "compute_td_errors",
+    "compute_td_targets",
     "build_td_weights",
     "compute_td_stats",
     "compute_weight_stats",

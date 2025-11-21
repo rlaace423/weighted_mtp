@@ -40,7 +40,8 @@ training:
   gradient_accumulation_steps: 2
   learning_rate: 1.0e-4
   max_grad_norm: 1.0
-  loss_type: mse
+  gamma: 1.0
+  lam: 0.95  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
   log_interval: 5
 
 checkpoint:

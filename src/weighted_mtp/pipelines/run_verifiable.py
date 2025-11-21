@@ -50,6 +50,7 @@ from weighted_mtp.runtime import (
 from weighted_mtp.value_weighting.td_weighting import (
     build_weights,
     compute_td_errors,
+    compute_td_targets,
     compute_td_stats,
     compute_weight_stats,
 )
@@ -103,9 +104,10 @@ def validate_verifiable(
     device: torch.device,
     beta: float,
     value_coef: float,
-    loss_type: str,
     weight_clip_min: float,
     weight_clip_max: float,
+    gamma: float = 1.0,
+    lam: float = 0.0,
 ) -> dict[str, float]:
     """Validation 수행 (Stage 2)
 
@@ -115,9 +117,10 @@ def validate_verifiable(
         device: 디바이스
         beta: TD error weighting 계수
         value_coef: Value loss 계수
-        loss_type: 손실 함수 타입
         weight_clip_min: Weight 최소값
         weight_clip_max: Weight 최대값
+        gamma: TD discount factor
+        lam: GAE lambda
 
     Returns:
         Validation metrics
@@ -197,19 +200,21 @@ def validate_verifiable(
 
             weighted_ce_loss = batch_weighted_ce_loss / n_future
 
-            # 7. Value loss (모델 dtype 일치)
-            value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
-            
+            # 7. Value loss (TD target 기반)
+            td_targets = compute_td_targets(
+                value_logits=value_logits,
+                rewards=rewards,
+                attention_mask=attention_mask,
+                gamma=gamma,
+                lam=lam,
+            )
+
             # Mask padded tokens AND instruction tokens (labels != -100)
             valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
             loss_mask = valid_label_mask
 
-            if loss_type == "mse":
-                loss_per_token = F.mse_loss(value_logits, value_targets, reduction="none")
-            elif loss_type == "huber":
-                loss_per_token = F.smooth_l1_loss(value_logits, value_targets, reduction="none")
-            else:
-                raise ValueError(f"Unknown loss_type: {loss_type}")
+            # Value loss 계산 (MSE)
+            loss_per_token = F.mse_loss(value_logits, td_targets, reduction="none")
 
             masked_value_loss = loss_per_token * loss_mask
             value_loss = masked_value_loss.sum() / (loss_mask.sum() + 1e-8)
@@ -585,21 +590,21 @@ def run_verifiable_training(
 
             weighted_ce_loss = batch_weighted_ce_loss / n_future
 
-            # Value loss (Continual Learning, 모델 dtype 일치)
-            value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
-            
+            # Value loss (TD target 기반 Continual Learning)
+            td_targets = compute_td_targets(
+                value_logits=value_logits,
+                rewards=rewards,
+                attention_mask=attention_mask,
+                gamma=getattr(config.training, "gamma", 1.0),
+                lam=getattr(config.training, "lam", 0.0),
+            )
+
             # Mask padded tokens AND instruction tokens (labels != -100)
             valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
             loss_mask = valid_label_mask
 
-            if config.training.loss_type == "mse":
-                loss_per_token = F.mse_loss(value_logits, value_targets, reduction="none")
-            elif config.training.loss_type == "huber":
-                loss_per_token = F.smooth_l1_loss(
-                    value_logits, value_targets, reduction="none"
-                )
-            else:
-                raise ValueError(f"Unknown loss_type: {config.training.loss_type}")
+            # Value loss 계산 (MSE)
+            loss_per_token = F.mse_loss(value_logits, td_targets, reduction="none")
 
             masked_value_loss = loss_per_token * loss_mask
             value_loss = masked_value_loss.sum() / (loss_mask.sum() + 1e-8)
@@ -756,9 +761,10 @@ def run_verifiable_training(
             device=device,
             beta=config.training.beta,
             value_coef=config.training.value_coef,
-            loss_type=config.training.loss_type,
             weight_clip_min=config.training.weight_clip_min,
             weight_clip_max=config.training.weight_clip_max,
+            gamma=getattr(config.training, "gamma", 1.0),
+            lam=getattr(config.training, "lam", 0.0),
         )
 
         # Validation metrics aggregation
@@ -847,9 +853,10 @@ def run_verifiable_training(
             device=device,
             beta=config.training.beta,
             value_coef=config.training.value_coef,
-            loss_type=config.training.loss_type,
             weight_clip_min=config.training.weight_clip_min,
             weight_clip_max=config.training.weight_clip_max,
+            gamma=getattr(config.training, "gamma", 1.0),
+            lam=getattr(config.training, "lam", 0.0),
         )
 
         save_checkpoint(

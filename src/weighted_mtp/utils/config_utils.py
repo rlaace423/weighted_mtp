@@ -278,14 +278,8 @@ def _validate_critic_stage(config: DictConfig, errors: List[str]) -> None:
         config: Config 객체
         errors: 에러 목록 (mutable)
     """
-    # Loss type 확인
-    if hasattr(config, "training") and hasattr(config.training, "loss_type"):
-        valid_loss_types = ["mse", "huber", "mae"]
-        loss_type = config.training.loss_type
-        if loss_type not in valid_loss_types:
-            errors.append(
-                f"잘못된 loss_type: {loss_type}. 유효 값: {valid_loss_types}"
-            )
+    # Critic stage는 현재 추가 검증 없음 (MSE loss 고정)
+    pass
 
 
 def _has_nested_field(config: DictConfig, field_path: str) -> bool:

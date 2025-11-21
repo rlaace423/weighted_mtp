@@ -291,28 +291,6 @@ class TestValidateStageSpecific:
         ):
             validate_config(config)
 
-    def test_critic_invalid_loss_type(self):
-        """Critic stage에서 잘못된 loss_type"""
-        config = OmegaConf.create(
-            {
-                "experiment": {"name": "test", "stage": "critic"},
-                "models": {"policy": {"path": "storage/models/micro-mtp"}},
-                "dataset": {
-                    "name": "codecontests",
-                    "train": "storage/datasets/codecontests/processed/train.jsonl",
-                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
-                },
-                "training": {
-                    "n_epochs": 1,
-                    "batch_size": 4,
-                    "learning_rate": 1e-4,
-                    "loss_type": "invalid_loss",
-                },
-            }
-        )
-
-        with pytest.raises(ConfigValidationError, match="잘못된 loss_type"):
-            validate_config(config)
 
 
 class TestLoadAndValidateConfig:

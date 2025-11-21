@@ -45,6 +45,7 @@ from weighted_mtp.runtime import (
     all_reduce_scalar,
     barrier,
 )
+from weighted_mtp.value_weighting.td_weighting import compute_td_targets
 
 
 def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
@@ -71,7 +72,8 @@ def validate_critic(
     adapter: MetaLlamaMTPAdapter,
     dataloader: DataLoader,
     device: torch.device,
-    loss_type: str,
+    gamma: float = 1.0,
+    lam: float = 0.0,
 ) -> dict[str, float]:
     """Validation 수행
 
@@ -79,7 +81,8 @@ def validate_critic(
         adapter: Adapter
         dataloader: Validation DataLoader
         device: 디바이스
-        loss_type: 손실 함수 타입
+        gamma: TD discount factor
+        lam: GAE lambda
 
     Returns:
         Validation metrics
@@ -111,25 +114,23 @@ def validate_critic(
 
             batch_size, seq_len, _ = value_logits.shape
 
-            # 4. Value target 생성
-            value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
+            # 4. TD target 계산 (MC 방식 삭제, TD Learning 적용)
+            td_targets = compute_td_targets(
+                value_logits=value_logits,
+                rewards=rewards,
+                attention_mask=attention_mask,
+                gamma=gamma,
+                lam=lam,
+            )
 
             # Mask padded tokens AND instruction tokens (labels != -100)
-            # labels != -100 means it's a target token (output)
             valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
             loss_mask = valid_label_mask
 
-            # 5. Value loss 계산
-            if loss_type == "mse":
-                loss_per_token = torch.nn.functional.mse_loss(
-                    value_logits, value_targets, reduction="none"
-                )
-            elif loss_type == "huber":
-                loss_per_token = torch.nn.functional.smooth_l1_loss(
-                    value_logits, value_targets, reduction="none"
-                )
-            else:
-                raise ValueError(f"Unknown loss_type: {loss_type}")
+            # 5. Value loss 계산 (MSE)
+            loss_per_token = torch.nn.functional.mse_loss(
+                value_logits, td_targets, reduction="none"
+            )
 
             # Masked loss
             masked_loss = loss_per_token * loss_mask
@@ -138,7 +139,7 @@ def validate_critic(
             # 6. Metrics 수집
             total_loss += value_loss.item()
             total_value_var += value_logits.var().item()
-            total_target_var += value_targets.var().item()
+            total_target_var += td_targets.var().item()
             n_batches += 1
 
     # 평균 metrics 계산
@@ -391,22 +392,24 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             value_logits = outputs["value_logits"]
 
             batch_size, seq_len, _ = value_logits.shape
-            value_targets = rewards.unsqueeze(1).unsqueeze(2).expand(batch_size, seq_len, 1)
+
+            # TD target 계산 (MC 방식 삭제, TD Learning 적용)
+            td_targets = compute_td_targets(
+                value_logits=value_logits,
+                rewards=rewards,
+                attention_mask=attention_mask,
+                gamma=config.training.gamma,
+                lam=getattr(config.training, "lam", 0.0),
+            )
+
             # Mask padded tokens AND instruction tokens (labels != -100)
-            # labels != -100 means it's a target token (output)
             valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
             loss_mask = valid_label_mask
 
-            if config.training.loss_type == "mse":
-                loss_per_token = torch.nn.functional.mse_loss(
-                    value_logits, value_targets, reduction="none"
-                )
-            elif config.training.loss_type == "huber":
-                loss_per_token = torch.nn.functional.smooth_l1_loss(
-                    value_logits, value_targets, reduction="none"
-                )
-            else:
-                raise ValueError(f"Unknown loss_type: {config.training.loss_type}")
+            # Value loss 계산 (MSE)
+            loss_per_token = torch.nn.functional.mse_loss(
+                value_logits, td_targets, reduction="none"
+            )
 
             masked_loss = loss_per_token * loss_mask
             value_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)
@@ -533,7 +536,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             adapter=adapter,
             dataloader=val_loader,
             device=device,
-            loss_type=config.training.loss_type,
+            gamma=config.training.gamma,
+            lam=getattr(config.training, "lam", 0.0),
         )
 
         # Validation metrics aggregation
@@ -619,7 +623,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             adapter=adapter,
             dataloader=val_loader,
             device=device,
-            loss_type=config.training.loss_type,
+            gamma=config.training.gamma,
+            lam=getattr(config.training, "lam", 0.0),
         )
 
         save_critic_checkpoint(

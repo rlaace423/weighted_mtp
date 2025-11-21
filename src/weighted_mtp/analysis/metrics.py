@@ -20,6 +20,7 @@ def compute_detection_metrics(results: list[dict]) -> dict:
     Returns:
         {
             "n_samples": int,
+            "n_valid_samples": int,
             "drop_rate": float,
             "early_drop_rate": float,
             "mean_value": float,
@@ -30,6 +31,7 @@ def compute_detection_metrics(results: list[dict]) -> dict:
     """
     metrics = {
         "n_samples": len(results),
+        "n_valid_samples": 0,
         "drop_rate": 0.0,
         "early_drop_rate": 0.0,
         "mean_value": 0.0,
@@ -40,6 +42,21 @@ def compute_detection_metrics(results: list[dict]) -> dict:
 
     if len(results) == 0:
         return metrics
+
+    # NaN이 포함된 샘플 필터링
+    valid_results = []
+    for r in results:
+        values = r.get("values", [])
+        if len(values) > 0 and not any(np.isnan(v) or np.isinf(v) for v in values):
+            valid_results.append(r)
+
+    metrics["n_valid_samples"] = len(valid_results)
+
+    if len(valid_results) == 0:
+        return metrics
+
+    # 이후 계산은 valid_results 사용
+    results = valid_results
 
     # Drop rate: 급락이 있는 샘플 비율
     has_drop = [r.get("num_drops", 0) > 0 for r in results]

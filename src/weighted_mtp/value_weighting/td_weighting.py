@@ -13,6 +13,101 @@ References:
 import torch
 
 
+def compute_td_targets(
+    value_logits: torch.Tensor,
+    rewards: torch.Tensor,
+    attention_mask: torch.Tensor,
+    gamma: float = 1.0,
+    lam: float = 0.0,
+) -> torch.Tensor:
+    """GAE 기반 TD targets 계산 (Value 학습용)
+
+    GAE (Generalized Advantage Estimation) 알고리즘:
+    - δ_t = r_t + γV(s_{t+1}) - V(s_t)  (TD error)
+    - A_t = δ_t + γλ * A_{t+1}  (역방향 계산)
+    - Target_t = V(s_t) + A_t
+
+    Args:
+        value_logits: [batch, seq, 1] Value head 출력
+        rewards: [batch] Binary reward (0.0: incorrect, 1.0: correct)
+        attention_mask: [batch, seq] 유효 토큰 마스크 (1: 유효, 0: padding)
+        gamma: 할인율 (기본 1.0)
+        lam: GAE lambda (기본 0.0)
+            - 0.0: TD(0) - 한 스텝 bootstrapping
+            - 0.95: GAE - 권장값, 빠른 수렴 + 안정성
+            - 1.0: Monte Carlo
+
+    Returns:
+        td_targets: [batch, seq, 1] TD targets (gradient 차단됨)
+
+    Examples:
+        >>> value_logits = torch.tensor([[[0.5], [0.7], [0.9]]])  # [1, 3, 1]
+        >>> rewards = torch.tensor([1.0])
+        >>> attention_mask = torch.tensor([[1, 1, 1]])
+        >>> # TD(0): lam=0
+        >>> targets = compute_td_targets(value_logits, rewards, attention_mask, gamma=1.0, lam=0.0)
+        >>> # [0.7, 0.9, 1.0]
+        >>> # GAE: lam=0.95
+        >>> targets = compute_td_targets(value_logits, rewards, attention_mask, gamma=1.0, lam=0.95)
+        >>> # 에러 신호가 더 빠르게 전파됨
+    """
+    batch_size, seq_len, _ = value_logits.shape
+    device = value_logits.device
+
+    # Value logits squeeze 및 detach: [batch, seq, 1] → [batch, seq]
+    values = value_logits.squeeze(-1).detach()
+
+    # Terminal indices: 각 시퀀스의 마지막 유효 토큰 위치
+    terminal_indices = attention_mask.sum(dim=1).long() - 1
+
+    # TD targets 초기화
+    td_targets = torch.zeros(batch_size, seq_len, device=device)
+
+    # TD(0) 모드: 기존 방식 (빠른 연산)
+    if lam == 0.0:
+        # Intermediate targets: γ * V(s_{t+1})
+        if seq_len > 1:
+            td_targets[:, :-1] = gamma * values[:, 1:]
+
+        # Terminal targets: R
+        batch_indices = torch.arange(batch_size, device=device)
+        td_targets[batch_indices, terminal_indices] = rewards
+
+    # GAE 모드: 역방향 계산
+    else:
+        for b in range(batch_size):
+            last_gae = 0.0
+            term_idx = terminal_indices[b].item()
+
+            # 역방향으로 GAE 계산
+            for t in range(int(term_idx), -1, -1):
+                if t == term_idx:
+                    # Terminal: δ_T = R - V(s_T)
+                    next_value = 0.0
+                    reward = rewards[b].item()
+                else:
+                    # Intermediate: δ_t = γV(s_{t+1}) - V(s_t)
+                    next_value = values[b, t + 1].item()
+                    reward = 0.0
+
+                # TD error
+                delta = reward + gamma * next_value - values[b, t].item()
+
+                # GAE: A_t = δ_t + γλ * A_{t+1}
+                gae = delta + gamma * lam * last_gae
+
+                # Target: V(s_t) + A_t
+                td_targets[b, t] = values[b, t].item() + gae
+
+                last_gae = gae
+
+    # Padding 마스킹
+    td_targets = td_targets * attention_mask.float()
+
+    # [batch, seq] → [batch, seq, 1]
+    return td_targets.unsqueeze(-1)
+
+
 def compute_td_errors(
     value_logits: torch.Tensor,
     rewards: torch.Tensor,

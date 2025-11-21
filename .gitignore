@@ -31,6 +31,7 @@ build/
 .coverage
 .pytest_cache/
 htmlcov/
+results/
 
 # ML artifacts
 mlruns/

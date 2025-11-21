@@ -55,7 +55,8 @@ training:
   gradient_accumulation_steps: 2  # Effective batch size = 16
   learning_rate: 1.0e-4  # Critic은 높은 LR
   max_grad_norm: 1.0
-  loss_type: mse
+  gamma: 1.0
+  lam: 0.95  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
   log_interval: 1
 
 # 체크포인트
