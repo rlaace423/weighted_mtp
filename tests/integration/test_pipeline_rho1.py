@@ -51,10 +51,9 @@ def test_rho1_pipeline_micro_mtp():
         },
     }
 
-    # Config 로드 및 준비
-    defaults = OmegaConf.load("configs/defaults.yaml")
+    # Config 로드
     config = OmegaConf.load(config_path)
-    config = OmegaConf.merge(defaults, config)
+
 
     # Overrides 적용
     override_config = OmegaConf.create(override_params)
@@ -100,9 +99,8 @@ def test_rho1_config_validation():
     config_path = Path("configs/rho1/rho1_local.yaml")
     assert config_path.exists(), f"Config not found: {config_path}"
 
-    defaults = OmegaConf.load("configs/defaults.yaml")
     config = OmegaConf.load(str(config_path))
-    config = OmegaConf.merge(defaults, config)
+
 
     # 필수 필드 검증
     assert hasattr(config, "experiment"), "Config should have experiment"
