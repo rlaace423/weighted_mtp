@@ -484,17 +484,28 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     avg_grad_norm_pre = grad_clip_stats["grad_norm_pre_clip"]
                     avg_grad_clip_ratio = grad_clip_stats["grad_clip_ratio"]
 
+                    # 디버깅: valid token ratio 계산
+                    n_valid_tokens = loss_mask.sum().item()
+                    n_total_tokens = attention_mask.sum().item()
+                    valid_token_ratio = n_valid_tokens / (n_total_tokens + 1e-8)
+
                     # 나머지 메트릭 배치 all_reduce (1회 통신)
                     reduced = all_reduce_scalars({
                         "loss": value_loss.item(),
                         "value_mean": value_stats["value_mean"],
                         "value_std": value_stats["value_std"],
                         "value_mse": value_stats["value_mse"],
+                        "return_mean": value_stats["return_mean"],
+                        "valid_token_ratio": valid_token_ratio,
+                        "n_valid_tokens": n_valid_tokens,
                     })
                     avg_loss = reduced["loss"]
                     avg_value_mean = reduced["value_mean"]
                     avg_value_std = reduced["value_std"]
                     avg_value_mse = reduced["value_mse"]
+                    avg_return_mean = reduced["return_mean"]
+                    avg_valid_token_ratio = reduced["valid_token_ratio"]
+                    avg_n_valid_tokens = reduced["n_valid_tokens"]
 
                     if is_main_process():
                         if use_mlflow:
@@ -508,6 +519,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                                     "value/mean_prediction": avg_value_mean,
                                     "value/std_prediction": avg_value_std,
                                     "value/mse": avg_value_mse,
+                                    "value/return_mean": avg_return_mean,
+                                    "debug/valid_token_ratio": avg_valid_token_ratio,
+                                    "debug/n_valid_tokens": avg_n_valid_tokens,
                                     "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
                                     "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
                                 },
@@ -516,7 +530,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     logger.info(
                         f"Step {global_step}/{total_optimization_steps}, "
                         f"Loss: {avg_loss:.4f}, "
-                        f"Grad Norm: {avg_grad_norm_post:.4f} (Clip Ratio: {avg_grad_clip_ratio:.2f})"
+                        f"Grad Norm: {avg_grad_norm_post:.4f} (Clip Ratio: {avg_grad_clip_ratio:.2f}), "
+                        f"Return Mean: {avg_return_mean:.4f}, Valid Tokens: {avg_n_valid_tokens:.0f} ({avg_valid_token_ratio:.1%})"
                     )
 
         # Period loop 종료

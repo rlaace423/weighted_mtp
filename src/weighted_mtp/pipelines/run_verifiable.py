@@ -656,20 +656,23 @@ def run_verifiable_training(
 
             # Step-level 로깅 (optimizer step 시에만)
             if global_step % config.training.log_interval == 0 and accumulation_counter == 0:
-                # TD error/weight stats (padding 제외)
-                td_stats = compute_td_stats(td_errors, attention_mask)
-                weight_stats = compute_weight_stats(weights, attention_mask)
+                # Response 토큰 마스크 (통계 계산용)
+                response_mask = valid_label_mask.squeeze(-1)
+
+                # TD error/weight stats (response 토큰만)
+                td_stats = compute_td_stats(td_errors, response_mask)
+                weight_stats = compute_weight_stats(weights, response_mask)
                 gpu_metrics = gpu_monitor.get_metrics()
 
-                # Value function statistics (padding 제외)
+                # Value function statistics (response 토큰만)
                 value_func_stats = compute_value_function_stats(
                     values=value_logits.squeeze(-1),
                     returns=td_targets.squeeze(-1),
-                    attention_mask=attention_mask,
+                    attention_mask=response_mask,
                 )
 
-                # Weight distribution statistics (padding 제외)
-                weight_dist_stats = compute_weight_statistics(weights, attention_mask)
+                # Weight distribution statistics (response 토큰만)
+                weight_dist_stats = compute_weight_statistics(weights, response_mask)
 
                 # Metric aggregation (분산 환경)
                 # grad_clip_stats는 clip_grad_norm_이 이미 전역 값을 반환하므로 all_reduce 불필요
