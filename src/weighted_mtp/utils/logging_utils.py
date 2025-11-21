@@ -11,11 +11,15 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 
-def compute_weight_statistics(weights: torch.Tensor) -> dict[str, float]:
+def compute_weight_statistics(
+    weights: torch.Tensor,
+    attention_mask: torch.Tensor = None,
+) -> dict[str, float]:
     """Weight 분포 통계 계산
 
     Args:
         weights: Token weights [batch, seq, n_heads] or [batch, seq]
+        attention_mask: 유효 토큰 마스크 [batch, seq] (None이면 전체 사용)
 
     Returns:
         통계 딕셔너리:
@@ -25,8 +29,18 @@ def compute_weight_statistics(weights: torch.Tensor) -> dict[str, float]:
             - weight_max: 최대값
             - weight_entropy: 엔트로피
     """
-    # Flatten if multi-dimensional
-    weights_flat = weights.view(-1)
+    if attention_mask is not None:
+        # 유효한 토큰만 선택 (padding 제외)
+        # weights가 [batch, seq, n_heads]인 경우 처리
+        if weights.dim() == 3:
+            batch, seq, n_heads = weights.shape
+            mask = attention_mask.view(batch, seq, 1).expand(-1, -1, n_heads)
+            weights_flat = weights[mask.bool()]
+        else:
+            mask = attention_mask.view(-1).bool()
+            weights_flat = weights.view(-1)[mask]
+    else:
+        weights_flat = weights.view(-1)
 
     # Entropy 계산 (log base e)
     # 0에 가까운 값 방지를 위해 epsilon 추가
@@ -93,12 +107,14 @@ def compute_gradient_clip_stats(
 def compute_value_function_stats(
     values: torch.Tensor,
     returns: torch.Tensor,
+    attention_mask: torch.Tensor = None,
 ) -> dict[str, float]:
     """Value function 품질 통계 계산
 
     Args:
         values: Predicted values [batch, seq]
         returns: Target returns [batch, seq]
+        attention_mask: 유효 토큰 마스크 [batch, seq] (None이면 전체 사용)
 
     Returns:
         통계 딕셔너리:
@@ -107,8 +123,14 @@ def compute_value_function_stats(
             - value_std: Predicted value 표준편차
             - return_mean: 평균 return
     """
-    values_flat = values.reshape(-1)
-    returns_flat = returns.reshape(-1)
+    if attention_mask is not None:
+        # 유효한 토큰만 선택 (padding 제외)
+        mask = attention_mask.reshape(-1).bool()
+        values_flat = values.reshape(-1)[mask]
+        returns_flat = returns.reshape(-1)[mask]
+    else:
+        values_flat = values.reshape(-1)
+        returns_flat = returns.reshape(-1)
 
     # MSE
     mse = F.mse_loss(values_flat, returns_flat)

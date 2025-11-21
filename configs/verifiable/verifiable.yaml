@@ -49,8 +49,8 @@ data_sampling:
   curriculum_learning: true
   difficulty_bins:
     easy: [6, 7]
-    medium: [8, 9]
-    hard: [10, 25]
+    medium: [8, 10]
+    hard: [11, 25]
   curriculum_schedule:
     - epoch_range: [0.0, 0.3]
       difficulty_weights:
@@ -82,6 +82,7 @@ training:
   value_coef: 0.5  # Value loss coefficient
   weight_clip_min: 0.1  # 최소 가중치
   weight_clip_max: 3.0  # 최대 가중치
+  loss_type: mse
   gamma: 1.0
   lam: 0.95  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
 

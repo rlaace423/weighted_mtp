@@ -305,8 +305,13 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         )
 
     # 6. Optimizer (Value head only) - Meta MTP 논문 설정
+    # FSDP wrapping 후 requires_grad=True인 파라미터만 필터링
+    # (transformer는 frozen 상태이므로 value_head만 선택됨)
+    trainable_params = [p for p in adapter.parameters() if p.requires_grad]
+    logger.info(f"Trainable params: {sum(p.numel() for p in trainable_params):,}")
+
     optimizer = torch.optim.AdamW(
-        adapter.value_head.parameters(),
+        trainable_params,
         lr=config.training.learning_rate,
         betas=(0.9, 0.95),
         weight_decay=0.01,
@@ -458,10 +463,11 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     # GPU metrics
                     gpu_metrics = gpu_monitor.get_metrics()
 
-                    # Value function statistics
+                    # Value function statistics (padding 제외)
                     value_stats = compute_value_function_stats(
                         values=value_logits.squeeze(-1),
                         returns=td_targets.squeeze(-1),
+                        attention_mask=attention_mask,
                     )
 
                     # Metric aggregation (DDP)

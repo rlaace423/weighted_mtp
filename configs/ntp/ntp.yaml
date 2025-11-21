@@ -49,8 +49,8 @@ data_sampling:
   curriculum_learning: true
   difficulty_bins:
     easy: [6, 7]
-    medium: [8, 9]
-    hard: [10, 25]
+    medium: [8, 10]
+    hard: [11, 25]
   curriculum_schedule:
     - epoch_range: [0.0, 0.3]
       difficulty_weights:

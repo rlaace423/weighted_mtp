@@ -219,11 +219,15 @@ def build_weights(
     return weights
 
 
-def compute_td_stats(td_errors: torch.Tensor) -> dict[str, float]:
+def compute_td_stats(
+    td_errors: torch.Tensor,
+    attention_mask: torch.Tensor = None,
+) -> dict[str, float]:
     """TD error 분포 통계 계산
 
     Args:
         td_errors: [batch, seq] TD errors
+        attention_mask: 유효 토큰 마스크 [batch, seq] (None이면 전체 사용)
 
     Returns:
         {
@@ -241,8 +245,12 @@ def compute_td_stats(td_errors: torch.Tensor) -> dict[str, float]:
         >>> stats["td_std"]  # 표준편차
         0.28
     """
-    # Flatten td_errors for global statistics
-    td_flat = td_errors.flatten()
+    if attention_mask is not None:
+        # 유효한 토큰만 선택 (padding 제외)
+        mask = attention_mask.flatten().bool()
+        td_flat = td_errors.flatten()[mask]
+    else:
+        td_flat = td_errors.flatten()
 
     return {
         "td_mean": td_flat.mean().item(),
@@ -252,11 +260,15 @@ def compute_td_stats(td_errors: torch.Tensor) -> dict[str, float]:
     }
 
 
-def compute_weight_stats(weights: torch.Tensor) -> dict[str, float]:
+def compute_weight_stats(
+    weights: torch.Tensor,
+    attention_mask: torch.Tensor = None,
+) -> dict[str, float]:
     """Weight 분포 통계 계산
 
     Args:
         weights: [batch, seq] Token weights
+        attention_mask: 유효 토큰 마스크 [batch, seq] (None이면 전체 사용)
 
     Returns:
         {
@@ -275,8 +287,12 @@ def compute_weight_stats(weights: torch.Tensor) -> dict[str, float]:
         >>> stats["weight_entropy"]  # 엔트로피 (높을수록 균등 분포)
         0.95
     """
-    # Flatten weights for global statistics
-    weights_flat = weights.flatten()
+    if attention_mask is not None:
+        # 유효한 토큰만 선택 (padding 제외)
+        mask = attention_mask.flatten().bool()
+        weights_flat = weights.flatten()[mask]
+    else:
+        weights_flat = weights.flatten()
 
     # Basic statistics
     weight_mean = weights_flat.mean().item()

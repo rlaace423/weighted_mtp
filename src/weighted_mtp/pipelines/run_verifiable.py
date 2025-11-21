@@ -657,19 +657,20 @@ def run_verifiable_training(
 
             # Step-level 로깅 (optimizer step 시에만)
             if global_step % config.training.log_interval == 0 and accumulation_counter == 0:
-                # TD error/weight stats
-                td_stats = compute_td_stats(td_errors)
-                weight_stats = compute_weight_stats(weights)
+                # TD error/weight stats (padding 제외)
+                td_stats = compute_td_stats(td_errors, attention_mask)
+                weight_stats = compute_weight_stats(weights, attention_mask)
                 gpu_metrics = gpu_monitor.get_metrics()
 
-                # Value function statistics
+                # Value function statistics (padding 제외)
                 value_func_stats = compute_value_function_stats(
                     values=value_logits.squeeze(-1),
                     returns=td_targets.squeeze(-1),
+                    attention_mask=attention_mask,
                 )
 
-                # Weight distribution statistics
-                weight_dist_stats = compute_weight_statistics(weights)
+                # Weight distribution statistics (padding 제외)
+                weight_dist_stats = compute_weight_statistics(weights, attention_mask)
 
                 # Metric aggregation (DDP)
                 avg_weighted_ce = all_reduce_scalar(weighted_ce_loss.item())
