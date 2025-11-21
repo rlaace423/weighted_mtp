@@ -37,10 +37,12 @@ def setup_logging(
         # Pipeline에서 분산학습
         rank = get_rank()
         logger = setup_logging("BASELINE", level="INFO", rank=rank)
-        logger.info(f"Device: cuda:{rank}")
+        logger.info(f"Device: cuda:{rank}")  # rank 0만 출력
     """
-    # Logger 이름 생성
-    if rank is not None:
+    # Logger 이름 생성 (rank 0만 표시, 나머지는 이름만)
+    if rank is not None and rank == 0:
+        logger_name = f"{name}:R{rank}"
+    elif rank is not None:
         logger_name = f"{name}:R{rank}"
     else:
         logger_name = name
@@ -59,5 +61,11 @@ def setup_logging(
         root.addHandler(handler)
         root.setLevel(getattr(logging, level.upper()))
 
-    # Pipeline별 logger 반환
-    return logging.getLogger(logger_name)
+    # Pipeline별 logger 생성
+    logger = logging.getLogger(logger_name)
+
+    # 분산학습에서 rank != 0이면 WARNING 이상만 출력 (INFO 로그 억제)
+    if rank is not None and rank != 0:
+        logger.setLevel(logging.WARNING)
+
+    return logger

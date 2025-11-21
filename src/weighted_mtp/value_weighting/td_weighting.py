@@ -53,6 +53,7 @@ def compute_td_targets(
     """
     batch_size, seq_len, _ = value_logits.shape
     device = value_logits.device
+    dtype = value_logits.dtype  # BFloat16 등 모델 dtype 유지
 
     # Value logits squeeze 및 detach: [batch, seq, 1] → [batch, seq]
     values = value_logits.squeeze(-1).detach()
@@ -60,8 +61,8 @@ def compute_td_targets(
     # Terminal indices: 각 시퀀스의 마지막 유효 토큰 위치
     terminal_indices = attention_mask.sum(dim=1).long() - 1
 
-    # TD targets 초기화
-    td_targets = torch.zeros(batch_size, seq_len, device=device)
+    # TD targets 초기화 (모델 dtype 유지)
+    td_targets = torch.zeros(batch_size, seq_len, device=device, dtype=dtype)
 
     # TD(0) 모드: 기존 방식 (빠른 연산)
     if lam == 0.0:
@@ -101,8 +102,8 @@ def compute_td_targets(
 
                 last_gae = gae
 
-    # Padding 마스킹
-    td_targets = td_targets * attention_mask.float()
+    # Padding 마스킹 (dtype 유지)
+    td_targets = td_targets * attention_mask.to(dtype)
 
     # [batch, seq] → [batch, seq, 1]
     return td_targets.unsqueeze(-1)
