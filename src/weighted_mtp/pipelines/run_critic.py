@@ -210,12 +210,33 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # 6. Resource 로딩
     adapter = load_adapter(config, device)
 
-    # Transformer trunk freeze (value head만 학습)
-    logger.info("Freezing transformer trunk (training value head only)")
-    for param in adapter.transformer.parameters():
-        param.requires_grad = False
+    # Transformer trunk freeze 설정
+    num_unfrozen = config.training.get("num_unfrozen_layers", 0)
+    n_layers = len(adapter.transformer.layers)
 
-    # Value head는 명시적으로 trainable 설정
+    if num_unfrozen > 0:
+        # 마지막 N개 블록만 학습
+        logger.info(f"Unfreezing last {num_unfrozen} transformer blocks (out of {n_layers})")
+
+        # 전체 frozen
+        for param in adapter.transformer.parameters():
+            param.requires_grad = False
+
+        # 마지막 N개 블록 unfreeze
+        for layer in adapter.transformer.layers[-num_unfrozen:]:
+            for param in layer.parameters():
+                param.requires_grad = True
+
+        # final norm도 unfreeze (마지막 블록 출력에 영향)
+        for param in adapter.transformer.norm.parameters():
+            param.requires_grad = True
+    else:
+        # 기존 동작: value head만 학습
+        logger.info("Freezing transformer trunk (training value head only)")
+        for param in adapter.transformer.parameters():
+            param.requires_grad = False
+
+    # Value head는 항상 학습
     for param in adapter.value_head.parameters():
         param.requires_grad = True
 
@@ -232,6 +253,19 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
     # Model size 로깅
     model_size = get_model_size(unwrap_model(adapter))
+
+    # Trainable params breakdown 계산
+    trainable_breakdown = {
+        "value_head": sum(p.numel() for p in adapter.value_head.parameters() if p.requires_grad),
+        "trunk_blocks": sum(
+            p.numel() for layer in adapter.transformer.layers[-num_unfrozen:]
+            for p in layer.parameters() if p.requires_grad
+        ) if num_unfrozen > 0 else 0,
+        "norm": sum(
+            p.numel() for p in adapter.transformer.norm.parameters() if p.requires_grad
+        ) if num_unfrozen > 0 else 0,
+    }
+
     if is_main_process():
         if use_mlflow:
             mlflow.log_params(
@@ -239,11 +273,20 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     "model_total_params": model_size["total_params"],
                     "model_trainable_params": model_size["trainable_params"],
                     "model_non_trainable_params": model_size["non_trainable_params"],
+                    "model_num_unfrozen_layers": num_unfrozen,
+                    "model_trainable_value_head": trainable_breakdown["value_head"],
+                    "model_trainable_trunk_blocks": trainable_breakdown["trunk_blocks"],
+                    "model_trainable_norm": trainable_breakdown["norm"],
                 }
             )
         logger.info(
             f"Model size: {model_size['trainable_params']:,} trainable / "
             f"{model_size['total_params']:,} total params"
+        )
+        logger.info(
+            f"Trainable breakdown - value_head: {trainable_breakdown['value_head']:,}, "
+            f"trunk_blocks: {trainable_breakdown['trunk_blocks']:,}, "
+            f"norm: {trainable_breakdown['norm']:,}"
         )
 
         # System info 로깅
