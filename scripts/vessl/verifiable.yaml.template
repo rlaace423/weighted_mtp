@@ -50,8 +50,8 @@ run:
       echo "=== Critic Checkpoint 확인 ==="
       if [ -z "$CRITIC_CHECKPOINT" ]; then
         echo "경고: CRITIC_CHECKPOINT 환경변수가 설정되지 않았습니다"
-        echo "기본값 사용: storage/checkpoints/critic/critic-pretrain/checkpoint_best.pt"
-        CRITIC_CHECKPOINT="storage/checkpoints/critic/critic-pretrain/checkpoint_best.pt"
+        echo "기본값 사용: storage/checkpoints/critic/critic-pretrain-s3/checkpoint_value_head_only.pt"
+        CRITIC_CHECKPOINT="storage/checkpoints/critic/critic-pretrain-s3/checkpoint_value_head_only.pt"
       fi
       echo "Critic checkpoint: $CRITIC_CHECKPOINT"
       ls -lh "$CRITIC_CHECKPOINT" || echo "경고: Checkpoint 파일이 존재하지 않습니다"

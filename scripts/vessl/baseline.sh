@@ -128,7 +128,7 @@ fi
 sed -i.bak "s|{{NGPUS}}|$NGPUS|g" "$TEMP_YAML"
 sed -i.bak "s|{{PRESET}}|$PRESET|g" "$TEMP_YAML"
 sed -i.bak "s|{{TRAIN_COMMAND}}|$TRAIN_CMD|g" "$TEMP_YAML"
-sed -i.bak "s|{{NCCL_DEBUG}}|$NCCL_DEBUG|g" "$TEMP_YAML"
+sed -i.bak "s|{{NCCL_DEBUG}}|$NCCL_ENV_VARS|g" "$TEMP_YAML"
 sed -i.bak "s|{{IMAGE}}|$IMAGE|g" "$TEMP_YAML"
 
 # SETUP_COMMANDS 치환 (임시 파일 사용 - 개행 및 특수문자 안전 처리)

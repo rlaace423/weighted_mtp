@@ -325,6 +325,12 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # 8. Training loop
     optimizer.zero_grad()
 
+    # Debug: Training loop 진입 전 barrier
+    if "RANK" in os.environ:
+        logger.info(f"[Rank {rank}] Reaching barrier before training loop")
+        barrier()
+        logger.info(f"[Rank {rank}] Barrier passed, entering training loop")
+
     while batch_count < batches_to_run:
         # Checkpoint 경계까지 훈련
         target_epoch = min(next_checkpoint_epoch, n_epochs)
@@ -349,12 +355,24 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             # 1 batch 훈련 (Baseline 로직 - 균등 가중치)
             adapter.train()
 
+            # Debug: 첫 배치 시작 로그
+            if batch_count == 0:
+                logger.info(f"[Rank {rank}] Starting first batch - moving data to device")
+
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
             # Forward (MTP만, Value head 없음)
+            # Debug: Forward 시작
+            if batch_count == 0:
+                logger.info(f"[Rank {rank}] Data moved to device, starting forward pass")
+
             logits = adapter(input_ids)
+
+            # Debug: Forward 완료
+            if batch_count == 0:
+                logger.info(f"[Rank {rank}] Forward pass completed, logits shape: {logits.shape}")
             # logits: [batch, seq, n_future, vocab]
 
             batch_size, seq_len, n_future, vocab_size = logits.shape
