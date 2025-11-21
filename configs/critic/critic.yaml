@@ -75,9 +75,10 @@ runtime:
 # 분산학습 설정
 distributed:
   fsdp:
-    sharding_strategy: NO_SHARD
+    sharding_strategy: FULL_SHARD
     mixed_precision: true
     cpu_offload: false
+    activation_checkpointing: true
 
 # 스토리지
 storage:

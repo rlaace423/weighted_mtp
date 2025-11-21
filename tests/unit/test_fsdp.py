@@ -4,6 +4,7 @@ Tests:
 - wrap_model_fsdp: FSDP wrapping (distributed/single-device)
 - unwrap_model: FSDP wrapper 제거
 - all_reduce_scalar: Metric aggregation
+- activation_checkpointing: 메모리 절감을 위한 activation checkpointing
 """
 
 import pytest
@@ -264,3 +265,74 @@ def test_wrap_model_fsdp_strategy_validation(simple_model, device):
     # Single-device에서는 wrapping 안 됨
     if not is_distributed():
         assert not isinstance(wrapped_model, FSDP)
+
+
+def test_wrap_model_fsdp_activation_checkpointing(simple_model, device):
+    """Activation checkpointing 옵션 테스트"""
+    model = simple_model.to(device)
+
+    # activation_checkpointing=True로 wrapping 시도
+    wrapped_model = wrap_model_fsdp(
+        model, device, activation_checkpointing=True
+    )
+
+    # Single-device 환경에서는 FSDP로 wrapping되지 않음
+    # activation_checkpointing은 분산 환경에서만 적용됨
+    assert not isinstance(wrapped_model, FSDP)
+    assert wrapped_model is model
+
+
+def test_wrap_model_fsdp_activation_checkpointing_false(simple_model, device):
+    """Activation checkpointing 비활성화 테스트"""
+    model = simple_model.to(device)
+
+    # activation_checkpointing=False (기본값)
+    wrapped_model = wrap_model_fsdp(
+        model, device, activation_checkpointing=False
+    )
+
+    # Single-device 환경에서는 FSDP로 wrapping되지 않음
+    assert not isinstance(wrapped_model, FSDP)
+    assert wrapped_model is model
+
+
+def test_wrap_model_fsdp_all_options(simple_model, device):
+    """모든 옵션 조합 테스트"""
+    model = simple_model.to(device)
+
+    # 모든 옵션을 함께 사용
+    wrapped_model = wrap_model_fsdp(
+        model,
+        device,
+        sharding_strategy="FULL_SHARD",
+        mixed_precision=True,
+        cpu_offload=False,
+        activation_checkpointing=True,
+    )
+
+    # Single-device 환경에서는 FSDP로 wrapping되지 않음
+    assert not isinstance(wrapped_model, FSDP)
+
+    # Forward pass 정상 동작 확인
+    x = torch.randn(2, 10, device=device)
+    with torch.no_grad():
+        output = wrapped_model(x)
+    assert output.shape == (2, 5)
+
+
+def test_model_forward_with_activation_checkpointing(simple_model, device):
+    """Activation checkpointing 옵션과 함께 forward pass 테스트"""
+    model = simple_model.to(device)
+    wrapped_model = wrap_model_fsdp(
+        model, device, activation_checkpointing=True
+    )
+
+    # 테스트 입력
+    x = torch.randn(2, 10, device=device)
+
+    # Forward pass
+    with torch.no_grad():
+        output = wrapped_model(x)
+
+    # 출력 shape 확인
+    assert output.shape == (2, 5)

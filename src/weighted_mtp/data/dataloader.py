@@ -108,7 +108,8 @@ def create_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         collate_fn=collator,
-        num_workers=0,
+        num_workers=2,
+        pin_memory=True,
     )
 
     return dataloader

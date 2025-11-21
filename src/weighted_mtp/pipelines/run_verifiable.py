@@ -343,6 +343,7 @@ def run_verifiable_training(
         sharding_strategy=config.distributed.fsdp.sharding_strategy,
         mixed_precision=config.distributed.fsdp.mixed_precision,
         cpu_offload=config.distributed.fsdp.cpu_offload,
+        activation_checkpointing=config.distributed.fsdp.get("activation_checkpointing", False),
     )
 
     # 10. Optimizer (전체 파라미터) - Meta MTP 논문 설정

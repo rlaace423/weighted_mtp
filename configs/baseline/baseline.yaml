@@ -97,6 +97,7 @@ distributed:
     sharding_strategy: FULL_SHARD
     mixed_precision: true
     cpu_offload: false
+    activation_checkpointing: true
 
 # 스토리지
 storage:

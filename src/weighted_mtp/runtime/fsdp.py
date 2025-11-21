@@ -14,6 +14,11 @@ from torch.distributed.fsdp import (
     CPUOffload,
 )
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper,
+    CheckpointImpl,
+    apply_activation_checkpointing,
+)
 
 from weighted_mtp.runtime.distributed import is_distributed, is_main_process
 
@@ -26,6 +31,7 @@ def wrap_model_fsdp(
     sharding_strategy: str = "FULL_SHARD",
     mixed_precision: bool = True,
     cpu_offload: bool = False,
+    activation_checkpointing: bool = False,
 ) -> torch.nn.Module:
     """FSDP로 모델 래핑
 
@@ -40,6 +46,7 @@ def wrap_model_fsdp(
             - NO_SHARD: DDP와 동일 (모델 복제)
         mixed_precision: FP16 mixed precision 사용 여부
         cpu_offload: CPU 오프로드 (메모리 부족 시)
+        activation_checkpointing: Activation checkpointing 적용 여부 (메모리 절감)
 
     Returns:
         FSDP-wrapped model (또는 원본 model if not distributed)
@@ -102,10 +109,24 @@ def wrap_model_fsdp(
         use_orig_params=True,
     )
 
+    # Activation Checkpointing 적용 (FSDP wrapping 후)
+    if activation_checkpointing:
+        non_reentrant_wrapper = functools.partial(
+            checkpoint_wrapper,
+            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+        )
+
+        apply_activation_checkpointing(
+            wrapped_model,
+            checkpoint_wrapper_fn=non_reentrant_wrapper,
+            check_fn=lambda submodule: isinstance(submodule, TransformerBlock),
+        )
+
     if is_main_process():
         logger.info(
             f"FSDP wrapping 완료: sharding_strategy={sharding_strategy}, "
-            f"mixed_precision={mixed_precision}, cpu_offload={cpu_offload}"
+            f"mixed_precision={mixed_precision}, cpu_offload={cpu_offload}, "
+            f"activation_checkpointing={activation_checkpointing}"
         )
 
     return wrapped_model

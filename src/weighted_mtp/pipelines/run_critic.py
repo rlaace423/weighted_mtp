@@ -220,6 +220,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         sharding_strategy=config.distributed.fsdp.sharding_strategy,
         mixed_precision=config.distributed.fsdp.mixed_precision,
         cpu_offload=config.distributed.fsdp.cpu_offload,
+        activation_checkpointing=config.distributed.fsdp.get("activation_checkpointing", False),
     )
     tokenizer = load_tokenizer_from_config(config)
 

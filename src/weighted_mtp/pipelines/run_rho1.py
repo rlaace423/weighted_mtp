@@ -265,6 +265,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
         sharding_strategy=config.distributed.fsdp.sharding_strategy,
         mixed_precision=config.distributed.fsdp.mixed_precision,
         cpu_offload=config.distributed.fsdp.cpu_offload,
+        activation_checkpointing=config.distributed.fsdp.get("activation_checkpointing", False),
     )
 
     # Model size + System info 로깅 (Rank 0만)
