@@ -96,11 +96,11 @@ def test_value_head_checkpoint_save_load(tmp_path):
     assert loaded.hidden_size == 512
 
 
-def test_trunk_forward_shape(micro_adapter):
-    """trunk_forward() 출력 shape 테스트"""
+def test_forward_value_logits_shape(micro_adapter):
+    """forward(return_value_logits=True) 출력 shape 테스트"""
     input_ids = torch.randint(0, 32000, (2, 10))  # [batch=2, seq=10]
 
-    outputs = micro_adapter.trunk_forward(input_ids)
+    outputs = micro_adapter(input_ids, return_value_logits=True)
 
     assert "hidden_states" in outputs
     assert "value_logits" in outputs
@@ -108,11 +108,11 @@ def test_trunk_forward_shape(micro_adapter):
     assert outputs["value_logits"].shape == (2, 10, 1)
 
 
-def test_full_forward_shape(micro_adapter):
-    """full_forward() 출력 shape 테스트"""
+def test_forward_full_shape(micro_adapter):
+    """forward(return_value_logits=True, return_hidden_states=True) 출력 shape 테스트"""
     input_ids = torch.randint(0, 32000, (2, 10))
 
-    outputs = micro_adapter.full_forward(input_ids)
+    outputs = micro_adapter(input_ids, return_value_logits=True, return_hidden_states=True)
 
     assert "logits" in outputs
     assert "value_logits" in outputs
@@ -122,8 +122,8 @@ def test_full_forward_shape(micro_adapter):
     assert outputs["hidden_states"].shape == (2, 10, 512)
 
 
-def test_trunk_forward_without_value_head():
-    """Value head 없이 trunk_forward() 호출 시 에러"""
+def test_forward_without_value_head():
+    """Value head 없이 return_value_logits=True 호출 시 에러"""
     model_args = ModelArgs(dim=512, n_layers=4, n_heads=8, vocab_size=32000)
     transformer = Transformer(model_args)
     adapter = MetaLlamaMTPAdapter(transformer, model_args, value_head=None)
@@ -131,7 +131,7 @@ def test_trunk_forward_without_value_head():
     input_ids = torch.randint(0, 32000, (2, 10))
 
     with pytest.raises(ValueError, match="Value head not initialized"):
-        adapter.trunk_forward(input_ids)
+        adapter(input_ids, return_value_logits=True)
 
 
 def test_attach_value_head():
@@ -144,9 +144,9 @@ def test_attach_value_head():
     value_head = ValueHead(hidden_size=512)
     adapter.attach_value_head(value_head)
 
-    # 이제 trunk_forward() 가능
+    # 이제 forward(return_value_logits=True) 가능
     input_ids = torch.randint(0, 32000, (2, 10))
-    outputs = adapter.trunk_forward(input_ids)
+    outputs = adapter(input_ids, return_value_logits=True)
 
     assert outputs["value_logits"].shape == (2, 10, 1)
 

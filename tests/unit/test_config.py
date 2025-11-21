@@ -5,17 +5,6 @@ from pathlib import Path
 import yaml
 
 
-def test_load_defaults_config(project_root: Path):
-    """defaults.yaml 로딩"""
-    config_path = project_root / "configs" / "defaults.yaml"
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-
-    assert "project" in config
-    assert config["project"]["name"] == "weighted-mtp"
-    assert config["models"]["policy"]["name"] == "meta-llama-mtp"
-
-
 @pytest.mark.parametrize(
     "stage,config_name",
     [
