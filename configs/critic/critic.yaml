@@ -42,7 +42,7 @@ dataset:
 
 # 데이터 샘플링
 data_sampling:
-  n_samples: 50000
+  n_samples: 80000
   balance_correct: true
   correct_ratio: 0.5  # Correct/Incorrect 균형
   difficulty_range: [1, 7]
