@@ -281,7 +281,18 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
     # Model size + System info 로깅 (Rank 0만)
     if is_main_process() and use_mlflow:
-        model_size = get_model_size(unwrap_model(adapter))
+        model_size_local = get_model_size(unwrap_model(adapter))
+
+        # FSDP FULL_SHARD 시 world_size를 곱해 실제 전체 파라미터 수 계산
+        sharding_strategy = config.distributed.fsdp.sharding_strategy
+        if sharding_strategy == "FULL_SHARD" and world_size > 1:
+            model_size = {
+                "total_params": model_size_local["total_params"] * world_size,
+                "trainable_params": model_size_local["trainable_params"] * world_size,
+            }
+        else:
+            model_size = model_size_local
+
         mlflow.log_params(
             {
                 "model_total_params": model_size["total_params"],

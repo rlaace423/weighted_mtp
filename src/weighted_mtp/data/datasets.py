@@ -465,24 +465,48 @@ def _sample_by_difficulty(
 
             sampling_results[bin_name] = {"target": bin_n_samples, "actual": len(sampled)}
 
-    # 샘플 수가 부족하면 랜덤으로 추가
-    n_random_added = 0
+    # Bin 간 보충: 부족한 샘플을 다른 bin에서 보충
     if len(selected_indices) < n_samples:
-        remaining = n_samples - len(selected_indices)
-        # set 변환으로 O(1) 검색 (리스트 O(n) 검색 대비 성능 개선)
+        shortage = n_samples - len(selected_indices)
         selected_set = set(selected_indices)
-        available = [idx for idx in range(len(metadata)) if idx not in selected_set]
 
-        if available:
-            additional = random.sample(available, min(remaining, len(available)))
-            selected_indices.extend(additional)
-            n_random_added = len(additional)
+        # 가중치 높은 순으로 bin 정렬하여 보충 시도
+        sorted_bins = sorted(
+            [(name, weight) for name, weight in difficulty_weights.items() if weight > 0],
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        supplemented = 0
+        for bin_name, _ in sorted_bins:
+            if supplemented >= shortage:
+                break
+
+            if balance_correct:
+                indices_dict = bin_indices.get(bin_name, {"correct": [], "incorrect": []})
+                # 이미 선택되지 않은 인덱스에서 보충
+                available_c = [i for i in indices_dict["correct"] if i not in selected_set]
+                available_i = [i for i in indices_dict["incorrect"] if i not in selected_set]
+                available = available_c + available_i
+            else:
+                available = [i for i in bin_indices.get(bin_name, []) if i not in selected_set]
+
+            if available:
+                to_add = min(shortage - supplemented, len(available))
+                additional = random.sample(available, to_add)
+                selected_indices.extend(additional)
+                selected_set.update(additional)
+                supplemented += to_add
+
+                if to_add > 0:
+                    # 결과에 보충 정보 추가
+                    if bin_name in sampling_results:
+                        if "supplemented" not in sampling_results[bin_name]:
+                            sampling_results[bin_name]["supplemented"] = 0
+                        sampling_results[bin_name]["supplemented"] += to_add
 
     # 섞기
     random.shuffle(selected_indices)
-
-    # 정확히 n_samples 개수 맞추기
-    selected_indices = selected_indices[:n_samples]
 
     # === 샘플링 결과 로깅 ===
     logger.info(f"=== 샘플링 결과 ===")
@@ -493,23 +517,25 @@ def _sample_by_difficulty(
 
     for bin_name, result in sampling_results.items():
         target = result["target"]
+        supplemented = result.get("supplemented", 0)
+
         if "correct" in result:
             correct = result["correct"]
             incorrect = result["incorrect"]
-            actual = correct + incorrect
+            actual = correct + incorrect + supplemented
             total_correct += correct
             total_incorrect += incorrect
             ratio_str = f"C:{correct:,}, I:{incorrect:,}"
         else:
-            actual = result["actual"]
+            actual = result["actual"] + supplemented
             ratio_str = f"{actual:,}"
+
+        if supplemented > 0:
+            ratio_str += f", 보충:{supplemented:,}"
 
         total_actual += actual
         pct = (actual / target * 100) if target > 0 else 0
         logger.info(f"{bin_name}: 목표={target:,}, 실제={actual:,} ({pct:.0f}%) [{ratio_str}]")
-
-    if n_random_added > 0:
-        logger.warning(f"랜덤 추가: {n_random_added:,}개 (bin 외 데이터)")
 
     # 최종 summary
     final_total = len(selected_indices)
@@ -518,6 +544,15 @@ def _sample_by_difficulty(
         logger.info(f"--- 합계: {final_total:,}개, Correct: {total_correct:,} ({final_ratio:.1%})")
     else:
         logger.info(f"--- 합계: {final_total:,}개")
+
+    # 부족 시 에러 발생
+    if final_total < n_samples:
+        shortage = n_samples - final_total
+        raise ValueError(
+            f"데이터 부족: {shortage:,}개 부족. "
+            f"요청: {n_samples:,}, 가용: {final_total:,}. "
+            f"n_samples를 {final_total:,} 이하로 설정하세요."
+        )
 
     return selected_indices
 
