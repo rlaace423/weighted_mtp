@@ -53,7 +53,7 @@ training:
   n_epochs: 1.0  # 명확한 1 epoch (Anthropic fine-tuning 표준)
   batch_size: 32  # Per GPU (effective = 64 with 2 GPUs)
   gradient_accumulation_steps: 2  # Effective batch size = 64
-  learning_rate: 1.0e-5  # Critic은 높은 LR
+  learning_rate: 5.0e-5  # Critic은 높은 LR
   max_grad_norm: 1.0
   gamma: 1.0
   lam: 1.0  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
