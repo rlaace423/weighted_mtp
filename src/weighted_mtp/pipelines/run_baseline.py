@@ -423,9 +423,8 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             if accumulation_counter >= gradient_accumulation_steps:
                 # Gradient clipping (누적된 gradient에 적용)
                 if config.training.max_grad_norm > 0:
-                    params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
                     grad_clip_stats = compute_gradient_clip_stats(
-                        params_with_grad,
+                        adapter,
                         config.training.max_grad_norm,
                     )
                 else:
@@ -482,9 +481,8 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             # Gradient clipping
             if config.training.max_grad_norm > 0:
-                params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
                 grad_clip_stats = compute_gradient_clip_stats(
-                    params_with_grad,
+                    adapter,
                     config.training.max_grad_norm,
                 )
 

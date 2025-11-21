@@ -470,9 +470,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             if accumulation_counter >= gradient_accumulation_steps:
                 # Gradient clipping (누적된 gradient에 적용)
                 if config.training.max_grad_norm > 0:
-                    params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
                     grad_clip_stats = compute_gradient_clip_stats(
-                        params_with_grad,
+                        adapter,
                         config.training.max_grad_norm,
                     )
                 else:
@@ -496,8 +495,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 # GPU metrics
                 gpu_metrics = gpu_monitor.get_metrics()
 
-                # Weight distribution statistics
-                weight_dist_stats = compute_weight_statistics(weights)
+                # Weight distribution statistics (padding 제외)
+                weight_dist_stats = compute_weight_statistics(weights, attention_mask)
 
                 # Metric aggregation (DDP)
                 avg_weighted_ce = all_reduce_scalar(weighted_ce_loss.item())
@@ -545,9 +544,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             # Gradient clipping
             if config.training.max_grad_norm > 0:
-                params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
                 grad_clip_stats = compute_gradient_clip_stats(
-                    params_with_grad,
+                    adapter,
                     config.training.max_grad_norm,
                 )
 

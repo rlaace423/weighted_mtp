@@ -57,13 +57,13 @@ def compute_weight_statistics(
 
 
 def compute_gradient_clip_stats(
-    parameters,
+    model: torch.nn.Module,
     max_grad_norm: float,
 ) -> dict[str, float]:
-    """Gradient clipping 전후 통계 계산
+    """Gradient clipping 전후 통계 계산 (FSDP 호환)
 
     Args:
-        parameters: 모델 파라미터 iterator (optimizer.param_groups에서 추출 권장)
+        model: 모델 (FSDP wrapped 또는 일반 모델)
         max_grad_norm: Gradient clipping threshold
 
     Returns:
@@ -72,29 +72,38 @@ def compute_gradient_clip_stats(
             - grad_norm_post_clip: Clipping 후 gradient norm
             - grad_clip_ratio: Clipping 비율 (post/pre)
     """
-    # Generator를 list로 변환하여 재사용 가능하게 함
-    params_list = list(parameters)
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    import torch.distributed as dist
 
-    # Clipping 전 gradient norm
-    total_norm_pre = 0.0
-    for p in params_list:
-        if p.grad is not None:
-            param_norm = p.grad.data.norm(2)
-            total_norm_pre += param_norm.item() ** 2
-    grad_norm_pre = total_norm_pre**0.5
+    is_fsdp = isinstance(model, FSDP)
 
-    # Clipping 수행
-    # DEBUG: max_grad_norm 값 확인
-    # print(f"DEBUG: compute_gradient_clip_stats called with max_grad_norm={max_grad_norm}")
-    torch.nn.utils.clip_grad_norm_(params_list, max_grad_norm)
+    if is_fsdp:
+        # FSDP: all-reduce로 전체 gradient norm 계산
+        parameters = [p for p in model.parameters() if p.grad is not None]
+        local_norm_sq = sum(p.grad.data.norm(2).item() ** 2 for p in parameters)
 
-    # Clipping 후 gradient norm
-    total_norm_post = 0.0
-    for p in params_list:
-        if p.grad is not None:
-            param_norm = p.grad.data.norm(2)
-            total_norm_post += param_norm.item() ** 2
-    grad_norm_post = total_norm_post**0.5
+        # All-reduce to get global norm
+        device = parameters[0].device if parameters else torch.device("cuda")
+        tensor = torch.tensor(local_norm_sq, device=device)
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        grad_norm_pre = tensor.item() ** 0.5
+
+        # FSDP clip_grad_norm_ (전체 gradient에 대해 clipping)
+        grad_norm_post = model.clip_grad_norm_(max_grad_norm).item()
+    else:
+        # Non-FSDP: 기존 방식
+        params_list = [p for p in model.parameters() if p.grad is not None]
+
+        # Pre-clip norm
+        total_norm_pre = sum(p.grad.data.norm(2).item() ** 2 for p in params_list)
+        grad_norm_pre = total_norm_pre ** 0.5
+
+        # Clipping
+        torch.nn.utils.clip_grad_norm_(params_list, max_grad_norm)
+
+        # Post-clip norm
+        total_norm_post = sum(p.grad.data.norm(2).item() ** 2 for p in params_list)
+        grad_norm_post = total_norm_post ** 0.5
 
     # Clipping 비율 계산
     clip_ratio = grad_norm_post / grad_norm_pre if grad_norm_pre > 0 else 1.0

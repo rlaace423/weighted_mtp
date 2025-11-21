@@ -215,6 +215,10 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     for param in adapter.transformer.parameters():
         param.requires_grad = False
 
+    # Value head는 명시적으로 trainable 설정
+    for param in adapter.value_head.parameters():
+        param.requires_grad = True
+
     adapter = wrap_model_fsdp(
         adapter,
         device,
@@ -442,10 +446,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     # DEBUG: max_grad_norm 값 확인
                     if global_step == 0:
                         logger.info(f"DEBUG: config.training.max_grad_norm = {config.training.max_grad_norm}")
-                    
-                    params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
+
                     grad_clip_stats = compute_gradient_clip_stats(
-                        params_with_grad,
+                        adapter,
                         config.training.max_grad_norm,
                     )
                 else:
@@ -513,9 +516,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             # Gradient clipping
             if config.training.max_grad_norm > 0:
-                params_with_grad = [p for group in optimizer.param_groups for p in group["params"]]
                 grad_clip_stats = compute_gradient_clip_stats(
-                    params_with_grad,
+                    adapter,
                     config.training.max_grad_norm,
                 )
 
