@@ -193,14 +193,12 @@ PYTHONPATH=src python src/weighted_mtp/pipelines/run_evaluation.py \
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md): 코드베이스 아키텍처 및 핵심 구현
 - [SETUP.md](docs/SETUP.md): 환경 설정 및 데이터 준비
 - [VESSL.md](docs/VESSL.md): VESSL A100 4-GPU 실행 가이드
+- [NIPA.md](docs/NIPA.md): NIPA GPU 클러스터 실행 가이드
 - [MLFLOW.md](docs/MLFLOW.md): MLflow 추적 및 S3 연동
 - [RESEARCH.md](docs/RESEARCH.md): 연구 배경 및 이론
-- [ntp_implementation_plan.md](docs/ntp_implementation_plan.md): NTP 파이프라인 구현 계획
 
 ### 참조 문서
 - [VESSL_CHEATSHEET.md](docs/VESSL_CHEATSHEET.md): VESSL YAML 참조
-- [gpu_parallel_testing_summary.md](docs/gpu_parallel_testing_summary.md): DDP 테스팅 결과 (Phase 1-5)
-- [data_loading_strategy.md](docs/data_loading_strategy.md): Rank-aware 샘플링 전략
 
 ## 라이선스
 
