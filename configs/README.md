@@ -154,7 +154,7 @@ training:
   batch_size: 8                # Batch size (per GPU)
   gradient_accumulation_steps: 2  # Gradient accumulation
   learning_rate: 1.0e-5        # Learning rate
-  max_grad_norm: 0.5           # Gradient clipping
+  max_grad_norm: 1.0           # Gradient clipping
   log_interval: 1             # 로깅 간격 (steps)
 
   # Verifiable 전용 (TD error weighting)

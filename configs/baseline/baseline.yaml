@@ -74,7 +74,7 @@ training:
   batch_size: 8  # Per GPU (effective = 16 with 4 GPUs)
   gradient_accumulation_steps: 2  # Effective batch size = 64
   learning_rate: 1.0e-5
-  max_grad_norm: 0.5
+  max_grad_norm: 1.0
   log_interval: 1
 
 # 체크포인트

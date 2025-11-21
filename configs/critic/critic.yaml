@@ -54,7 +54,7 @@ training:
   batch_size: 8  # Per GPU (effective = 32 with 4 GPUs)
   gradient_accumulation_steps: 2  # Effective batch size = 64
   learning_rate: 1.0e-4  # Critic은 높은 LR
-  max_grad_norm: 0.5
+  max_grad_norm: 1.0
   loss_type: mse
   log_interval: 1
 
