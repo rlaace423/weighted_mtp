@@ -524,12 +524,9 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         )
                     logger.info(
                         f"Step {global_step}/{total_optimization_steps}, "
-                        f"Weighted CE: {avg_weighted_ce:.4f}, "
-                        f"Selection: {avg_selection_ratio:.1%} "
-                        f"(H0:{selection_stats['head_0_ratio']:.0%}, "
-                        f"H1:{selection_stats.get('head_1_ratio', 0):.0%}, "
-                        f"H2:{selection_stats.get('head_2_ratio', 0):.0%}, "
-                        f"H3:{selection_stats.get('head_3_ratio', 0):.0%})"
+                        f"Loss: {avg_weighted_ce:.4f}, "
+                        f"Grad Norm: {avg_grad_norm_post:.4f} (Clip: {avg_grad_clip_ratio:.2f}), "
+                        f"Selection: {avg_selection_ratio:.1%}"
                     )
 
         # Period loop 종료

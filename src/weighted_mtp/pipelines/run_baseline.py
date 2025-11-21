@@ -467,11 +467,11 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
                             },
                             step=global_step,
                         )
-                logger.info(
-                    f"Step {global_step}/{total_optimization_steps}, "
-                    f"Loss: {avg_loss:.4f}, "
-                    f"Grad Norm: {avg_grad_norm_post:.4f} (clip_ratio: {avg_grad_clip_ratio:.3f})"
-                )
+                    logger.info(
+                        f"Step {global_step}/{total_optimization_steps}, "
+                        f"Loss: {avg_loss:.4f}, "
+                        f"Grad Norm: {avg_grad_norm_post:.4f} (Clip: {avg_grad_clip_ratio:.2f})"
+                    )
 
         # Period loop 종료
 

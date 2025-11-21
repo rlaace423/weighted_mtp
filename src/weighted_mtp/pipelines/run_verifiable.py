@@ -678,37 +678,37 @@ def run_verifiable_training(
                 avg_value_mean = all_reduce_scalar(value_func_stats["value_mean"])
                 avg_value_std = all_reduce_scalar(value_func_stats["value_std"])
 
-                if is_main_process() and use_mlflow:
-                    mlflow.log_metrics(
-                        {
-                            "train/weighted_ce_loss": avg_weighted_ce,
-                            "train/value_loss": avg_value_loss,
-                            "train/total_loss": avg_total_loss,
-                            "train/grad_norm": avg_grad_norm_post,
-                            "train/grad_norm_pre_clip": avg_grad_norm_pre,
-                            "train/grad_clip_ratio": avg_grad_clip_ratio,
-                            "train/learning_rate": optimizer.param_groups[0]["lr"],
-                            "train/td_mean": avg_td_mean,
-                            "train/weight_mean": avg_weight_mean,
-                            "value/mse": avg_value_mse,
-                            "value/mean_prediction": avg_value_mean,
-                            "value/std_prediction": avg_value_std,
-                            "weight/mean": weight_dist_stats["weight_mean"],
-                            "weight/std": weight_dist_stats["weight_std"],
-                            "weight/min": weight_dist_stats["weight_min"],
-                            "weight/max": weight_dist_stats["weight_max"],
-                            "weight/entropy": weight_dist_stats["weight_entropy"],
-                            "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
-                            "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
-                        },
-                        step=global_step,
+                if is_main_process():
+                    if use_mlflow:
+                        mlflow.log_metrics(
+                            {
+                                "train/weighted_ce_loss": avg_weighted_ce,
+                                "train/value_loss": avg_value_loss,
+                                "train/total_loss": avg_total_loss,
+                                "train/grad_norm": avg_grad_norm_post,
+                                "train/grad_norm_pre_clip": avg_grad_norm_pre,
+                                "train/grad_clip_ratio": avg_grad_clip_ratio,
+                                "train/learning_rate": optimizer.param_groups[0]["lr"],
+                                "train/td_mean": avg_td_mean,
+                                "train/weight_mean": avg_weight_mean,
+                                "value/mse": avg_value_mse,
+                                "value/mean_prediction": avg_value_mean,
+                                "value/std_prediction": avg_value_std,
+                                "weight/mean": weight_dist_stats["weight_mean"],
+                                "weight/std": weight_dist_stats["weight_std"],
+                                "weight/min": weight_dist_stats["weight_min"],
+                                "weight/max": weight_dist_stats["weight_max"],
+                                "weight/entropy": weight_dist_stats["weight_entropy"],
+                                "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
+                                "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
+                            },
+                            step=global_step,
+                        )
+                    logger.info(
+                        f"Step {global_step}/{total_optimization_steps}, "
+                        f"Loss: {avg_total_loss:.4f}, "
+                        f"Grad Norm: {avg_grad_norm_post:.4f} (Clip: {avg_grad_clip_ratio:.2f})"
                     )
-                logger.info(
-                    f"Step {global_step}/{total_optimization_steps}, "
-                    f"Total Loss: {avg_total_loss:.4f}, "
-                    f"Weighted CE: {avg_weighted_ce:.4f}, "
-                    f"Value: {avg_value_loss:.4f}"
-                )
 
         # Period loop 종료
 
