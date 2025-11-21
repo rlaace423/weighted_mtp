@@ -197,3 +197,48 @@ def all_reduce_scalar(
         tensor /= world_size
 
     return tensor.item()
+
+
+def all_reduce_scalars(
+    values: dict[str, float],
+    op: str = "mean",
+) -> dict[str, float]:
+    """GPU ranks 간 여러 scalar 값을 한 번에 집계
+
+    다중 all_reduce_scalar 호출 대신 단일 통신으로 효율적으로 처리
+
+    Args:
+        values: {이름: 값} 딕셔너리
+        op: "mean" (평균) 또는 "sum" (합계)
+
+    Returns:
+        전체 ranks에서 집계된 값 딕셔너리
+
+    Examples:
+        >>> metrics = {"loss": 0.5, "accuracy": 0.8}
+        >>> avg_metrics = all_reduce_scalars(metrics)  # 1회 통신
+    """
+    if not is_distributed():
+        return values
+
+    keys = list(values.keys())
+    vals = [values[k] for k in keys]
+
+    # 단일 텐서로 변환
+    if torch.cuda.is_available():
+        device = torch.cuda.current_device()
+    else:
+        device = torch.device("cpu")
+    tensor = torch.tensor(vals, dtype=torch.float64, device=device)
+
+    # 단일 all-reduce
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+
+    # Mean 계산 (필요 시)
+    if op == "mean":
+        world_size = dist.get_world_size()
+        tensor /= world_size
+
+    # 딕셔너리로 변환
+    result = {k: tensor[i].item() for i, k in enumerate(keys)}
+    return result

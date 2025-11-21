@@ -73,37 +73,19 @@ def compute_gradient_clip_stats(
             - grad_clip_ratio: Clipping 비율 (post/pre)
     """
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-    import torch.distributed as dist
 
     is_fsdp = isinstance(model, FSDP)
 
     if is_fsdp:
-        # FSDP: all-reduce로 전체 gradient norm 계산
-        parameters = [p for p in model.parameters() if p.grad is not None]
-        local_norm_sq = sum(p.grad.data.norm(2).item() ** 2 for p in parameters)
-
-        # All-reduce to get global norm
-        device = parameters[0].device if parameters else torch.device("cuda")
-        tensor = torch.tensor(local_norm_sq, device=device)
-        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
-        grad_norm_pre = tensor.item() ** 0.5
-
-        # FSDP clip_grad_norm_ (전체 gradient에 대해 clipping)
-        grad_norm_post = model.clip_grad_norm_(max_grad_norm).item()
+        # FSDP clip_grad_norm_: 내부적으로 all-reduce 수행, 클리핑 전 norm 반환
+        grad_norm_pre = model.clip_grad_norm_(max_grad_norm).item()
     else:
-        # Non-FSDP: 기존 방식
+        # Non-FSDP clip_grad_norm_: 내부적으로 norm 계산, 클리핑 전 norm 반환
         params_list = [p for p in model.parameters() if p.grad is not None]
+        grad_norm_pre = torch.nn.utils.clip_grad_norm_(params_list, max_grad_norm).item()
 
-        # Pre-clip norm
-        total_norm_pre = sum(p.grad.data.norm(2).item() ** 2 for p in params_list)
-        grad_norm_pre = total_norm_pre ** 0.5
-
-        # Clipping
-        torch.nn.utils.clip_grad_norm_(params_list, max_grad_norm)
-
-        # Post-clip norm
-        total_norm_post = sum(p.grad.data.norm(2).item() ** 2 for p in params_list)
-        grad_norm_post = total_norm_post ** 0.5
+    # 클리핑 후 norm: 클리핑이 적용되면 max_grad_norm을 초과하지 않음
+    grad_norm_post = min(grad_norm_pre, max_grad_norm)
 
     # Clipping 비율 계산
     clip_ratio = grad_norm_post / grad_norm_pre if grad_norm_pre > 0 else 1.0

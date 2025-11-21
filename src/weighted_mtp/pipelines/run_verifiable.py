@@ -44,7 +44,7 @@ from weighted_mtp.runtime import (
     is_main_process,
     wrap_model_fsdp,
     unwrap_model,
-    all_reduce_scalar,
+    all_reduce_scalars,
     barrier,
 )
 from weighted_mtp.value_weighting.td_weighting import (
@@ -671,18 +671,36 @@ def run_verifiable_training(
                 # Weight distribution statistics (padding 제외)
                 weight_dist_stats = compute_weight_statistics(weights, attention_mask)
 
-                # Metric aggregation (DDP)
-                avg_weighted_ce = all_reduce_scalar(weighted_ce_loss.item())
-                avg_value_loss = all_reduce_scalar(value_loss.item())
-                avg_total_loss = all_reduce_scalar(total_loss.item())
-                avg_grad_norm_post = all_reduce_scalar(grad_clip_stats["grad_norm_post_clip"])
-                avg_grad_norm_pre = all_reduce_scalar(grad_clip_stats["grad_norm_pre_clip"])
-                avg_grad_clip_ratio = all_reduce_scalar(grad_clip_stats["grad_clip_ratio"])
-                avg_td_mean = all_reduce_scalar(td_stats["td_mean"])
-                avg_weight_mean = all_reduce_scalar(weight_stats["weight_mean"])
-                avg_value_mse = all_reduce_scalar(value_func_stats["value_mse"])
-                avg_value_mean = all_reduce_scalar(value_func_stats["value_mean"])
-                avg_value_std = all_reduce_scalar(value_func_stats["value_std"])
+                # Metric aggregation (분산 환경)
+                # grad_clip_stats는 clip_grad_norm_이 이미 전역 값을 반환하므로 all_reduce 불필요
+                avg_grad_norm_post = grad_clip_stats["grad_norm_post_clip"]
+                avg_grad_norm_pre = grad_clip_stats["grad_norm_pre_clip"]
+                avg_grad_clip_ratio = grad_clip_stats["grad_clip_ratio"]
+
+                # 모든 로컬 메트릭 배치 all_reduce (1회 통신)
+                reduced = all_reduce_scalars({
+                    "weighted_ce": weighted_ce_loss.item(),
+                    "value_loss": value_loss.item(),
+                    "total_loss": total_loss.item(),
+                    "td_mean": td_stats["td_mean"],
+                    "weight_mean": weight_stats["weight_mean"],
+                    "value_mse": value_func_stats["value_mse"],
+                    "value_mean": value_func_stats["value_mean"],
+                    "value_std": value_func_stats["value_std"],
+                    "weight_dist_mean": weight_dist_stats["weight_mean"],
+                    "weight_dist_std": weight_dist_stats["weight_std"],
+                    "weight_dist_min": weight_dist_stats["weight_min"],
+                    "weight_dist_max": weight_dist_stats["weight_max"],
+                    "weight_dist_entropy": weight_dist_stats["weight_entropy"],
+                })
+                avg_weighted_ce = reduced["weighted_ce"]
+                avg_value_loss = reduced["value_loss"]
+                avg_total_loss = reduced["total_loss"]
+                avg_td_mean = reduced["td_mean"]
+                avg_weight_mean = reduced["weight_mean"]
+                avg_value_mse = reduced["value_mse"]
+                avg_value_mean = reduced["value_mean"]
+                avg_value_std = reduced["value_std"]
 
                 if is_main_process():
                     if use_mlflow:
@@ -700,11 +718,11 @@ def run_verifiable_training(
                                 "value/mse": avg_value_mse,
                                 "value/mean_prediction": avg_value_mean,
                                 "value/std_prediction": avg_value_std,
-                                "weight/mean": weight_dist_stats["weight_mean"],
-                                "weight/std": weight_dist_stats["weight_std"],
-                                "weight/min": weight_dist_stats["weight_min"],
-                                "weight/max": weight_dist_stats["weight_max"],
-                                "weight/entropy": weight_dist_stats["weight_entropy"],
+                                "weight/mean": reduced["weight_dist_mean"],
+                                "weight/std": reduced["weight_dist_std"],
+                                "weight/min": reduced["weight_dist_min"],
+                                "weight/max": reduced["weight_dist_max"],
+                                "weight/entropy": reduced["weight_dist_entropy"],
                                 "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
                                 "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
                             },
@@ -737,14 +755,19 @@ def run_verifiable_training(
         # Epoch 경계 도달
         current_epoch = batch_count / total_batches
 
-        # Period-level metrics 계산 & aggregation
+        # Period-level metrics 계산 & aggregation (1회 통신)
         train_weighted_ce_avg = period_metrics_sum["weighted_ce_loss"] / period_batches
         train_value_avg = period_metrics_sum["value_loss"] / period_batches
         train_total_avg = period_metrics_sum["total_loss"] / period_batches
 
-        train_weighted_ce_avg = all_reduce_scalar(train_weighted_ce_avg)
-        train_value_avg = all_reduce_scalar(train_value_avg)
-        train_total_avg = all_reduce_scalar(train_total_avg)
+        reduced_period = all_reduce_scalars({
+            "weighted_ce": train_weighted_ce_avg,
+            "value": train_value_avg,
+            "total": train_total_avg,
+        })
+        train_weighted_ce_avg = reduced_period["weighted_ce"]
+        train_value_avg = reduced_period["value"]
+        train_total_avg = reduced_period["total"]
 
         logger.info(
             f"Epoch {current_epoch:.2f} 도달 - "
@@ -766,10 +789,15 @@ def run_verifiable_training(
             lam=getattr(config.training, "lam", 0.0),
         )
 
-        # Validation metrics aggregation
-        avg_val_total = all_reduce_scalar(val_metrics["val_loss"])
-        avg_val_weighted_ce = all_reduce_scalar(val_metrics["val_weighted_ce_loss"])
-        avg_val_value = all_reduce_scalar(val_metrics["val_value_loss"])
+        # Validation metrics aggregation (1회 통신)
+        reduced_val = all_reduce_scalars({
+            "val_total": val_metrics["val_loss"],
+            "val_weighted_ce": val_metrics["val_weighted_ce_loss"],
+            "val_value": val_metrics["val_value_loss"],
+        })
+        avg_val_total = reduced_val["val_total"]
+        avg_val_weighted_ce = reduced_val["val_weighted_ce"]
+        avg_val_value = reduced_val["val_value"]
 
         # Epoch-level 로깅
         if is_main_process() and use_mlflow:

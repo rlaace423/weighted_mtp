@@ -43,7 +43,7 @@ from weighted_mtp.runtime import (
     is_main_process,
     wrap_model_fsdp,
     unwrap_model,
-    all_reduce_scalar,
+    all_reduce_scalars,
     barrier,
 )
 
@@ -447,11 +447,15 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             if global_step % config.training.log_interval == 0 and accumulation_counter == 0:
                 gpu_metrics = gpu_monitor.get_metrics()
 
-                # Metric aggregation (DDP)
-                avg_loss = all_reduce_scalar(ce_loss.item())
-                avg_grad_norm_pre = all_reduce_scalar(grad_clip_stats["grad_norm_pre_clip"])
-                avg_grad_norm_post = all_reduce_scalar(grad_clip_stats["grad_norm_post_clip"])
-                avg_grad_clip_ratio = all_reduce_scalar(grad_clip_stats["grad_clip_ratio"])
+                # Metric aggregation (분산 환경)
+                # grad_clip_stats는 clip_grad_norm_이 이미 전역 값을 반환하므로 all_reduce 불필요
+                avg_grad_norm_pre = grad_clip_stats["grad_norm_pre_clip"]
+                avg_grad_norm_post = grad_clip_stats["grad_norm_post_clip"]
+                avg_grad_clip_ratio = grad_clip_stats["grad_clip_ratio"]
+
+                # 나머지 메트릭 배치 all_reduce (1회 통신)
+                reduced = all_reduce_scalars({"loss": ce_loss.item()})
+                avg_loss = reduced["loss"]
 
                 if is_main_process():
                     if use_mlflow:
@@ -495,7 +499,8 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
         current_epoch = batch_count / total_batches
         if period_batches > 0:
             train_loss_avg = period_loss_sum / period_batches
-            train_loss_avg = all_reduce_scalar(train_loss_avg)
+            reduced_period = all_reduce_scalars({"train_loss": train_loss_avg})
+            train_loss_avg = reduced_period["train_loss"]
 
         logger.info(f"Epoch {current_epoch:.2f} 도달 - Train Loss: {train_loss_avg:.4f}")
 
@@ -508,8 +513,9 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             device=device,
         )
 
-        # Validation metrics aggregation
-        avg_val_loss = all_reduce_scalar(val_metrics["val_loss"])
+        # Validation metrics aggregation (1회 통신)
+        reduced_val = all_reduce_scalars({"val_loss": val_metrics["val_loss"]})
+        avg_val_loss = reduced_val["val_loss"]
 
         # GPU metrics (epoch-level)
         gpu_metrics_epoch = gpu_monitor.get_metrics()

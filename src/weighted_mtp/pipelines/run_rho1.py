@@ -43,7 +43,7 @@ from weighted_mtp.runtime import (
     is_main_process,
     wrap_model_fsdp,
     unwrap_model,
-    all_reduce_scalar,
+    all_reduce_scalars,
     barrier,
 )
 from weighted_mtp.value_weighting.rho1_weighting import (
@@ -199,9 +199,13 @@ def validate_rho1(
     avg_weighted_ce_loss = total_weighted_ce_loss / n_batches
     avg_excess_loss = total_excess_loss / n_batches
 
-    # Validation metrics aggregation (DDP)
-    avg_weighted_ce_loss = all_reduce_scalar(avg_weighted_ce_loss)
-    avg_excess_loss = all_reduce_scalar(avg_excess_loss)
+    # Validation metrics aggregation (DDP) - 1회 통신
+    reduced_val = all_reduce_scalars({
+        "weighted_ce_loss": avg_weighted_ce_loss,
+        "excess_loss": avg_excess_loss,
+    })
+    avg_weighted_ce_loss = reduced_val["weighted_ce_loss"]
+    avg_excess_loss = reduced_val["excess_loss"]
 
     metrics = {
         "val_weighted_ce_loss": avg_weighted_ce_loss,
@@ -498,12 +502,28 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 # Weight distribution statistics (padding 제외)
                 weight_dist_stats = compute_weight_statistics(weights, attention_mask)
 
-                # Metric aggregation (DDP)
-                avg_weighted_ce = all_reduce_scalar(weighted_ce_loss.item())
-                avg_selection_ratio = all_reduce_scalar(selection_stats['selection_ratio'])
-                avg_grad_norm_post = all_reduce_scalar(grad_clip_stats["grad_norm_post_clip"])
-                avg_grad_norm_pre = all_reduce_scalar(grad_clip_stats["grad_norm_pre_clip"])
-                avg_grad_clip_ratio = all_reduce_scalar(grad_clip_stats["grad_clip_ratio"])
+                # Metric aggregation (분산 환경)
+                # grad_clip_stats는 clip_grad_norm_이 이미 전역 값을 반환하므로 all_reduce 불필요
+                avg_grad_norm_post = grad_clip_stats["grad_norm_post_clip"]
+                avg_grad_norm_pre = grad_clip_stats["grad_norm_pre_clip"]
+                avg_grad_clip_ratio = grad_clip_stats["grad_clip_ratio"]
+
+                # 모든 로컬 메트릭 배치 all_reduce (1회 통신)
+                reduced = all_reduce_scalars({
+                    "weighted_ce": weighted_ce_loss.item(),
+                    "selection_ratio": selection_stats['selection_ratio'],
+                    "head_0_ratio": selection_stats['head_0_ratio'],
+                    "head_1_ratio": selection_stats.get('head_1_ratio', 0.0),
+                    "head_2_ratio": selection_stats.get('head_2_ratio', 0.0),
+                    "head_3_ratio": selection_stats.get('head_3_ratio', 0.0),
+                    "weight_mean": weight_dist_stats["weight_mean"],
+                    "weight_std": weight_dist_stats["weight_std"],
+                    "weight_min": weight_dist_stats["weight_min"],
+                    "weight_max": weight_dist_stats["weight_max"],
+                    "weight_entropy": weight_dist_stats["weight_entropy"],
+                })
+                avg_weighted_ce = reduced["weighted_ce"]
+                avg_selection_ratio = reduced["selection_ratio"]
 
                 if is_main_process():
                     if use_mlflow:
@@ -511,19 +531,19 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                             {
                                 "train/weighted_ce_loss": avg_weighted_ce,
                                 "train/selection_ratio": avg_selection_ratio,
-                                "train/head_0_ratio": selection_stats['head_0_ratio'],
-                                "train/head_1_ratio": selection_stats.get('head_1_ratio', 0.0),
-                                "train/head_2_ratio": selection_stats.get('head_2_ratio', 0.0),
-                                "train/head_3_ratio": selection_stats.get('head_3_ratio', 0.0),
+                                "train/head_0_ratio": reduced["head_0_ratio"],
+                                "train/head_1_ratio": reduced["head_1_ratio"],
+                                "train/head_2_ratio": reduced["head_2_ratio"],
+                                "train/head_3_ratio": reduced["head_3_ratio"],
                                 "train/grad_norm": avg_grad_norm_post,
                                 "train/grad_norm_pre_clip": avg_grad_norm_pre,
                                 "train/grad_clip_ratio": avg_grad_clip_ratio,
                                 "train/learning_rate": optimizer.param_groups[0]["lr"],
-                                "weight/mean": weight_dist_stats["weight_mean"],
-                                "weight/std": weight_dist_stats["weight_std"],
-                                "weight/min": weight_dist_stats["weight_min"],
-                                "weight/max": weight_dist_stats["weight_max"],
-                                "weight/entropy": weight_dist_stats["weight_entropy"],
+                                "weight/mean": reduced["weight_mean"],
+                                "weight/std": reduced["weight_std"],
+                                "weight/min": reduced["weight_min"],
+                                "weight/max": reduced["weight_max"],
+                                "weight/entropy": reduced["weight_entropy"],
                                 "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
                                 "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
                             },

@@ -31,6 +31,7 @@ from weighted_mtp.runtime.fsdp import (
     wrap_model_fsdp,
     unwrap_model,
     all_reduce_scalar,
+    all_reduce_scalars,
 )
 
 __all__ = [
@@ -55,4 +56,5 @@ __all__ = [
     "wrap_model_fsdp",
     "unwrap_model",
     "all_reduce_scalar",
+    "all_reduce_scalars",
 ]

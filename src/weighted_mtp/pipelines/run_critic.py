@@ -42,7 +42,7 @@ from weighted_mtp.runtime import (
     is_main_process,
     wrap_model_fsdp,
     unwrap_model,
-    all_reduce_scalar,
+    all_reduce_scalars,
     barrier,
 )
 from weighted_mtp.value_weighting.td_weighting import compute_td_targets
@@ -471,20 +471,30 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     # GPU metrics
                     gpu_metrics = gpu_monitor.get_metrics()
 
-                    # Value function statistics (padding 제외)
+                    # Value function statistics (response 토큰만)
                     value_stats = compute_value_function_stats(
                         values=value_logits.squeeze(-1),
                         returns=td_targets.squeeze(-1),
-                        attention_mask=attention_mask,
+                        attention_mask=valid_label_mask.squeeze(-1),
                     )
 
-                    # Metric aggregation (DDP)
-                    avg_loss = all_reduce_scalar(value_loss.item())
-                    avg_grad_norm_post = all_reduce_scalar(grad_clip_stats["grad_norm_post_clip"])
-                    avg_grad_norm_pre = all_reduce_scalar(grad_clip_stats["grad_norm_pre_clip"])
-                    avg_grad_clip_ratio = all_reduce_scalar(grad_clip_stats["grad_clip_ratio"])
-                    avg_value_mean = all_reduce_scalar(value_stats["value_mean"])
-                    avg_value_std = all_reduce_scalar(value_stats["value_std"])
+                    # Metric aggregation (분산 환경)
+                    # grad_clip_stats는 clip_grad_norm_이 이미 전역 값을 반환하므로 all_reduce 불필요
+                    avg_grad_norm_post = grad_clip_stats["grad_norm_post_clip"]
+                    avg_grad_norm_pre = grad_clip_stats["grad_norm_pre_clip"]
+                    avg_grad_clip_ratio = grad_clip_stats["grad_clip_ratio"]
+
+                    # 나머지 메트릭 배치 all_reduce (1회 통신)
+                    reduced = all_reduce_scalars({
+                        "loss": value_loss.item(),
+                        "value_mean": value_stats["value_mean"],
+                        "value_std": value_stats["value_std"],
+                        "value_mse": value_stats["value_mse"],
+                    })
+                    avg_loss = reduced["loss"]
+                    avg_value_mean = reduced["value_mean"]
+                    avg_value_std = reduced["value_std"]
+                    avg_value_mse = reduced["value_mse"]
 
                     if is_main_process():
                         if use_mlflow:
@@ -497,7 +507,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                                     "train/learning_rate": optimizer.param_groups[0]["lr"],
                                     "value/mean_prediction": avg_value_mean,
                                     "value/std_prediction": avg_value_std,
-                                    "value/mse": value_stats["value_mse"],
+                                    "value/mse": avg_value_mse,
                                     "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
                                     "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
                                 },
@@ -532,7 +542,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         # Period-level metrics 계산
         train_loss_avg = period_metrics_sum["train_loss"] / period_batches
-        train_loss_avg = all_reduce_scalar(train_loss_avg)
+        reduced_period = all_reduce_scalars({"train_loss": train_loss_avg})
+        train_loss_avg = reduced_period["train_loss"]
 
         logger.info(
             f"Epoch {current_epoch:.2f} 도달 - "
@@ -553,9 +564,13 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             lam=getattr(config.training, "lam", 0.0),
         )
 
-        # Validation metrics aggregation
-        avg_val_loss = all_reduce_scalar(val_metrics["val_loss"])
-        avg_val_explained_var = all_reduce_scalar(val_metrics["val_explained_variance"])
+        # Validation metrics aggregation (1회 통신)
+        reduced_val = all_reduce_scalars({
+            "val_loss": val_metrics["val_loss"],
+            "val_explained_variance": val_metrics["val_explained_variance"],
+        })
+        avg_val_loss = reduced_val["val_loss"]
+        avg_val_explained_var = reduced_val["val_explained_variance"]
 
         # GPU metrics (epoch-level)
         gpu_metrics_epoch = gpu_monitor.get_metrics()
