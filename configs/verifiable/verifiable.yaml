@@ -16,13 +16,12 @@ experiment:
     - verifiable
     - wmtp
     - production
-  critic_checkpoint: storage/checkpoints/critic/critic-pretrain-s3/checkpoint_value_head_only.pt
 
 # 모델 설정
 models:
   policy:
     name: meta-llama-mtp
-    path: storage/models/meta-llama-mtp
+    path: storage/checkpoints/critic/critic-pretrain/checkpoint_final.pt
     tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     params:
       dim: 4096

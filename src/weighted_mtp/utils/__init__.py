@@ -6,9 +6,7 @@ Checkpoint 관리, 성능 모니터링, S3 백업, Generation, Evaluation 기능
 from weighted_mtp.utils.checkpoint_utils import (
     cleanup_old_checkpoints,
     load_checkpoint_for_evaluation,
-    load_critic_checkpoint,
     save_checkpoint,
-    save_critic_checkpoint,
 )
 from weighted_mtp.utils.evaluation_utils import (
     compute_pass_at_k,
@@ -42,9 +40,7 @@ __all__ = [
     # Checkpoint utils
     "cleanup_old_checkpoints",
     "load_checkpoint_for_evaluation",
-    "load_critic_checkpoint",
     "save_checkpoint",
-    "save_critic_checkpoint",
     # Evaluation utils
     "compute_pass_at_k",
     "evaluate_pass_at_k",

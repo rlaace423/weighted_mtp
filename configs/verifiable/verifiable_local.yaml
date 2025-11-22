@@ -13,12 +13,11 @@ experiment:
     - verifiable
     - local
     - micro-model
-  critic_checkpoint: storage/checkpoints/critic/critic-pretrain-local/checkpoint_epoch_0.10.pt
 
 models:
   policy:
     name: micro-mtp
-    path: storage/models/micro-mtp
+    path: storage/checkpoints/critic/critic-pretrain-local/checkpoint_final.pt
     tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     dtype: float32
 

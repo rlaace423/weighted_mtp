@@ -32,7 +32,6 @@ from weighted_mtp.utils import (
     compute_weight_statistics,
     get_model_size,
     get_system_info,
-    load_critic_checkpoint,
     s3_upload_executor,
     save_checkpoint,
     shutdown_s3_executor,
@@ -54,26 +53,6 @@ from weighted_mtp.value_weighting.td_weighting import (
     compute_td_stats,
     compute_weight_stats,
 )
-
-
-def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
-    """Adapter 로드
-
-    Args:
-        config: 모델 설정
-        device: 디바이스
-
-    Returns:
-        MetaLlamaMTPAdapter 인스턴스
-    """
-    adapter = MetaLlamaMTPAdapter.from_pretrained(
-        model_path=config.models.policy.path,
-        device=device,
-        dtype=config.models.policy.dtype,
-    )
-    return adapter
-
-
 
 
 def get_curriculum_weights(
@@ -274,16 +253,7 @@ def run_verifiable_training(
     logger.info(f"Experiment: {config.experiment.name}")
     logger.info(f"Description: {config.experiment.description}")
 
-    # 4. Critic checkpoint 검증
-    if not config.experiment.get("critic_checkpoint"):
-        raise ValueError(
-            "critic_checkpoint가 필요합니다!\n"
-            "Config에 experiment.critic_checkpoint를 명시하세요."
-        )
-
-    logger.info(f"Critic checkpoint: {config.experiment.critic_checkpoint}")
-
-    # 5. Environment setup (seed + device)
+    # 4. Environment setup (seed + device)
     actual_seed, device = setup_environment(config.runtime.seed)
     logger.info(f"Device: {device}, Seed: {actual_seed}")
 
@@ -299,11 +269,15 @@ def run_verifiable_training(
         )
         # Config 로깅
         mlflow.log_params(OmegaConf.to_container(config, resolve=True))
-        mlflow.log_param("critic_checkpoint", config.experiment.critic_checkpoint)
         logger.info(f"MLflow Run ID: {mlflow.active_run().info.run_id}")
 
-    # 7. Resource 로딩
-    adapter = load_adapter(config, device)
+    # 5. 모델 로드 (pretrained 또는 checkpoint)
+    logger.info(f"Loading model: {config.models.policy.path}")
+    adapter = MetaLlamaMTPAdapter.from_pretrained(
+        model_path=config.models.policy.path,
+        device=device,
+        dtype=config.models.policy.dtype,
+    )
     tokenizer = load_tokenizer_from_config(config)
 
     # Model size + System info 로깅
@@ -333,16 +307,7 @@ def run_verifiable_training(
     gpu_monitor = GPUMonitor(device)
     throughput_tracker = ThroughputTracker()
 
-    # 8. Critic checkpoint 로드 (Value head 초기화)
-    logger.info(f"Loading critic checkpoint: {config.experiment.critic_checkpoint}")
-    load_critic_checkpoint(
-        checkpoint_path=config.experiment.critic_checkpoint,
-        adapter=adapter,
-        device=device,
-    )
-    logger.info("✓ Critic checkpoint loaded successfully")
-
-    # 9. DDP wrapping (critic checkpoint 로드 후)
+    # 6. FSDP wrapping
     adapter = wrap_model_fsdp(
         adapter,
         device,

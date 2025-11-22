@@ -145,6 +145,9 @@ cd /path/to/weighted_mtp
 
 rsync -avz --progress \
   --exclude 'storage/' \
+  --exclude 'tests/' \
+  --exclude '.github/' \
+  --exclude 'docs/' \
   --exclude '.git/' \
   --exclude '__pycache__/' \
   --exclude '*.pyc' \
@@ -172,13 +175,19 @@ cd ~/grad_school/wooshikwon/weighted_mtp
 # .env 파일 생성 (MLflow, AWS 등)
 cat > .env << 'EOF'
 MLFLOW_TRACKING_URI=http://13.50.240.176
-MLFLOW_TRACKING_USERNAME=your_username
-MLFLOW_TRACKING_PASSWORD=your_password
-AWS_ACCESS_KEY_ID=your_key
-AWS_SECRET_ACCESS_KEY=your_secret
+MLFLOW_TRACKING_USERNAME=wmtp_admin
+MLFLOW_TRACKING_PASSWORD=wmtp_secure_2025
+AWS_ACCESS_KEY_ID=<YOUR_AWS_ACCESS_KEY>
+AWS_SECRET_ACCESS_KEY=<YOUR_AWS_SECRET_KEY>
 AWS_DEFAULT_REGION=eu-north-1
-HF_TOKEN=your_hf_token
+S3_BUCKET_NAME=wmtp
+HF_TOKEN=<YOUR_HF_TOKEN>
 TOKENIZERS_PARALLELISM=false
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=mlflow
+POSTGRES_USER=mlflow
+POSTGRES_PASSWORD=mlflow_secure_password_123
 EOF
 ```
 

@@ -47,10 +47,12 @@ class MetaLlamaMTPAdapter(nn.Module):
         """Pretrained 모델에서 Adapter 로드
 
         Args:
-            model_path: 모델 디렉터리 경로 (storage/models/meta-llama-mtp 또는 micro-mtp)
+            model_path: 모델 경로
+                - 디렉토리: safetensors 형식 로드 (storage/models/meta-llama-mtp)
+                - .pt 파일: checkpoint 형식 로드 (storage/checkpoints/.../checkpoint.pt)
             device: 디바이스 ("cuda", "mps", "cpu", "auto")
             dtype: 데이터 타입 ("float16", "bfloat16", None이면 safetensors 기본값 사용)
-            initialize_value_head: Value head 초기화 여부
+            initialize_value_head: Value head 초기화 여부 (safetensors 로드 시에만 적용)
                 - True: Critic/Verifiable Stage용 (기본값)
                 - False: Rho-1 Stage용 (Value head 불필요)
 
@@ -59,6 +61,7 @@ class MetaLlamaMTPAdapter(nn.Module):
 
         Raises:
             FileNotFoundError: params.json 또는 config.json 미발견
+            KeyError: checkpoint에 adapter_state_dict 키 없음
         """
         import json
         from pathlib import Path
@@ -66,6 +69,14 @@ class MetaLlamaMTPAdapter(nn.Module):
         from .checkpoints import load_meta_mtp_model
 
         model_path = Path(model_path)
+
+        # Checkpoint 파일 (.pt) 감지 → 전체 adapter 로드
+        if model_path.suffix == ".pt":
+            return cls._from_checkpoint(
+                checkpoint_path=model_path,
+                device=device,
+                dtype=dtype,
+            )
 
         # Dtype 변환 (문자열 -> torch.dtype)
         dtype_obj = None
@@ -222,3 +233,94 @@ class MetaLlamaMTPAdapter(nn.Module):
             return_all_heads=True,
         )
         return logits
+
+    @classmethod
+    def _from_checkpoint(
+        cls,
+        checkpoint_path,
+        device: str = "auto",
+        dtype: Optional[str] = None,
+    ) -> "MetaLlamaMTPAdapter":
+        """Checkpoint 파일에서 전체 adapter 로드
+
+        Args:
+            checkpoint_path: .pt checkpoint 파일 경로
+            device: 디바이스
+            dtype: 데이터 타입
+
+        Returns:
+            MetaLlamaMTPAdapter (전체 state_dict 로드됨)
+
+        Raises:
+            KeyError: checkpoint에 adapter_state_dict 키 없음
+        """
+        import torch
+        from pathlib import Path
+
+        from .checkpoints import _get_device
+
+        checkpoint_path = Path(checkpoint_path)
+        device_obj = _get_device(device)
+
+        # 1. Checkpoint 로드
+        checkpoint = torch.load(checkpoint_path, map_location=device_obj, weights_only=False)
+
+        if "adapter_state_dict" not in checkpoint:
+            raise KeyError(f"Checkpoint에 'adapter_state_dict' 키가 없습니다: {checkpoint_path}")
+
+        state_dict = checkpoint["adapter_state_dict"]
+
+        # 2. State dict에서 모델 구조 추론
+        n_layers = max(
+            int(k.split(".")[2]) for k in state_dict.keys()
+            if k.startswith("transformer.layers.")
+        ) + 1
+
+        dim = state_dict["transformer.tok_embeddings.weight"].shape[1]
+        vocab_size = state_dict["transformer.tok_embeddings.weight"].shape[0]
+
+        # n_heads 추론 (wq weight shape에서)
+        wq_shape = state_dict["transformer.layers.0.attention.wq.weight"].shape
+        head_dim = dim // 32  # 기본 head_dim 추정
+        n_heads = wq_shape[0] // head_dim
+
+        # n_future_tokens 추론 (output.weight shape에서)
+        output_shape = state_dict["transformer.output.weight"].shape
+        if len(output_shape) == 3:
+            n_future_tokens = output_shape[0]
+        else:
+            n_future_tokens = 1
+
+        # 3. ModelArgs 생성
+        model_args = ModelArgs(
+            dim=dim,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            vocab_size=vocab_size,
+            n_future_tokens=n_future_tokens,
+        )
+
+        # 4. Transformer 생성
+        transformer = Transformer(model_args)
+
+        # 5. ValueHead 생성 (checkpoint에 있는 경우)
+        value_head = None
+        if any(k.startswith("value_head.") for k in state_dict.keys()):
+            value_head = ValueHead(hidden_size=dim)
+
+        # 6. Adapter 생성 및 state_dict 로드
+        adapter = cls(
+            transformer=transformer,
+            model_args=model_args,
+            value_head=value_head,
+        )
+
+        adapter.load_state_dict(state_dict)
+
+        # 7. Device 및 dtype 설정
+        adapter = adapter.to(device_obj)
+        if dtype is not None:
+            dtype_obj = getattr(torch, dtype)
+            adapter = adapter.to(dtype_obj)
+
+        return adapter

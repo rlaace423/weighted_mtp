@@ -22,7 +22,7 @@ models:
   policy:
     name: meta-llama-mtp
     path: storage/models/meta-llama-mtp
-    tokenizer_path: storage/models/meta-llama-mtp/tokenizer
+    tokenizer_path: storage/checkpoints/critic/{{ experiment.name }}/checkpoint_final.pt
     params:
       dim: 4096
       n_layers: 32
@@ -50,7 +50,7 @@ data_sampling:
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
-  n_epochs: 1.0  # 명확한 1 epoch (Anthropic fine-tuning 표준)
+  n_epochs: 3.0  # 명확한 1 epoch (Anthropic fine-tuning 표준)
   batch_size: 48  # Per GPU
   gradient_accumulation_steps: 1  # Effective batch size = 192
   learning_rate: 1.5e-5  # Critic은 높은 LR 유지

@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 
 from weighted_mtp.utils import (
-    load_critic_checkpoint,
     save_checkpoint,
 )
 
@@ -171,157 +170,6 @@ class TestSaveCheckpoint:
         assert Path(checkpoint_path_str).exists()
 
 
-class TestLoadCriticCheckpoint:
-    """load_critic_checkpoint() 테스트"""
-
-    def test_local_path_load(self, tmp_path):
-        """Local path 로드 검증"""
-        # Checkpoint 저장
-        adapter_save = MockAdapter()
-        optimizer = torch.optim.Adam(adapter_save.value_head.parameters(), lr=1e-4)
-
-        train_metrics = {"train_loss": 0.5}
-        val_metrics = {"val_loss": 0.3}
-        checkpoint_path = tmp_path / "checkpoint.pt"
-
-        save_checkpoint(
-            adapter=adapter_save,
-            optimizer=optimizer,
-            epoch=1,
-            train_metrics=train_metrics,
-            val_metrics=val_metrics,
-            checkpoint_path=checkpoint_path,
-        )
-
-        # 새로운 adapter에 로드
-        adapter_load = MockAdapter()
-        device = torch.device("cpu")
-
-        checkpoint = load_critic_checkpoint(
-            checkpoint_path=str(checkpoint_path),
-            adapter=adapter_load,
-            device=device,
-        )
-
-        # Checkpoint 내용 검증
-        assert checkpoint["epoch"] == 1
-        assert checkpoint["val_metrics"]["val_loss"] == 0.3
-
-        # Value head state dict 로드 확인
-        # (파라미터가 동일한지는 state_dict 비교로 확인)
-        original_state = adapter_save.value_head.state_dict()
-        loaded_state = adapter_load.value_head.state_dict()
-
-        for key in original_state:
-            assert torch.allclose(original_state[key], loaded_state[key])
-
-    def test_file_not_found(self):
-        """존재하지 않는 파일 로드 시 에러 검증"""
-        adapter = MockAdapter()
-        device = torch.device("cpu")
-
-        with pytest.raises(FileNotFoundError, match="Checkpoint 파일이 존재하지 않습니다"):
-            load_critic_checkpoint(
-                checkpoint_path="/nonexistent/path/checkpoint.pt",
-                adapter=adapter,
-                device=device,
-            )
-
-    def test_missing_value_head_state_dict(self, tmp_path):
-        """value_head_state_dict 없는 checkpoint 로드 시 에러"""
-        # 잘못된 형식의 checkpoint 저장
-        checkpoint_path = tmp_path / "bad_checkpoint.pt"
-        bad_checkpoint = {
-            "epoch": 1,
-            "adapter_state_dict": {"some": "data"},
-            # value_head_state_dict 없음
-        }
-        torch.save(bad_checkpoint, checkpoint_path)
-
-        adapter = MockAdapter()
-        device = torch.device("cpu")
-
-        with pytest.raises(KeyError, match="value_head_state_dict"):
-            load_critic_checkpoint(
-                checkpoint_path=str(checkpoint_path),
-                adapter=adapter,
-                device=device,
-            )
-
-    @patch("mlflow.artifacts.download_artifacts")
-    def test_mlflow_uri_load(self, mock_download, tmp_path):
-        """MLflow artifact URI 로드 검증 (mock)"""
-        # Local checkpoint 준비
-        adapter_save = MockAdapter()
-        optimizer = torch.optim.Adam(adapter_save.value_head.parameters(), lr=1e-4)
-
-        train_metrics = {"train_loss": 0.5}
-        val_metrics = {"val_loss": 0.3}
-        local_checkpoint_path = tmp_path / "checkpoint.pt"
-
-        save_checkpoint(
-            adapter=adapter_save,
-            optimizer=optimizer,
-            epoch=1,
-            train_metrics=train_metrics,
-            val_metrics=val_metrics,
-            checkpoint_path=local_checkpoint_path,
-        )
-
-        # MLflow artifact download mock 설정
-        mock_download.return_value = str(local_checkpoint_path)
-
-        # MLflow URI로 로드
-        adapter_load = MockAdapter()
-        device = torch.device("cpu")
-        mlflow_uri = "mlflow://8/abc123/artifacts/checkpoints/checkpoint_best.pt"
-
-        checkpoint = load_critic_checkpoint(
-            checkpoint_path=mlflow_uri,
-            adapter=adapter_load,
-            device=device,
-        )
-
-        # MLflow download_artifacts 호출 확인
-        mock_download.assert_called_once_with(mlflow_uri)
-
-        # Checkpoint 로드 확인
-        assert checkpoint["epoch"] == 1
-        assert checkpoint["val_metrics"]["val_loss"] == 0.3
-
-    def test_device_mapping(self, tmp_path):
-        """Device mapping 지원 검증"""
-        # CPU에서 checkpoint 저장
-        adapter_save = MockAdapter()
-        optimizer = torch.optim.Adam(adapter_save.value_head.parameters(), lr=1e-4)
-
-        train_metrics = {"train_loss": 0.5}
-        val_metrics = {"val_loss": 0.3}
-        checkpoint_path = tmp_path / "checkpoint.pt"
-
-        save_checkpoint(
-            adapter=adapter_save,
-            optimizer=optimizer,
-            epoch=1,
-            train_metrics=train_metrics,
-            val_metrics=val_metrics,
-            checkpoint_path=checkpoint_path,
-        )
-
-        # CPU device로 로드 (CUDA 없는 환경에서도 동작)
-        adapter_load = MockAdapter()
-        device = torch.device("cpu")
-
-        checkpoint = load_critic_checkpoint(
-            checkpoint_path=str(checkpoint_path),
-            adapter=adapter_load,
-            device=device,
-        )
-
-        # 정상 로드 확인
-        assert checkpoint["epoch"] == 1
-
-
 class TestCheckpointIntegration:
     """save + load 통합 테스트"""
 
@@ -351,25 +199,19 @@ class TestCheckpointIntegration:
             checkpoint_path=checkpoint_path,
         )
 
-        # 3. 새로운 adapter 생성 (초기 상태)
-        adapter_new = MockAdapter()
+        # 3. Checkpoint 로드 및 검증
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
 
-        # 초기 상태는 다름
-        original_params = list(adapter_original.value_head.parameters())[0].data
-        new_params_before = list(adapter_new.value_head.parameters())[0].data
-        assert not torch.allclose(original_params, new_params_before)
+        assert checkpoint["epoch"] == 1
+        assert "adapter_state_dict" in checkpoint
+        assert "value_head_state_dict" in checkpoint
 
-        # 4. Checkpoint 로드
-        device = torch.device("cpu")
-        load_critic_checkpoint(
-            checkpoint_path=str(checkpoint_path),
-            adapter=adapter_new,
-            device=device,
-        )
+        # 4. 저장된 파라미터가 학습된 파라미터와 일치하는지 확인
+        original_state = adapter_original.value_head.state_dict()
+        saved_state = checkpoint["value_head_state_dict"]
 
-        # 5. 로드 후 파라미터 일치 확인
-        new_params_after = list(adapter_new.value_head.parameters())[0].data
-        assert torch.allclose(original_params, new_params_after)
+        for key in original_state:
+            assert torch.allclose(original_state[key], saved_state[key])
 
 
 class TestFSDPCheckpoint:
@@ -441,8 +283,8 @@ class TestFSDPCheckpoint:
         assert "adapter_state_dict" in checkpoint
         assert "value_head_state_dict" in checkpoint
 
-    def test_load_checkpoint_fsdp_compatibility(self, tmp_path):
-        """FSDP checkpoint를 일반 모델로 로드 (호환성)"""
+    def test_checkpoint_fsdp_compatibility(self, tmp_path):
+        """FSDP checkpoint 저장 및 로드 호환성"""
         # 1. Checkpoint 저장 (일반 모델)
         adapter_save = MockAdapter()
         optimizer = torch.optim.Adam(adapter_save.value_head.parameters(), lr=1e-4)
@@ -460,23 +302,17 @@ class TestFSDPCheckpoint:
             checkpoint_path=checkpoint_path,
         )
 
-        # 2. 새로운 adapter에 로드
-        adapter_load = MockAdapter()
-        device = torch.device("cpu")
-
-        checkpoint = load_critic_checkpoint(
-            checkpoint_path=str(checkpoint_path),
-            adapter=adapter_load,
-            device=device,
-        )
+        # 2. Checkpoint 로드 및 검증
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
 
         # 3. Value head state dict 로드 확인
         assert checkpoint["epoch"] == 1
         assert "value_head_state_dict" in checkpoint
+        assert "adapter_state_dict" in checkpoint
 
         # 4. 파라미터 일치 확인
         original_state = adapter_save.value_head.state_dict()
-        loaded_state = adapter_load.value_head.state_dict()
+        saved_state = checkpoint["value_head_state_dict"]
 
         for key in original_state:
-            assert torch.allclose(original_state[key], loaded_state[key])
+            assert torch.allclose(original_state[key], saved_state[key])

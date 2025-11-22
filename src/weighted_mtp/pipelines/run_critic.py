@@ -32,7 +32,7 @@ from weighted_mtp.utils import (
     get_model_size,
     get_system_info,
     s3_upload_executor,
-    save_critic_checkpoint,
+    save_checkpoint,
     shutdown_s3_executor,
     upload_to_s3_async,
 )
@@ -681,7 +681,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             best_val_loss = avg_val_loss
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}.pt"
 
-            save_critic_checkpoint(
+            save_checkpoint(
                 adapter=adapter,
                 optimizer=optimizer,
                 epoch=current_epoch,
@@ -735,7 +735,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             lam=getattr(config.training, "lam", 0.0),
         )
 
-        save_critic_checkpoint(
+        save_checkpoint(
             adapter=adapter,
             optimizer=optimizer,
             epoch=current_epoch,
