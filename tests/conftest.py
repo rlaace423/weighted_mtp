@@ -4,6 +4,8 @@ import pytest
 import sys
 from pathlib import Path
 
+from weighted_mtp.utils import s3_utils
+
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_vendor_path():
@@ -32,3 +34,13 @@ def storage_root(project_root: Path) -> Path:
 def micro_model_path(storage_root: Path) -> Path:
     """Micro MTP 모델 경로"""
     return storage_root / "models/micro-mtp"
+
+
+@pytest.fixture(autouse=True)
+def ensure_s3_executor_available():
+    """각 테스트 전에 s3_upload_executor가 사용 가능한지 확인
+
+    이전 테스트에서 shutdown된 경우 재생성
+    """
+    if s3_utils.s3_upload_executor._shutdown:
+        s3_utils.reset_s3_executor()

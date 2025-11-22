@@ -1,6 +1,6 @@
 # Critic Pre-training (Stage 1)
 # Value head pretraining for TD error calculation
-# 프로덕션 설정 (VESSL A100 4-GPU)
+# 프로덕션 설정 (VESSL H200 4-GPU)
 
 # 프로젝트 정보
 project:
@@ -48,12 +48,12 @@ data_sampling:
   difficulty_range: [1, 7]
   seed: 42
 
-# 학습 설정 (A100 4-GPU 최적화)
+# 학습 설정 (H200 4-GPU 최적화)
 training:
   n_epochs: 1.0  # 명확한 1 epoch (Anthropic fine-tuning 표준)
-  batch_size: 32  # Per GPU (effective = 64 with 2 GPUs)
-  gradient_accumulation_steps: 2  # Effective batch size = 64
-  learning_rate: 5.0e-5  # Critic은 높은 LR
+  batch_size: 48  # Per GPU
+  gradient_accumulation_steps: 1  # Effective batch size = 192
+  learning_rate: 1.5e-5  # Critic은 높은 LR 유지
   max_grad_norm: 1.0
   gamma: 1.0
   lam: 1.0  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
@@ -67,6 +67,7 @@ checkpoint:
   save_best: true
   save_final: true
   save_total_limit: 2
+  s3_upload: false
 
 # 런타임 설정
 runtime:

@@ -8,6 +8,7 @@ import pytest
 
 from weighted_mtp.utils import (
     cleanup_s3_checkpoints,
+    reset_s3_executor,
     shutdown_s3_executor,
     upload_to_s3_async,
 )
@@ -22,9 +23,9 @@ def temp_checkpoint(tmp_path):
 
 
 def test_upload_to_s3_async_disabled(temp_checkpoint):
-    """MLflow 비활성화 시 업로드 스킵"""
-    # MLflow 비활성화
-    upload_to_s3_async(temp_checkpoint, mlflow_enabled=False)
+    """S3 업로드 비활성화 시 스킵"""
+    # S3 업로드 비활성화
+    upload_to_s3_async(temp_checkpoint, enabled=False)
     # 에러 없이 완료되면 성공
 
 
@@ -39,7 +40,7 @@ def test_upload_to_s3_async_success(temp_checkpoint):
         with patch("shutil.copy2") as mock_copy:
             with patch("weighted_mtp.utils.s3_utils.mlflow") as mock_mlflow:
                 # 업로드 실행
-                upload_to_s3_async(temp_checkpoint, mlflow_enabled=True)
+                upload_to_s3_async(temp_checkpoint, enabled=True)
 
                 # 복사 호출 확인
                 mock_copy.assert_called_once()
@@ -57,7 +58,7 @@ def test_upload_to_s3_async_failure(temp_checkpoint, caplog):
         mock_mlflow.log_artifact.side_effect = Exception("S3 connection error")
 
         # 업로드 실행 (예외는 캐치되어야 함)
-        upload_to_s3_async(temp_checkpoint, mlflow_enabled=True)
+        upload_to_s3_async(temp_checkpoint, enabled=True)
 
         # 에러 로그 확인
         assert "S3 upload failed" in caplog.text
@@ -161,8 +162,8 @@ def test_shutdown_s3_executor():
     # Executor shutdown 실행
     shutdown_s3_executor()
 
-    # 에러 없이 완료되면 성공
-    # (실제로는 전역 executor가 shutdown되지만, 테스트 격리를 위해 검증 생략)
+    # 테스트 격리를 위해 executor 재생성
+    reset_s3_executor()
 
 
 def test_upload_cleans_temp_on_error(temp_checkpoint):
@@ -177,7 +178,7 @@ def test_upload_cleans_temp_on_error(temp_checkpoint):
             mock_mlflow.log_artifact.side_effect = Exception("S3 error")
 
             # 업로드 실행 (예외는 캐치되어야 함)
-            upload_to_s3_async(temp_checkpoint, mlflow_enabled=True)
+            upload_to_s3_async(temp_checkpoint, enabled=True)
 
             # cleanup 호출 확인 (에러 발생 시에도)
             mock_tmp_instance.cleanup.assert_called_once()

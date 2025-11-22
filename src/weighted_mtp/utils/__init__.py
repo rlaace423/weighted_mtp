@@ -32,6 +32,7 @@ from weighted_mtp.utils.logging_utils import (
 )
 from weighted_mtp.utils.s3_utils import (
     cleanup_s3_checkpoints,
+    reset_s3_executor,
     s3_upload_executor,
     shutdown_s3_executor,
     upload_to_s3_async,
@@ -58,6 +59,7 @@ __all__ = [
     "get_system_info",
     # S3 utils
     "cleanup_s3_checkpoints",
+    "reset_s3_executor",
     "s3_upload_executor",
     "shutdown_s3_executor",
     "upload_to_s3_async",

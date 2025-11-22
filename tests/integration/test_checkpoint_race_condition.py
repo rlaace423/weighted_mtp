@@ -13,10 +13,10 @@ import torch
 
 from weighted_mtp.utils import (
     cleanup_old_checkpoints,
-    s3_upload_executor,
     save_checkpoint,
     upload_to_s3_async,
 )
+from weighted_mtp.utils import s3_utils
 
 
 def test_race_condition_prevented(tmp_path):
@@ -68,8 +68,8 @@ def test_race_condition_prevented(tmp_path):
     with patch("weighted_mtp.utils.s3_utils.mlflow.log_artifact", side_effect=slow_upload_mock):
 
         # S3 업로드 시작 (비동기)
-        upload_future = s3_upload_executor.submit(
-            upload_to_s3_async, checkpoint1, mlflow_enabled=True
+        upload_future = s3_utils.s3_upload_executor.submit(
+            upload_to_s3_async, checkpoint1, enabled=True
         )
 
         # 짧은 대기 (업로드 시작 확인)
@@ -140,8 +140,8 @@ def test_multiple_checkpoints_race_condition(tmp_path):
             checkpoints.append(checkpoint_path)
 
             # S3 업로드 시작 (비동기)
-            future = s3_upload_executor.submit(
-                upload_to_s3_async, checkpoint_path, mlflow_enabled=True
+            future = s3_utils.s3_upload_executor.submit(
+                upload_to_s3_async, checkpoint_path, enabled=True
             )
             upload_futures.append(future)
 

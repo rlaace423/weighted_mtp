@@ -1,6 +1,6 @@
 # Rho-1 WMTP (Reference-based Weighting)
 # Excess loss weighting with Reference model
-# 프로덕션 설정 (VESSL A100 4-GPU)
+# 프로덕션 설정 (VESSL H200 4-GPU)
 
 # 프로젝트 정보
 project:
@@ -75,12 +75,12 @@ data_sampling:
         hard: 0.3
   seed: 42
 
-# 학습 설정 (A100 4-GPU 최적화)
+# 학습 설정 (H200 4-GPU 최적화)
 training:
   n_epochs: 3.0
-  batch_size: 8  # Per GPU (effective = 16 with 4 GPUs)
-  gradient_accumulation_steps: 2  # Effective batch size = 64
-  learning_rate: 1.0e-5
+  batch_size: 32  # Per GPU (Reference model 메모리 고려)
+  gradient_accumulation_steps: 2  # Effective batch size = 256
+  learning_rate: 1.0e-5  # Square root scaling (√4 from batch 64→256)
   max_grad_norm: 1.0
 
   # Rho-1 weighting
@@ -96,6 +96,7 @@ checkpoint:
   save_best: true
   save_final: true
   save_total_limit: 2
+  s3_upload: false
 
 # 런타임 설정
 runtime:

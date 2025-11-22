@@ -289,6 +289,7 @@ def run_verifiable_training(
 
     # 6. MLflow 초기화 (Rank 0만, experiment 이름이 있는 경우만)
     use_mlflow = bool(config.mlflow.experiment)
+    use_s3_upload = config.checkpoint.get("s3_upload", True) and use_mlflow
     if is_main_process() and use_mlflow:
         mlflow.set_tracking_uri(config.mlflow.tracking_uri)
         mlflow.set_experiment(config.mlflow.experiment)
@@ -847,8 +848,8 @@ def run_verifiable_training(
                 logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
 
             # S3 업로드 (비동기)
-            if is_main_process() and use_mlflow:
-                s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_mlflow)
+            if is_main_process() and use_s3_upload:
+                s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_s3_upload)
 
             # 오래된 checkpoint 정리 (최대 3개 유지)
             if config.checkpoint.get("save_total_limit"):
@@ -858,7 +859,7 @@ def run_verifiable_training(
                 )
 
                 # S3 정리 (비동기)
-                if is_main_process() and use_mlflow:
+                if is_main_process() and use_s3_upload:
                     s3_upload_executor.submit(
                         cleanup_s3_checkpoints,
                         experiment_id=mlflow.active_run().info.experiment_id,

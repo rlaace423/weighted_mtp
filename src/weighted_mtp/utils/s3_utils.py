@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 s3_upload_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="s3-upload")
 
 
-def upload_to_s3_async(checkpoint_path: Path, mlflow_enabled: bool) -> None:
+def upload_to_s3_async(checkpoint_path: Path, enabled: bool) -> None:
     """임시 복사본을 생성하여 S3에 안전하게 업로드
 
     원본 파일을 임시 디렉터리에 복사한 후 업로드하여
@@ -26,14 +26,14 @@ def upload_to_s3_async(checkpoint_path: Path, mlflow_enabled: bool) -> None:
 
     Args:
         checkpoint_path: 업로드할 checkpoint 경로
-        mlflow_enabled: MLflow 사용 여부
+        enabled: S3 업로드 활성화 여부
 
     Note:
         임시 복사본은 업로드 완료 후 자동 삭제
         원본 파일과 완전히 독립적으로 동작
         S3에는 원본 파일명으로 저장됨
     """
-    if not mlflow_enabled:
+    if not enabled:
         return
 
     tmp_dir = None
@@ -122,3 +122,12 @@ def shutdown_s3_executor() -> None:
     """
     s3_upload_executor.shutdown(wait=True)
     logger.info("All S3 uploads completed")
+
+
+def reset_s3_executor() -> None:
+    """S3 executor 재생성
+
+    테스트 격리를 위해 shutdown 후 executor 재생성
+    """
+    global s3_upload_executor
+    s3_upload_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="s3-upload")

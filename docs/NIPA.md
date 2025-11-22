@@ -65,7 +65,7 @@ ssh nipa
 ### 1.3 서버 디렉토리 생성
 
 ```bash
-ssh nipa "mkdir -p ~/grad_school/wooshik/weighted_mtp/storage/{models,datasets,checkpoints}"
+ssh nipa "mkdir -p ~/grad_school/wooshikwon/weighted_mtp/storage/{models,datasets,checkpoints}"
 ```
 
 ---
@@ -78,25 +78,30 @@ ssh nipa "mkdir -p ~/grad_school/wooshik/weighted_mtp/storage/{models,datasets,c
 
 ### 2.2 필수 데이터 업로드
 
+> **주의**: 아래 rsync 명령어는 **로컬 맥에서 실행**해야 함. NIPA 서버에 접속한 상태에서 실행하면 안 됨. 서버에 접속 중이라면 먼저 `exit`로 나온 후 실행.
+
 ```bash
+# 로컬에서 프로젝트 디렉토리로 이동
+cd /path/to/weighted_mtp
+
 # 1. 모델 업로드 (50GB, 약 1-2시간 소요)
 rsync -avz --progress -e "ssh -p 10507" \
   ./storage/models/meta-llama-mtp/ \
-  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshik/weighted_mtp/storage/models/meta-llama-mtp/
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/models/meta-llama-mtp/
 
 # 2. 데이터셋 업로드 (7.8GB)
 rsync -avz --progress -e "ssh -p 10507" \
   ./storage/datasets/codecontests/ \
-  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshik/weighted_mtp/storage/datasets/codecontests/
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/datasets/codecontests/
 
 # 3. 평가 데이터셋 (소용량)
 rsync -avz --progress -e "ssh -p 10507" \
   ./storage/datasets/humaneval/ \
-  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshik/weighted_mtp/storage/datasets/humaneval/
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/datasets/humaneval/
 
 rsync -avz --progress -e "ssh -p 10507" \
   ./storage/datasets/mbpp/ \
-  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshik/weighted_mtp/storage/datasets/mbpp/
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/datasets/mbpp/
 ```
 
 ### 2.3 선택적 데이터 업로드
@@ -105,18 +110,18 @@ rsync -avz --progress -e "ssh -p 10507" \
 # Reference 모델 (20GB, 필요시)
 rsync -avz --progress -e "ssh -p 10507" \
   ./storage/models/ref-sheared-llama-2.7b/ \
-  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshik/weighted_mtp/storage/models/ref-sheared-llama-2.7b/
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/models/ref-sheared-llama-2.7b/
 
 # 기존 체크포인트 (필요시)
 rsync -avz --progress -e "ssh -p 10507" \
   ./storage/checkpoints/ \
-  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshik/weighted_mtp/storage/checkpoints/
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/checkpoints/
 ```
 
 ### 2.4 업로드 검증
 
 ```bash
-ssh nipa "du -sh ~/grad_school/wooshik/weighted_mtp/storage/*/"
+ssh nipa "du -sh ~/grad_school/wooshikwon/weighted_mtp/storage/*/"
 ```
 
 예상 결과:
@@ -128,13 +133,72 @@ ssh nipa "du -sh ~/grad_school/wooshik/weighted_mtp/storage/*/"
 
 ---
 
-## Phase 3: 서버 환경 설정
+## Phase 3: 코드 배포
 
-### 3.1 Conda 환경 생성
+### 3.1 코드 업로드
+
+> **중요**: 먼저 코드를 서버에 올려야 requirements_nipa.txt 등의 파일을 사용할 수 있음.
+
+```bash
+# 로컬에서 실행
+cd /path/to/weighted_mtp
+
+rsync -avz --progress \
+  --exclude 'storage/' \
+  --exclude '.git/' \
+  --exclude '__pycache__/' \
+  --exclude '*.pyc' \
+  --exclude '.venv/' \
+  --exclude 'mlruns/' \
+  --exclude '.env' \
+  --exclude '.coverage' \
+  --exclude '.pytest_cache/' \
+  --exclude '.ruff_cache/' \
+  --exclude '.DS_Store' \
+  --exclude 'results/' \
+  --exclude 'uv.lock' \
+  --exclude '.claude/' \
+  -e "ssh -p 10507" \
+  ./ \
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/
+```
+
+### 3.2 환경변수 설정
 
 ```bash
 ssh nipa
-cd ~/grad_school/wooshik
+cd ~/grad_school/wooshikwon/weighted_mtp
+
+# .env 파일 생성 (MLflow, AWS 등)
+cat > .env << 'EOF'
+MLFLOW_TRACKING_URI=http://13.50.240.176
+MLFLOW_TRACKING_USERNAME=your_username
+MLFLOW_TRACKING_PASSWORD=your_password
+AWS_ACCESS_KEY_ID=your_key
+AWS_SECRET_ACCESS_KEY=your_secret
+AWS_DEFAULT_REGION=eu-north-1
+HF_TOKEN=your_hf_token
+TOKENIZERS_PARALLELISM=false
+EOF
+```
+
+### 3.3 PYTHONPATH 설정
+
+```bash
+# ~/.bashrc에 추가
+echo 'export PYTHONPATH="$HOME/grad_school/wooshikwon/weighted_mtp/src:$PYTHONPATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+---
+
+## Phase 4: 서버 환경 설정
+
+### 4.1 Conda 환경 생성
+
+```bash
+ssh nipa
+cd ~/grad_school/wooshikwon
 
 # conda 환경 생성
 conda create -n weighted_mtp python=3.10 -y
@@ -147,10 +211,10 @@ conda install pytorch pytorch-cuda=12.1 -c pytorch -c nvidia -y
 conda install -c "nvidia/label/cuda-12.1.0" cuda-toolkit -y
 ```
 
-### 3.2 Python 패키지 설치
+### 4.2 Python 패키지 설치
 
 ```bash
-cd ~/grad_school/wooshik/weighted_mtp
+cd ~/grad_school/wooshikwon/weighted_mtp
 
 # requirements.txt 사용
 pip install -r requirements_nipa.txt
@@ -160,7 +224,7 @@ pip install -r requirements_nipa.txt
 pip install flash-attn --no-build-isolation
 ```
 
-### 3.3 환경 검증
+### 4.3 환경 검증
 
 ```bash
 # PyTorch 및 GPU 확인
@@ -174,7 +238,7 @@ CUDA: True
 GPUs: 4
 ```
 
-### 3.4 Flash Attention 검증
+### 4.4 Flash Attention 검증
 
 ```bash
 python -c "
@@ -200,60 +264,13 @@ flash-attn version: 2.x.x
 
 ---
 
-## Phase 4: 코드 배포
-
-### 4.1 코드 업로드
-
-```bash
-# 로컬에서 실행
-rsync -avz --progress \
-  --exclude 'storage/' \
-  --exclude '.git/' \
-  --exclude '__pycache__/' \
-  --exclude '*.pyc' \
-  --exclude '.venv/' \
-  --exclude 'mlruns/' \
-  -e "ssh -p 10507" \
-  ./ \
-  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshik/weighted_mtp/
-```
-
-### 4.2 환경변수 설정
-
-```bash
-ssh nipa
-cd ~/grad_school/wooshik/weighted_mtp
-
-# .env 파일 생성 (MLflow, AWS 등)
-cat > .env << 'EOF'
-MLFLOW_TRACKING_URI=http://13.50.240.176
-MLFLOW_TRACKING_USERNAME=your_username
-MLFLOW_TRACKING_PASSWORD=your_password
-AWS_ACCESS_KEY_ID=your_key
-AWS_SECRET_ACCESS_KEY=your_secret
-AWS_DEFAULT_REGION=eu-north-1
-HF_TOKEN=your_hf_token
-TOKENIZERS_PARALLELISM=false
-EOF
-```
-
-### 4.3 PYTHONPATH 설정
-
-```bash
-# ~/.bashrc에 추가
-echo 'export PYTHONPATH="$HOME/grad_school/wooshik/weighted_mtp/src:$PYTHONPATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
----
-
 ## Phase 5: 실행
 
 ### 5.1 단일 GPU 테스트
 
 ```bash
 ssh nipa
-cd ~/grad_school/wooshik/weighted_mtp
+cd ~/grad_school/wooshikwon/weighted_mtp
 conda activate weighted_mtp
 source .env
 
@@ -323,7 +340,7 @@ torchrun --nproc_per_node=4 ...
 ```bash
 # 로컬에서 실행
 rsync -avz --progress -e "ssh -p 10507" \
-  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshik/weighted_mtp/storage/checkpoints/ \
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/checkpoints/ \
   ./storage/checkpoints_nipa/
 ```
 
@@ -416,18 +433,18 @@ rsync 재실행 시 자동으로 이어받기됨.
 - [ ] codecontests 데이터셋 (7.8GB)
 - [ ] 평가 데이터셋 (humaneval, mbpp)
 
+### 코드 배포
+
+- [ ] 코드 rsync
+- [ ] .env 파일 설정
+- [ ] PYTHONPATH 설정
+
 ### 환경 설정
 
 - [ ] conda 환경 생성
 - [ ] PyTorch + CUDA 설치
 - [ ] requirements 설치
 - [ ] flash-attn 설치
-
-### 코드 배포
-
-- [ ] 코드 rsync
-- [ ] .env 파일 설정
-- [ ] PYTHONPATH 설정
 
 ### 실행 검증
 

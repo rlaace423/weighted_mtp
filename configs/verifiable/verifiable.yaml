@@ -1,6 +1,6 @@
 # Verifiable WMTP (Stage 2)
 # WMTP with TD error-based token weighting
-# 프로덕션 설정 (VESSL A100 4-GPU)
+# 프로덕션 설정 (VESSL H200 4-GPU)
 
 # 프로젝트 정보
 project:
@@ -69,12 +69,12 @@ data_sampling:
         hard: 0.3
   seed: 42
 
-# 학습 설정 (A100 4-GPU 최적화)
+# 학습 설정 (H200 4-GPU 최적화)
 training:
   n_epochs: 3.0
-  batch_size: 8  # Per GPU (effective = 16 with 4 GPUs)
-  gradient_accumulation_steps: 2  # Effective batch size = 64
-  learning_rate: 1.0e-5
+  batch_size: 32  # Per GPU
+  gradient_accumulation_steps: 2  # Effective batch size = 192
+  learning_rate: 1.5e-5  # Square root scaling (√3 from batch 64→192)
   max_grad_norm: 1.0
 
   # TD error weighting
@@ -95,6 +95,7 @@ checkpoint:
   save_best: true
   save_final: true
   save_total_limit: 2
+  s3_upload: false
 
 # 런타임 설정
 runtime:
