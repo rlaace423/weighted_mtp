@@ -831,6 +831,7 @@ def run_verifiable_training(
                 },
                 val_metrics=val_metrics,
                 checkpoint_path=checkpoint_path,
+                config={"model": {"path": config.models.policy.path}},
             )
 
             # 모든 GPU가 checkpoint 저장 완료까지 대기

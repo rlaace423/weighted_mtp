@@ -43,7 +43,7 @@ dataset:
 
 # 데이터 샘플링
 data_sampling:
-  n_samples: 150000
+  n_samples: 120000
   auto_data_balancing: false
   correct_ratio: 1.0  # 정답만 학습
   curriculum_learning: true
@@ -74,7 +74,7 @@ training:
   n_epochs: 3.0
   batch_size: 32  # Per GPU
   gradient_accumulation_steps: 2  # Effective batch size = 192
-  learning_rate: 2.0e-5  # Square root scaling (√3 from batch 64→192)
+  learning_rate: 1.5e-5  # Square root scaling (√3 from batch 64→192)
   max_grad_norm: 1.0
   log_interval: 1
 

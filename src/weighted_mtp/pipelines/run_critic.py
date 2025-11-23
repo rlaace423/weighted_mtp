@@ -710,6 +710,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 train_metrics={"train_loss": train_loss_avg},
                 val_metrics=val_metrics,
                 checkpoint_path=checkpoint_path,
+                config={"model": {"path": config.models.policy.path}},
             )
 
             # 모든 GPU가 checkpoint 저장 완료까지 대기

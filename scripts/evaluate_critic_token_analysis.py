@@ -1,12 +1,11 @@
 """Critic Token Analysis 평가 스크립트
 
-학습된 Critic head의 토큰 단위 value 분석
+학습된 Critic 모델의 토큰 단위 value 분석
 오답 코드에서 value 급락 지점을 탐지하여 에러 인지 능력 검증
 
 사용법:
     PYTHONPATH=src python scripts/evaluate_critic_token_analysis.py \
-        --checkpoint storage/checkpoints/critic/best.pt \
-        --model_path storage/models/meta-llama-mtp \
+        --checkpoint storage/checkpoints/critic/critic-pretrain-local/checkpoint_epoch_0.50.pt \
         --n_samples 100 \
         --incorrect_only \
         --output_dir results/token_analysis
@@ -30,8 +29,7 @@ from weighted_mtp.analysis import (
     generate_report,
 )
 from weighted_mtp.data.datasets import load_dataset
-from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
-from weighted_mtp.utils.checkpoint_utils import load_critic_checkpoint
+from weighted_mtp.utils.checkpoint_utils import load_checkpoint_for_evaluation
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,19 +44,7 @@ def main():
         "--checkpoint",
         type=str,
         required=True,
-        help="Critic checkpoint 경로 (value_head_state_dict 포함)",
-    )
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        default="storage/models/meta-llama-mtp",
-        help="Base 모델 경로",
-    )
-    parser.add_argument(
-        "--tokenizer_path",
-        type=str,
-        default=None,
-        help="Tokenizer 경로 (기본: model_path)",
+        help="Critic checkpoint 경로 (전체 모델 포함)",
     )
     parser.add_argument(
         "--dataset",
@@ -149,38 +135,40 @@ def main():
 
     logger.info(f"Device: {device}, dtype: {dtype}")
 
-    # 1. 모델 로딩
-    logger.info(f"모델 로딩: {args.model_path}")
-    adapter = MetaLlamaMTPAdapter.from_pretrained(
-        model_path=args.model_path,
-        device=str(device),
-        dtype=dtype,
+    # 1. Checkpoint에서 전체 모델 로딩
+    logger.info(f"Checkpoint 로딩: {args.checkpoint}")
+    adapter, metadata = load_checkpoint_for_evaluation(
+        checkpoint_path=Path(args.checkpoint),
+        device=device,
         initialize_value_head=True,
     )
 
-    # 2. Checkpoint 로딩 (value_head만)
-    logger.info(f"Checkpoint 로딩: {args.checkpoint}")
-    load_critic_checkpoint(
-        checkpoint_path=args.checkpoint,
-        adapter=adapter,
-        device=device,
-    )
+    model_path = metadata["config"]["model"]["path"]
+    logger.info(f"모델 경로: {model_path}")
+    logger.info(f"Checkpoint epoch: {metadata['epoch']}")
 
-    # 3. Tokenizer 로딩
-    tokenizer_path = args.tokenizer_path or args.model_path
+    # 2. Tokenizer 로딩
+    # micro-mtp는 tokenizer가 없으므로 meta-llama-mtp tokenizer 사용
+    if "micro-mtp" in model_path:
+        tokenizer_path = "storage/models/meta-llama-mtp/tokenizer"
+    else:
+        tokenizer_path = Path(model_path) / "tokenizer"
+        if not tokenizer_path.exists():
+            tokenizer_path = model_path
+
     logger.info(f"Tokenizer 로딩: {tokenizer_path}")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path), use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # 4. Analyzer 초기화
+    # 3. Analyzer 초기화
     analyzer = TokenValueAnalyzer(
         adapter=adapter,
         tokenizer=tokenizer,
         device=device,
     )
 
-    # 5. 데이터 로딩
+    # 4. 데이터 로딩
     # 샘플링 설정
     if args.incorrect_only:
         auto_data_balancing = False
@@ -207,7 +195,7 @@ def main():
 
     logger.info(f"로드된 샘플 수: {len(dataset)}")
 
-    # 6. 분석 실행
+    # 5. 분석 실행
     results = []
     for i, sample in enumerate(dataset):
         # 코드 텍스트 추출 (instruction + input + output 형식)
@@ -231,14 +219,14 @@ def main():
         if (i + 1) % 10 == 0:
             logger.info(f"분석 진행: {i + 1}/{len(dataset)}")
 
-    # 7. 결과 저장
+    # 6. 결과 저장
     output_path = output_dir / "analysis.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     logger.info(f"분석 결과 저장: {output_path}")
 
-    # 8. 시각화 생성
+    # 7. 시각화 생성
     if args.plot:
         plot_dir = output_dir / "plots"
         plot_dir.mkdir(exist_ok=True)
@@ -271,7 +259,7 @@ def main():
 
         logger.info(f"시각화 저장 완료: {plot_dir}")
 
-    # 9. 평가 지표 계산 및 저장
+    # 8. 평가 지표 계산 및 저장
     report = generate_report(results)
     metrics_path = output_dir / "metrics.json"
     with open(metrics_path, "w", encoding="utf-8") as f:
@@ -279,7 +267,7 @@ def main():
 
     logger.info(f"평가 지표 저장: {metrics_path}")
 
-    # 10. 요약 통계 출력
+    # 9. 요약 통계 출력
     print_summary(results, report)
 
 

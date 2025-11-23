@@ -20,6 +20,7 @@ def save_checkpoint(
     train_metrics: dict[str, float],
     val_metrics: dict[str, float],
     checkpoint_path: Path | str,
+    config: dict | None = None,
 ) -> None:
     """Checkpoint 저장 (FSDP 지원)
 
@@ -30,6 +31,7 @@ def save_checkpoint(
         train_metrics: Training metrics
         val_metrics: Validation metrics
         checkpoint_path: 저장 경로
+        config: 학습 설정 정보 (모델 경로 등, 평가 시 필요)
 
     Saved checkpoint format:
         {
@@ -39,6 +41,7 @@ def save_checkpoint(
             "optimizer_state_dict": dict,
             "train_metrics": dict,
             "val_metrics": dict,
+            "config": dict,  # 학습 설정 (모델 경로 등)
         }
     """
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -69,6 +72,7 @@ def save_checkpoint(
         "optimizer_state_dict": optimizer.state_dict(),
         "train_metrics": train_metrics,
         "val_metrics": val_metrics,
+        "config": config,
     }
 
     # Value head state dict 별도 저장 (FSDP/일반 모델 모두)
@@ -86,6 +90,7 @@ def save_checkpoint(
 def load_checkpoint_for_evaluation(
     checkpoint_path: Path,
     device: torch.device,
+    initialize_value_head: bool = False,
 ):
     """평가용 checkpoint 로드 (전체 adapter 로드)
 
@@ -95,10 +100,11 @@ def load_checkpoint_for_evaluation(
     Args:
         checkpoint_path: Checkpoint 파일 경로
         device: torch.device
+        initialize_value_head: Value head 초기화 여부 (critic 평가 시 True)
 
     Returns:
         (model, checkpoint_metadata)
-        - model: MetaLlamaMTPAdapter (eval 모드, value_head 없음)
+        - model: MetaLlamaMTPAdapter (eval 모드)
         - checkpoint_metadata: {
             "epoch": float,
             "config": dict,  # 학습 설정 (모델 경로 등)
@@ -160,7 +166,7 @@ def load_checkpoint_for_evaluation(
     model = MetaLlamaMTPAdapter.from_pretrained(
         model_path=config_info["model"]["path"],
         device=device,
-        initialize_value_head=False,  # 평가에는 value head 불필요
+        initialize_value_head=initialize_value_head,
     )
 
     # State dict 로드

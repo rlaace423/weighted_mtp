@@ -49,7 +49,7 @@ dataset:
 
 # 데이터 샘플링
 data_sampling:
-  n_samples: 150000
+  n_samples: 120000
   auto_data_balancing: false
   correct_ratio: 1.0  # Rho-1은 정답만 학습
   curriculum_learning: true
@@ -80,7 +80,7 @@ training:
   n_epochs: 3.0
   batch_size: 32  # Per GPU (Reference model 메모리 고려)
   gradient_accumulation_steps: 2  # Effective batch size = 256
-  learning_rate: 1.0e-5  # Square root scaling (√4 from batch 64→256)
+  learning_rate: 1.5e-5  # Square root scaling (√4 from batch 64→256)
   max_grad_norm: 1.0
 
   # Rho-1 weighting

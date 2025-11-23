@@ -163,7 +163,7 @@ rsync -avz --progress \
   --exclude '.claude/' \
   -e "ssh -p 10507" \
   ./ \
-  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/samkim/weighted_mtp/
 ```
 
 ### 3.2 환경변수 설정
