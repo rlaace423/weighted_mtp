@@ -203,41 +203,36 @@ source ~/.bashrc
 
 ## Phase 4: 서버 환경 설정
 
-### 4.1 Conda 환경 생성
+### 4.1 uv 설치 및 환경 생성
 
 ```bash
 ssh nipa
-cd ~/grad_school/wooshikwon
+cd ~/grad_school/wooshikwon/weighted_mtp
 
-# conda 환경 생성
-conda create -n weighted_mtp python=3.10 -y
-conda activate weighted_mtp
+# uv 설치 (이미 설치되어 있으면 생략)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
 
-# PyTorch (CUDA 12.1 권장, H200 호환)
-conda install pytorch pytorch-cuda=12.1 -c pytorch -c nvidia -y
-
-# CUDA toolkit
-conda install -c "nvidia/label/cuda-12.1.0" cuda-toolkit -y
+# Python 3.10 + 가상환경 생성 및 의존성 설치
+uv sync
 ```
 
-### 4.2 Python 패키지 설치
+### 4.2 Flash Attention 설치 (선택)
 
 ```bash
 cd ~/grad_school/wooshikwon/weighted_mtp
 
-# requirements.txt 사용
-pip install -r requirements_nipa.txt
-
 # Flash Attention 2 (H200 Hopper 아키텍처 최적화)
-# PyTorch SDPA가 자동으로 Flash Attention 커널 사용
-pip install flash-attn --no-build-isolation
+uv pip install flash-attn --no-build-isolation
 ```
 
 ### 4.3 환경 검증
 
 ```bash
+cd ~/grad_school/wooshikwon/weighted_mtp
+
 # PyTorch 및 GPU 확인
-python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}'); print(f'GPUs: {torch.cuda.device_count()}')"
+uv run python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}'); print(f'GPUs: {torch.cuda.device_count()}')"
 ```
 
 예상 결과:
@@ -250,7 +245,7 @@ GPUs: 4
 ### 4.4 Flash Attention 검증
 
 ```bash
-python -c "
+uv run python -c "
 import torch
 print(f'Flash SDP enabled: {torch.backends.cuda.flash_sdp_enabled()}')
 print(f'Memory efficient SDP: {torch.backends.cuda.mem_efficient_sdp_enabled()}')
@@ -280,11 +275,9 @@ flash-attn version: 2.x.x
 ```bash
 ssh nipa
 cd ~/grad_school/wooshikwon/weighted_mtp
-conda activate weighted_mtp
-source .env
 
 # 테스트 실행
-python -m weighted_mtp.pipelines.run_baseline \
+uv run python -m weighted_mtp.pipelines.run_baseline \
   --config configs/baseline/baseline.yaml \
   --override training.n_epochs=0.01
 ```
@@ -292,52 +285,59 @@ python -m weighted_mtp.pipelines.run_baseline \
 ### 5.2 분산 학습 (4-GPU)
 
 ```bash
+cd ~/grad_school/wooshikwon/weighted_mtp
+
 # Baseline MTP
-torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   -m weighted_mtp.pipelines.run_baseline \
   --config configs/baseline/baseline.yaml
 
 # Critic 사전학습
-torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   -m weighted_mtp.pipelines.run_critic \
   --config configs/critic/critic.yaml
 
 # Verifiable Reward
-torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   -m weighted_mtp.pipelines.run_verifiable \
   --config configs/verifiable/verifiable.yaml
 
 # Rho-1
-torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   -m weighted_mtp.pipelines.run_rho1 \
   --config configs/rho1/rho1.yaml
 ```
 
-### 5.3 백그라운드 실행 (nohup)
+### 5.3 tmux 사용 (권장)
 
 ```bash
-nohup torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+# 세션 생성
+tmux new -s project
+
+# 학습 실행
+cd ~/grad_school/wooshikwon/weighted_mtp
+uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+  --master_port=29501 \
+  -m weighted_mtp.pipelines.run_baseline \
+  --config configs/baseline/baseline.yaml
+
+# 세션 분리: Ctrl+B, D
+# 세션 재접속: tmux attach -t project
+# 세션 목록: tmux ls
+# 세션 종료: tmux kill-session -t project
+```
+
+### 5.4 백그라운드 실행 (nohup)
+
+```bash
+mkdir -p logs
+nohup uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   -m weighted_mtp.pipelines.run_baseline \
   --config configs/baseline/baseline.yaml \
   > logs/baseline_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 # 로그 확인
 tail -f logs/baseline_*.log
-```
-
-### 5.4 tmux 사용 (권장)
-
-```bash
-# 세션 생성
-tmux new -s training
-
-# 학습 실행
-conda activate weighted_mtp
-source .env
-torchrun --nproc_per_node=4 ...
-
-# 세션 분리: Ctrl+B, D
-# 세션 재접속: tmux attach -t training
 ```
 
 ---
@@ -361,15 +361,14 @@ rsync -avz --progress -e "ssh -p 10507" \
 
 ```bash
 ssh nipa
-cd ~/grad_school/wooshik
+cd ~/grad_school/wooshikwon
 
 # 대용량 데이터 삭제 (모델/데이터셋)
 rm -rf weighted_mtp/storage/models/*
 rm -rf weighted_mtp/storage/datasets/*
 
-# conda 환경 삭제
-conda deactivate
-conda env remove -n weighted_mtp -y
+# 가상환경 삭제
+rm -rf weighted_mtp/.venv
 ```
 
 ---
@@ -419,10 +418,10 @@ rsync 재실행 시 자동으로 이어받기됨.
 
 | 항목 | VESSL | NIPA |
 |------|-------|------|
-| 실행 명령 | `uv run python` | `python` |
-| 분산 학습 | `uv run torchrun` | `torchrun` |
+| 실행 명령 | `uv run python` | `uv run python` |
+| 분산 학습 | `uv run torchrun` | `uv run torchrun` |
 | 스토리지 | `vessl storage` | 로컬 rsync |
-| 환경 | Docker 이미지 | conda |
+| 환경 | Docker 이미지 | uv |
 | 작업 제출 | `vessl run create` | SSH 직접 실행 |
 | 모니터링 | VESSL Web UI | tmux + tail |
 
@@ -450,10 +449,9 @@ rsync 재실행 시 자동으로 이어받기됨.
 
 ### 환경 설정
 
-- [ ] conda 환경 생성
-- [ ] PyTorch + CUDA 설치
-- [ ] requirements 설치
-- [ ] flash-attn 설치
+- [ ] uv 설치
+- [ ] uv sync (의존성 설치)
+- [ ] flash-attn 설치 (선택)
 
 ### 실행 검증
 
