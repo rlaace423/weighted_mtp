@@ -11,48 +11,16 @@ import mlflow
 import pandas as pd
 import torch
 from tqdm import tqdm
-from transformers import AutoTokenizer
 
 from weighted_mtp.core.logging import setup_logging
 from weighted_mtp.data import load_evaluation_dataset
+from weighted_mtp.models.tokenizer_utils import load_tokenizer, resolve_tokenizer_path
 from weighted_mtp.utils import (
     evaluate_pass_at_k,
     execute_code_with_tests,
     generate_with_mtp,
     load_checkpoint_for_evaluation,
 )
-
-
-def load_tokenizer(model_path: str) -> AutoTokenizer:
-    """Tokenizer 로드
-
-    Args:
-        model_path: 모델 경로 (예: storage/models/meta-llama-mtp)
-
-    Returns:
-        AutoTokenizer 인스턴스
-    """
-    # micro-mtp는 config.json이 RAG로 오인되므로 meta-llama-mtp tokenizer 사용
-    model_path_obj = Path(model_path)
-    if model_path_obj.name == "micro-mtp":
-        tokenizer_path = Path("storage/models/meta-llama-mtp/tokenizer")
-    else:
-        # Step 1 경험: tokenizer 서브디렉터리 사용
-        tokenizer_path = model_path_obj / "tokenizer"
-        if not tokenizer_path.exists():
-            # Fallback: 모델 경로 직접 사용
-            tokenizer_path = model_path_obj
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        str(tokenizer_path),
-        use_fast=False,  # SentencePiece는 slow tokenizer
-        legacy=False,
-    )
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    return tokenizer
 
 
 def run_evaluation(
@@ -115,7 +83,8 @@ def run_evaluation(
     logger.info(f"Validation loss: {checkpoint_metadata['val_metrics']['val_loss']:.4f}")
 
     # 3. Load tokenizer
-    tokenizer = load_tokenizer(checkpoint_metadata['config']['model']['path'])
+    tokenizer_path = resolve_tokenizer_path(checkpoint_metadata['config']['model']['path'])
+    tokenizer = load_tokenizer(tokenizer_path)
 
     # 4. Load evaluation dataset
     logger.info(f"Loading {dataset_name} dataset...")

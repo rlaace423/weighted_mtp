@@ -15,7 +15,6 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf, DictConfig
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
 
 from weighted_mtp.core.env import ensure_env_loaded
 from weighted_mtp.core.logging import setup_logging

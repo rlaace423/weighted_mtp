@@ -72,7 +72,7 @@ data_sampling:
 training:
   n_epochs: 3.0
   batch_size: 32  # Per GPU
-  gradient_accumulation_steps: 2  # Effective batch size = 192
+  gradient_accumulation_steps: 2  # Effective batch size = 256
   learning_rate: 1.5e-5  # 안정적 학습을 위해 낮춤 (2e-5에서 gradient 불안정)
   max_grad_norm: 1.0
   log_interval: 1

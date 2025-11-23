@@ -115,10 +115,10 @@ class AlpacaDataCollator:
             output = sample["output"]
             is_correct = sample.get("is_correct", True)  # 기본값 True (backward compatibility)
 
-            # 1. Instruction + Input 부분만 토큰화 (output 및 "### Response:" 제외)
+            # 1. Instruction + Input + "### Response:\n" 부분 토큰화 (output 제외)
             # 이를 통해 prompt 길이를 정확히 계산
             prompt_text = apply_alpaca_template(
-                instruction, input_text, output="", include_response_header=False
+                instruction, input_text, output="", include_response_header=True
             )
             prompt_tokens = self.tokenizer(
                 prompt_text,
