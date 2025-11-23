@@ -1,0 +1,15 @@
+{
+  "train/grad_clip_ratio": 1.0,
+  "system/gpu_memory_allocated_gb": 28.241463661193848,
+  "system/gpu_utilization_pct": 99.0,
+  "train/grad_norm": 0.166015625,
+  "train/grad_norm_pre_clip": 0.166015625,
+  "train/learning_rate": 8.281850577745996e-11,
+  "train/loss": 0.245849609375,
+  "train/epoch_loss": 0.22189988256263327,
+  "val/loss": 0.2984385388962766,
+  "perf/epoch_time_sec": 3567.56724524498,
+  "perf/samples_per_sec": 4.206788258862776,
+  "perf/tokens_per_sec": 3103.640447074368,
+  "system/gpu_memory_reserved_gb": 131.58984375
+}

@@ -1,8 +1,0 @@
-{
-  "run_id": "579e51fd51c34f8f92d2b5564841f131",
-  "experiment_id": "8",
-  "status": "RUNNING",
-  "start_time": 1763873959328,
-  "end_time": null,
-  "artifact_uri": "s3://wmtp/mlflow-artifacts/579e51fd51c34f8f92d2b5564841f131/artifacts"
-}

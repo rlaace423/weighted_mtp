@@ -1,0 +1,9 @@
+{
+  "mlflow.user": "wmtp_admin",
+  "mlflow.source.name": "/home/work/grad_school/wooshikwon/weighted_mtp/src/weighted_mtp/pipelines/run_baseline.py",
+  "mlflow.source.type": "LOCAL",
+  "baseline": "true",
+  "uniform-weight": "true",
+  "production": "true",
+  "mlflow.runName": "baseline-mtp"
+}

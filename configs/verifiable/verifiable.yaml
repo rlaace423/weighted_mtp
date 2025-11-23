@@ -42,40 +42,25 @@ dataset:
 
 # 데이터 샘플링
 data_sampling:
-  n_samples: 120000
+  n_samples: 130000
   auto_data_balancing: true
   correct_ratio: 0.5  # Correct/Incorrect 균형
-  curriculum_learning: true
   difficulty_bins:
-    easy: [6, 7]
-    medium: [8, 10]
-    hard: [11, 25]
+    all: [1, 25]  # 0 제외
   curriculum_schedule:
-    - epoch_range: [0.0, 0.3]
+    - epoch_range: [0.0, 3.0]
       difficulty_weights:
-        easy: 0.7
-        medium: 0.3
-        hard: 0.0
-    - epoch_range: [0.3, 0.7]
-      difficulty_weights:
-        easy: 0.3
-        medium: 0.5
-        hard: 0.2
-    - epoch_range: [0.7, 1.0]
-      difficulty_weights:
-        easy: 0.1
-        medium: 0.6
-        hard: 0.3
+        all: 1.0
   seed: 42
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
   n_epochs: 3.0
   batch_size: 32  # Per GPU
-  gradient_accumulation_steps: 2  # Effective batch size = 192
-  trunk_learning_rate: 1.5e-5  # Trunk peak LR
-  value_head_learning_rate: 5e-5  # Value head peak LR
-  max_grad_norm: 1.0
+  gradient_accumulation_steps: 1  # Effective batch size = 128
+  trunk_learning_rate: 5.0e-5  # Trunk peak LR
+  value_head_learning_rate: 5.0e-5  # Value head peak LR
+  max_grad_norm: 0.1
 
   # TD error weighting
   beta: 0.2  # TD error temperature
@@ -91,8 +76,8 @@ training:
   # Learning rate scheduler
   lr_scheduler:
     type: cosine
-    warmup_ratio: 0.05
-    min_lr_ratio: 0.0
+    warmup_ratio: 0.03
+    min_lr_ratio: 0.005
 
 # 체크포인트
 checkpoint:
@@ -100,7 +85,7 @@ checkpoint:
   save_checkpoint_every: 0.5
   save_best: true
   save_final: true
-  save_total_limit: 2
+  save_total_limit: 3
   s3_upload: false
 
 # 런타임 설정
