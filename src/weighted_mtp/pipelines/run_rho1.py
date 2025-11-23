@@ -715,6 +715,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             },
             val_metrics=final_val_metrics,
             checkpoint_path=final_path,
+            config={"model": {"path": config.models.policy.path}},
         )
 
         # 모든 GPU가 final checkpoint 저장 완료까지 대기
