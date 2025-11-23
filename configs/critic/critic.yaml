@@ -79,7 +79,7 @@ checkpoint:
   save_best: true
   save_final: true
   save_total_limit: 2
-  s3_upload: false
+  s3_upload: true
 
 # 런타임 설정
 runtime:
