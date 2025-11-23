@@ -48,6 +48,12 @@ training:
   k_percent: 0.6
   log_interval: 5
 
+  # Learning rate scheduler
+  lr_scheduler:
+    type: cosine
+    warmup_ratio: 0.05
+    min_lr_ratio: 0.0
+
 checkpoint:
   save_dir: storage/checkpoints/rho1/${experiment.name}
   save_checkpoint_every: 0.2

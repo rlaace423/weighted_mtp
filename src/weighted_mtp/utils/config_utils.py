@@ -115,12 +115,24 @@ def validate_config(config: DictConfig) -> None:
         "dataset.validation",
         "training.n_epochs",
         "training.batch_size",
-        "training.learning_rate",
     ]
 
     for field in required_fields:
         if not _has_nested_field(config, field):
             errors.append(f"필수 필드 누락: {field}")
+
+    # Learning rate 필드 검증 (learning_rate 또는 trunk/value_head LR)
+    if hasattr(config, "training"):
+        has_lr = hasattr(config.training, "learning_rate")
+        has_separate_lr = (
+            hasattr(config.training, "trunk_learning_rate") and
+            hasattr(config.training, "value_head_learning_rate")
+        )
+        if not has_lr and not has_separate_lr:
+            errors.append(
+                "필수 필드 누락: training.learning_rate 또는 "
+                "training.trunk_learning_rate + training.value_head_learning_rate"
+            )
 
     # 2. Stage 값 검증
     if hasattr(config, "experiment") and hasattr(config.experiment, "stage"):
@@ -132,10 +144,21 @@ def validate_config(config: DictConfig) -> None:
         stage = None
 
     # 3. Learning rate 범위 검증
-    if hasattr(config, "training") and hasattr(config.training, "learning_rate"):
-        lr = config.training.learning_rate
-        if lr <= 0 or lr > 1.0:
-            errors.append(f"learning_rate 범위 오류: {lr} (0 < lr <= 1.0)")
+    if hasattr(config, "training"):
+        # 단일 learning_rate
+        if hasattr(config.training, "learning_rate"):
+            lr = config.training.learning_rate
+            if lr <= 0 or lr > 1.0:
+                errors.append(f"learning_rate 범위 오류: {lr} (0 < lr <= 1.0)")
+        # 분리된 trunk/value_head LR
+        if hasattr(config.training, "trunk_learning_rate"):
+            lr = config.training.trunk_learning_rate
+            if lr <= 0 or lr > 1.0:
+                errors.append(f"trunk_learning_rate 범위 오류: {lr} (0 < lr <= 1.0)")
+        if hasattr(config.training, "value_head_learning_rate"):
+            lr = config.training.value_head_learning_rate
+            if lr <= 0 or lr > 1.0:
+                errors.append(f"value_head_learning_rate 범위 오류: {lr} (0 < lr <= 1.0)")
 
     # 4. Batch size 검증
     if hasattr(config, "training") and hasattr(config.training, "batch_size"):
@@ -163,10 +186,10 @@ def validate_config(config: DictConfig) -> None:
         if mgn <= 0:
             errors.append(f"max_grad_norm은 양수여야 함: {mgn}")
 
-    # 8. 모델 경로 존재 확인
+    # 8. 모델 경로 존재 확인 (.pt checkpoint는 학습 후 생성되므로 제외)
     if hasattr(config, "models") and hasattr(config.models, "policy"):
         model_path = Path(config.models.policy.path)
-        if not model_path.exists():
+        if not str(model_path).endswith(".pt") and not model_path.exists():
             errors.append(f"모델 경로가 존재하지 않음: {model_path}")
 
     # 9. 데이터셋 경로 존재 확인

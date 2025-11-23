@@ -35,6 +35,12 @@ from weighted_mtp.utils.s3_utils import (
     shutdown_s3_executor,
     upload_to_s3_async,
 )
+from weighted_mtp.utils.scheduler_utils import (
+    create_param_groups,
+    create_scheduler,
+    get_scheduler_state,
+    load_scheduler_state,
+)
 
 __all__ = [
     # Checkpoint utils
@@ -63,4 +69,9 @@ __all__ = [
     "compute_gradient_clip_stats",
     "compute_value_function_stats",
     "compute_weight_statistics",
+    # Scheduler utils
+    "create_param_groups",
+    "create_scheduler",
+    "get_scheduler_state",
+    "load_scheduler_state",
 ]

@@ -38,7 +38,8 @@ training:
   n_epochs: 0.2
   batch_size: 2
   gradient_accumulation_steps: 2
-  learning_rate: 1.0e-5
+  trunk_learning_rate: 3e-6  # Trunk peak LR
+  value_head_learning_rate: 1.0e-5  # Value head peak LR
   max_grad_norm: 1.0
   beta: 0.2
   value_coef: 0.5
@@ -47,6 +48,12 @@ training:
   gamma: 1.0
   lam: 0.95  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
   log_interval: 5
+
+  # Learning rate scheduler
+  lr_scheduler:
+    type: cosine
+    warmup_ratio: 0.05
+    min_lr_ratio: 0.0
 
 checkpoint:
   save_dir: storage/checkpoints/verifiable/${experiment.name}

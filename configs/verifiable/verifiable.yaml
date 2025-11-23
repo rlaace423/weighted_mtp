@@ -73,7 +73,8 @@ training:
   n_epochs: 3.0
   batch_size: 32  # Per GPU
   gradient_accumulation_steps: 2  # Effective batch size = 192
-  learning_rate: 1.5e-5  # Square root scaling (√3 from batch 64→192)
+  trunk_learning_rate: 2e-5  # Trunk peak LR
+  value_head_learning_rate: 5e-5  # Value head peak LR
   max_grad_norm: 1.0
 
   # TD error weighting
@@ -86,6 +87,12 @@ training:
   lam: 0.95  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
 
   log_interval: 1
+
+  # Learning rate scheduler
+  lr_scheduler:
+    type: cosine
+    warmup_ratio: 0.05
+    min_lr_ratio: 0.0
 
 # 체크포인트
 checkpoint:

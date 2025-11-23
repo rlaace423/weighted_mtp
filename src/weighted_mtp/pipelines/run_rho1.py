@@ -30,6 +30,7 @@ from weighted_mtp.utils import (
     cleanup_s3_checkpoints,
     compute_gradient_clip_stats,
     compute_weight_statistics,
+    create_scheduler,
     get_model_size,
     get_system_info,
     s3_upload_executor,
@@ -383,6 +384,16 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Validation & Checkpoint every: {save_checkpoint_every} epochs")
     logger.info(f"Top-k selection ratio: {config.training.k_percent}")
 
+    # Learning rate scheduler 생성
+    lr_scheduler_config = config.training.get("lr_scheduler", {})
+    scheduler = create_scheduler(
+        optimizer=optimizer,
+        total_steps=total_optimization_steps,
+        scheduler_type=lr_scheduler_config.get("type", "constant"),
+        warmup_ratio=lr_scheduler_config.get("warmup_ratio", 0.05),
+        min_lr_ratio=lr_scheduler_config.get("min_lr_ratio", 0.0),
+    )
+
     current_epoch = 0.0
     batch_count = 0
     next_checkpoint_epoch = save_checkpoint_every
@@ -501,6 +512,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     }
 
                 optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
                 optimizer.zero_grad()
 
                 global_step += 1
@@ -582,6 +595,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 )
 
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             optimizer.zero_grad()
             global_step += 1
             accumulation_counter = 0

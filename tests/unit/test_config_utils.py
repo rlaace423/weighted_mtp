@@ -328,7 +328,7 @@ class TestValidateConfigPathChecks:
     """경로 존재 확인 테스트 (통합 테스트)"""
 
     def test_nonexistent_model_path(self):
-        """존재하지 않는 모델 경로"""
+        """존재하지 않는 모델 경로 (디렉토리)"""
         config = OmegaConf.create(
             {
                 "experiment": {"name": "test", "stage": "baseline"},
@@ -348,6 +348,38 @@ class TestValidateConfigPathChecks:
 
         with pytest.raises(ConfigValidationError, match="모델 경로가 존재하지 않음"):
             validate_config(config)
+
+    def test_checkpoint_path_skipped(self):
+        """Checkpoint 경로는 검증 건너뜀"""
+        config = OmegaConf.create(
+            {
+                "experiment": {"name": "test", "stage": "verifiable"},
+                "models": {"policy": {"path": "/nonexistent/checkpoint.pt"}},
+                "dataset": {
+                    "name": "codecontests",
+                    "train": "storage/datasets/codecontests/processed/train.jsonl",
+                    "validation": "storage/datasets/codecontests/processed/valid.jsonl",
+                },
+                "training": {
+                    "n_epochs": 1,
+                    "batch_size": 4,
+                    "trunk_learning_rate": 1e-5,
+                    "value_head_learning_rate": 3e-5,
+                    "beta": 0.2,
+                    "value_coef": 0.5,
+                    "weight_clip_min": 0.1,
+                    "weight_clip_max": 3.0,
+                },
+                "data_sampling": {
+                    "n_samples": 100,
+                    "auto_data_balancing": True,
+                    "correct_ratio": 0.5,
+                },
+            }
+        )
+
+        # .pt 파일은 검증 건너뛰므로 "모델 경로" 에러 없음
+        validate_config(config)
 
     def test_nonexistent_dataset_path(self):
         """존재하지 않는 데이터셋 경로"""

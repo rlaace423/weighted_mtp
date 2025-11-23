@@ -2,7 +2,7 @@
 
 M3 Mac MPS 환경에서 micro-mtp 모델로 verifiable 파이프라인 검증
 - TD error-based token weighting
-- Critic checkpoint 로드
+- Critic checkpoint 로드 (models.policy.path로 직접 지정)
 - 20 samples, 0.02 epochs
 """
 
@@ -23,10 +23,10 @@ def test_verifiable_pipeline_micro_mtp():
     if not torch.backends.mps.is_available():
         pytest.skip("MPS not available on this machine")
 
-    # Critic checkpoint 존재 확인
-    critic_checkpoint_path = Path("storage/checkpoints/critic/critic-pretrain-local/checkpoint_epoch_0.10.pt")
+    # Critic checkpoint 존재 확인 (models.policy.path로 사용)
+    critic_checkpoint_path = Path("storage/checkpoints/critic/critic-pretrain-local/checkpoint_final.pt")
     if not critic_checkpoint_path.exists():
-        pytest.skip(f"Critic checkpoint not found: {critic_checkpoint_path}. Run critic test first.")
+        pytest.skip(f"Critic checkpoint not found: {critic_checkpoint_path}. Run critic training first.")
 
     # Test config 경로
     config_path = "configs/verifiable/verifiable_local.yaml"
@@ -49,7 +49,6 @@ def test_verifiable_pipeline_micro_mtp():
         },
         "experiment": {
             "name": "test-verifiable-integration",
-            "critic_checkpoint": str(critic_checkpoint_path),
         },
         "mlflow": {
             "tracking_uri": "",
@@ -122,7 +121,6 @@ def test_verifiable_config_validation():
 
     # Verifiable 특화 검증
     assert config.experiment.stage == "verifiable", "Should be verifiable stage"
-    assert hasattr(config.experiment, "critic_checkpoint"), "Should have critic_checkpoint"
     assert config.data_sampling.auto_data_balancing == True, "Verifiable uses balanced sampling"
     assert config.data_sampling.correct_ratio == 0.5, "Verifiable uses 50:50 ratio"
     assert config.runtime.device == "mps", "Should use MPS for local test"
@@ -133,9 +131,14 @@ def test_verifiable_config_validation():
     assert hasattr(config.training, "weight_clip_min"), "Should have weight_clip_min"
     assert hasattr(config.training, "weight_clip_max"), "Should have weight_clip_max"
 
-    # 모델 경로 검증
+    # Learning rate 검증 (trunk/value_head 분리)
+    assert hasattr(config.training, "trunk_learning_rate"), "Should have trunk_learning_rate"
+    assert hasattr(config.training, "value_head_learning_rate"), "Should have value_head_learning_rate"
+
+    # 모델 경로 검증 (checkpoint 파일)
     model_path = Path(config.models.policy.path)
-    assert model_path.exists(), f"Model path should exist: {model_path}"
+    # checkpoint는 critic 학습 후 생성되므로 경로 형식만 확인
+    assert str(model_path).endswith(".pt"), f"Model path should be .pt checkpoint: {model_path}"
 
     tokenizer_path = Path(config.models.policy.tokenizer_path)
     assert tokenizer_path.exists(), f"Tokenizer path should exist: {tokenizer_path}"

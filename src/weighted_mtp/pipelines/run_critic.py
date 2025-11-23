@@ -29,6 +29,8 @@ from weighted_mtp.utils import (
     compute_gradient_clip_stats,
     compute_gradient_norm,
     compute_value_function_stats,
+    create_param_groups,
+    create_scheduler,
     get_model_size,
     get_system_info,
     s3_upload_executor,
@@ -374,15 +376,21 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             }
         )
 
-    # 6. Optimizer (Value head only) - Meta MTP 논문 설정
-    # FSDP wrapping 후 requires_grad=True인 파라미터만 필터링
-    # (transformer는 frozen 상태이므로 value_head만 선택됨)
-    trainable_params = [p for p in adapter.parameters() if p.requires_grad]
-    logger.info(f"Trainable params: {sum(p.numel() for p in trainable_params):,}")
+    # 6. Optimizer (param groups: trunk/value_head 분리)
+    # learning_rate fallback (하위 호환성)
+    default_lr = config.training.get("learning_rate", 1e-5)
+    trunk_lr = config.training.get("trunk_learning_rate", default_lr)
+    value_head_lr = config.training.get("value_head_learning_rate", default_lr)
+
+    # FSDP wrapping 후에도 원본 모델 구조에 접근하여 param groups 생성
+    param_groups = create_param_groups(
+        adapter=unwrap_model(adapter),
+        trunk_lr=trunk_lr,
+        value_head_lr=value_head_lr,
+    )
 
     optimizer = torch.optim.AdamW(
-        trainable_params,
-        lr=config.training.learning_rate,
+        param_groups,
         betas=(0.9, 0.95),
         weight_decay=0.01,
     )
@@ -413,6 +421,16 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
     logger.info(f"Total optimization steps: {total_optimization_steps}")
     logger.info(f"Validation & Checkpoint every: {save_checkpoint_every} epochs")
+
+    # Learning rate scheduler 생성
+    lr_scheduler_config = config.training.get("lr_scheduler", {})
+    scheduler = create_scheduler(
+        optimizer=optimizer,
+        total_steps=total_optimization_steps,
+        scheduler_type=lr_scheduler_config.get("type", "constant"),
+        warmup_ratio=lr_scheduler_config.get("warmup_ratio", 0.05),
+        min_lr_ratio=lr_scheduler_config.get("min_lr_ratio", 0.0),
+    )
 
     current_epoch = 0.0
     batch_count = 0
@@ -526,6 +544,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     }
 
                 optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
                 optimizer.zero_grad()
 
                 global_step += 1
@@ -613,6 +633,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 )
 
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             optimizer.zero_grad()
             global_step += 1
             accumulation_counter = 0

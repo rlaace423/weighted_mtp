@@ -50,15 +50,22 @@ data_sampling:
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
-  n_epochs: 3.0  # 명확한 1 epoch (Anthropic fine-tuning 표준)
+  n_epochs: 3.0
   batch_size: 48  # Per GPU
   gradient_accumulation_steps: 1  # Effective batch size = 192
-  learning_rate: 1.5e-5  # Critic은 높은 LR 유지
+  trunk_learning_rate: 1e-5  # Trunk (unfrozen layers) peak LR
+  value_head_learning_rate: 3e-5  # Value head peak LR
   max_grad_norm: 1.0
   gamma: 1.0
   lam: 1.0  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
   num_unfrozen_layers: 6  # 마지막 N개 TransformerBlock unfreeze (0=value head만)
   log_interval: 1
+
+  # Learning rate scheduler
+  lr_scheduler:
+    type: cosine  # "cosine", "linear", "constant"
+    warmup_ratio: 0.05  # Total steps의 5%
+    min_lr_ratio: 0.0  # Peak LR의 0% (완전 decay)
 
 # 체크포인트
 checkpoint:

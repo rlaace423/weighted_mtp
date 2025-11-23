@@ -89,6 +89,12 @@ training:
 
   log_interval: 1
 
+  # Learning rate scheduler
+  lr_scheduler:
+    type: cosine
+    warmup_ratio: 0.05
+    min_lr_ratio: 0.0
+
 # 체크포인트
 checkpoint:
   save_dir: storage/checkpoints/rho1/${experiment.name}
