@@ -22,7 +22,7 @@ models:
   policy:
     name: meta-llama-mtp
     path: storage/models/meta-llama-mtp
-    tokenizer_path: storage/checkpoints/critic/{{ experiment.name }}/checkpoint_final.pt
+    tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     params:
       dim: 4096
       n_layers: 32
