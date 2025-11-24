@@ -1,12 +1,49 @@
 """Value Head 구현"""
 
-from pathlib import Path
+from typing import Union
 
 import torch
 from torch import nn
 
 
-class ValueHead(nn.Module):
+class LinearValueHead(nn.Module):
+    """단일 Linear layer value head (표준 PPO style)
+
+    구조: hidden_size → 1
+
+    Args:
+        hidden_size: Transformer hidden dimension
+        bias: Linear layer bias (기본값 False, RLHF 표준)
+    """
+
+    def __init__(self, hidden_size: int, bias: bool = False):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.head_type = "linear"
+
+        self.linear = nn.Linear(hidden_size, 1, bias=bias)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """RLHF 표준 초기화: zero init"""
+        nn.init.zeros_(self.linear.weight)
+        if self.linear.bias is not None:
+            nn.init.zeros_(self.linear.bias)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Forward pass
+
+        Args:
+            hidden_states: [batch, seq, hidden_size]
+
+        Returns:
+            value: [batch, seq, 1]
+        """
+        return self.linear(hidden_states)
+
+
+class MLPValueHead(nn.Module):
     """2-layer MLP value head (DIAL style)
 
     DIAL 논문 기반: bottleneck MLP로 표현력 증가 + 과적합 방지
@@ -20,6 +57,7 @@ class ValueHead(nn.Module):
     def __init__(self, hidden_size: int, bias: bool = False):
         super().__init__()
         self.hidden_size = hidden_size
+        self.head_type = "mlp"
 
         # DIAL 스타일 2-layer MLP (4096 → 512 → 256 → 1)
         hidden1 = hidden_size // 8   # 512 for 4096 dim
@@ -33,16 +71,10 @@ class ValueHead(nn.Module):
             nn.Linear(hidden2, 1, bias=bias),
         )
 
-        # RLHF 표준 초기화: 출력 layer zero init으로 초기 예측을 0에 가깝게
         self._init_weights()
 
     def _init_weights(self):
-        """RLHF 표준 초기화: 마지막 layer zero init
-
-        출력 layer를 0으로 초기화하여 초기 value 예측이 0에 가깝도록 함.
-        이는 학습 초기 손실을 줄이고 안정적인 학습 시작을 보장.
-        """
-        # 마지막 Linear layer (출력층) zero init
+        """RLHF 표준 초기화: 마지막 layer zero init"""
         nn.init.zeros_(self.mlp[-1].weight)
         if self.mlp[-1].bias is not None:
             nn.init.zeros_(self.mlp[-1].bias)
@@ -51,36 +83,35 @@ class ValueHead(nn.Module):
         """Forward pass
 
         Args:
-            hidden_states: [batch, seq, hidden_size] (Transformer norm 적용 후)
+            hidden_states: [batch, seq, hidden_size]
 
         Returns:
             value: [batch, seq, 1]
         """
         return self.mlp(hidden_states)
 
-    def save_checkpoint(self, path: Path):
-        """Value head checkpoint 저장
 
-        Args:
-            path: 저장 경로 (예: "value_head.pt")
-        """
-        torch.save({
-            "state_dict": self.state_dict(),
-            "hidden_size": self.hidden_size,
-        }, path)
+# Type alias
+ValueHeadType = Union[LinearValueHead, MLPValueHead]
 
-    @classmethod
-    def load_checkpoint(cls, path: Path, device: torch.device) -> "ValueHead":
-        """Value head checkpoint 로드
 
-        Args:
-            path: checkpoint 경로
-            device: 로딩할 device
+def create_value_head(hidden_size: int, head_type: str = "mlp") -> ValueHeadType:
+    """Value head factory function
 
-        Returns:
-            ValueHead 인스턴스
-        """
-        ckpt = torch.load(path, map_location=device)
-        value_head = cls(hidden_size=ckpt["hidden_size"])
-        value_head.load_state_dict(ckpt["state_dict"])
-        return value_head.to(device)
+    Args:
+        hidden_size: Transformer hidden dimension
+        head_type: "linear" 또는 "mlp"
+
+    Returns:
+        ValueHead 인스턴스
+    """
+    if head_type == "linear":
+        return LinearValueHead(hidden_size)
+    elif head_type == "mlp":
+        return MLPValueHead(hidden_size)
+    else:
+        raise ValueError(f"Unknown value head type: {head_type}. Use 'linear' or 'mlp'.")
+
+
+# 하위 호환성을 위한 alias
+ValueHead = MLPValueHead

@@ -144,19 +144,25 @@ def validate_verifiable(
 
                 logits_k = logits[:, :valid_len, k - 1, :]
                 labels_k = labels[:, k : k + valid_len]
-                weights_k = weights[:, k - 1 : k - 1 + valid_len]
+                # Weight는 예측 대상 토큰 t+k의 TD error: δ_{t+k} = V(t+k) - V(t+k-1)
+                weights_k = weights[:, k : k + valid_len]
                 mask_k = attention_mask[:, k : k + valid_len]
 
                 ce_loss_k = F.cross_entropy(
                     logits_k.reshape(-1, vocab_size),
                     labels_k.reshape(-1),
                     reduction="none",
+                    ignore_index=-100,
                 )
 
-                # 모델 dtype 일치
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.to(model_dtype).reshape(-1)
+                # labels=-100인 토큰은 loss=0, mask에서도 제외
+                valid_label_mask_k = (labels_k != -100).float()
+                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
 
-                mask_sum_k = mask_k.to(model_dtype).sum()
+                # 모델 dtype 일치
+                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
+
+                mask_sum_k = combined_mask_k.sum()
                 if mask_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
 
@@ -173,7 +179,8 @@ def validate_verifiable(
 
             # Mask padded tokens AND instruction tokens (labels != -100)
             valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
-            loss_mask = valid_label_mask
+            attn_mask_expanded = attention_mask.unsqueeze(-1).to(model_dtype)
+            loss_mask = valid_label_mask * attn_mask_expanded
 
             # Value loss 계산 (MSE)
             loss_per_token = F.mse_loss(value_logits, td_targets, reduction="none")
@@ -538,19 +545,25 @@ def run_verifiable_training(
 
                 logits_k = logits[:, :valid_len, k - 1, :]
                 labels_k = labels[:, k : k + valid_len]
-                weights_k = weights[:, k - 1 : k - 1 + valid_len]
+                # Weight는 예측 대상 토큰 t+k의 TD error: δ_{t+k} = V(t+k) - V(t+k-1)
+                weights_k = weights[:, k : k + valid_len]
                 mask_k = attention_mask[:, k : k + valid_len]
 
                 ce_loss_k = F.cross_entropy(
                     logits_k.reshape(-1, vocab_size),
                     labels_k.reshape(-1),
                     reduction="none",
+                    ignore_index=-100,
                 )
 
-                # 모델 dtype 일치
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.to(model_dtype).reshape(-1)
+                # labels=-100인 토큰은 loss=0, mask에서도 제외
+                valid_label_mask_k = (labels_k != -100).float()
+                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
 
-                mask_sum_k = mask_k.to(model_dtype).sum()
+                # 모델 dtype 일치
+                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
+
+                mask_sum_k = combined_mask_k.sum()
                 if mask_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
 
@@ -567,7 +580,8 @@ def run_verifiable_training(
 
             # Mask padded tokens AND instruction tokens (labels != -100)
             valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
-            loss_mask = valid_label_mask
+            attn_mask_expanded = attention_mask.unsqueeze(-1).to(model_dtype)
+            loss_mask = valid_label_mask * attn_mask_expanded
 
             # Value loss 계산 (MSE)
             loss_per_token = F.mse_loss(value_logits, td_targets, reduction="none")

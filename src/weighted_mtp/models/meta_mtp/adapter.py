@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from .transformer import Transformer, ModelArgs
-from .value_head import ValueHead
+from .value_head import ValueHeadType, create_value_head
 
 
 class MetaLlamaMTPAdapter(nn.Module):
@@ -22,14 +22,14 @@ class MetaLlamaMTPAdapter(nn.Module):
     Args:
         transformer: Transformer 인스턴스
         model_args: ModelArgs (params.json)
-        value_head: ValueHead (선택적, Stage 1에서 추가)
+        value_head: ValueHead 인스턴스 (선택적, Stage 1에서 추가)
     """
 
     def __init__(
         self,
         transformer: Transformer,
         model_args: ModelArgs,
-        value_head: Optional[ValueHead] = None,
+        value_head: Optional[ValueHeadType] = None,
     ):
         super().__init__()
         self.transformer = transformer
@@ -43,6 +43,7 @@ class MetaLlamaMTPAdapter(nn.Module):
         device: str = "auto",
         dtype: Optional[str] = None,
         initialize_value_head: bool = True,
+        value_head_type: str = "mlp",
     ) -> "MetaLlamaMTPAdapter":
         """Pretrained 모델에서 Adapter 로드
 
@@ -55,6 +56,7 @@ class MetaLlamaMTPAdapter(nn.Module):
             initialize_value_head: Value head 초기화 여부 (safetensors 로드 시에만 적용)
                 - True: Critic/Verifiable Stage용 (기본값)
                 - False: Rho-1 Stage용 (Value head 불필요)
+            value_head_type: Value head 타입 ("linear" 또는 "mlp")
 
         Returns:
             MetaLlamaMTPAdapter 인스턴스
@@ -76,6 +78,7 @@ class MetaLlamaMTPAdapter(nn.Module):
                 checkpoint_path=model_path,
                 device=device,
                 dtype=dtype,
+                value_head_type=value_head_type,
             )
 
         # Dtype 변환 (문자열 -> torch.dtype)
@@ -124,7 +127,10 @@ class MetaLlamaMTPAdapter(nn.Module):
         # 3. Value Head 초기화 (선택적)
         value_head = None
         if initialize_value_head:
-            value_head = ValueHead(hidden_size=model_args.dim)
+            value_head = create_value_head(
+                hidden_size=model_args.dim,
+                head_type=value_head_type,
+            )
 
             # Device 이동 (Transformer와 동일 device)
             device_obj = transformer.tok_embeddings.weight.device
@@ -145,7 +151,7 @@ class MetaLlamaMTPAdapter(nn.Module):
 
         return adapter
 
-    def attach_value_head(self, value_head: ValueHead):
+    def attach_value_head(self, value_head: ValueHeadType):
         """Value head 추가 (Stage 1 시작 전)
 
         Args:
@@ -240,6 +246,7 @@ class MetaLlamaMTPAdapter(nn.Module):
         checkpoint_path,
         device: str = "auto",
         dtype: Optional[str] = None,
+        value_head_type: str = "mlp",
     ) -> "MetaLlamaMTPAdapter":
         """Checkpoint 파일에서 전체 adapter 로드
 
@@ -306,7 +313,10 @@ class MetaLlamaMTPAdapter(nn.Module):
         # 5. ValueHead 생성 (checkpoint에 있는 경우)
         value_head = None
         if any(k.startswith("value_head.") for k in state_dict.keys()):
-            value_head = ValueHead(hidden_size=dim)
+            value_head = create_value_head(
+                hidden_size=dim,
+                head_type=value_head_type,
+            )
 
         # 6. Adapter 생성 및 state_dict 로드
         adapter = cls(

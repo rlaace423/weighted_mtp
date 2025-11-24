@@ -60,10 +60,14 @@ def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
     Returns:
         MetaLlamaMTPAdapter 인스턴스
     """
+    # value_head_type 설정 (기본값: mlp)
+    value_head_type = getattr(config.training, "value_head_type", "mlp")
+
     adapter = MetaLlamaMTPAdapter.from_pretrained(
         model_path=config.models.policy.path,
         device=device,
         dtype=config.models.policy.dtype,
+        value_head_type=value_head_type,
     )
     return adapter
 

@@ -147,11 +147,12 @@ def compute_td_errors(
     # TD errors 초기화 (전체를 Intermediate로 계산)
     td_errors = torch.zeros_like(values)
 
-    # Intermediate TD errors (k < T): γV(s_k) - V(s_{k-1})
-    # values[:, 1:]: V(s_k) - 다음 상태 value
-    # values[:, :-1]: V(s_{k-1}) - 현재 상태 value
+    # Intermediate TD errors: δ_t = γV(s_t) - V(s_{t-1})
+    # td_errors[t]는 토큰 t의 가중치
+    # - values[:, 1:]: V(s_t) for t=1,2,...,T-1
+    # - values[:, :-1]: V(s_{t-1}) for t=1,2,...,T-1
     if seq_len > 1:
-        td_errors[:, :-1] = gamma * values[:, 1:] - values[:, :-1]
+        td_errors[:, 1:] = gamma * values[:, 1:] - values[:, :-1]
 
     # Terminal TD error (k = T): R - V(s_{T-1})
     # Advanced indexing으로 vectorized 연산

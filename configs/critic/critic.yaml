@@ -14,8 +14,8 @@ experiment:
   stage: critic
   tags:
     - critic
-    - value-head
-    - production
+    - linear-value-head
+    - unfrozen-trunk:2
 
 # 모델 설정
 models:
@@ -59,12 +59,13 @@ training:
   n_epochs: 1.0
   batch_size: 64  # Per GPU
   gradient_accumulation_steps: 1  # Effective batch size = 128
-  trunk_learning_rate: 1e-4  # Trunk LR (미사용, num_unfrozen_layers=0)
-  value_head_learning_rate: 3e-5  # Value head peak LR
+  trunk_learning_rate: 5e-6  # Trunk LR (미사용, num_unfrozen_layers=0)
+  value_head_learning_rate: 3e-4  # Value head peak LR
   max_grad_norm: 1.0
   gamma: 1.0
   lam: 1.0  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
-  num_unfrozen_layers: 0  # Value head만 학습 (backbone 동결)
+  num_unfrozen_layers: 1  # Value head만 학습 (backbone 동결)
+  value_head_type: linear  # "linear" (4096→1) 또는 "mlp" (4096→512→256→1)
   log_interval: 1
 
   # Learning rate scheduler
