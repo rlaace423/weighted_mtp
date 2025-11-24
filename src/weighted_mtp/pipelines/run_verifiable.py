@@ -397,6 +397,18 @@ def run_verifiable_training(
 
     logger.info(f"Train batches: {len(train_loader)}")
     logger.info(f"Validation batches: {len(val_loader)}")
+
+    # Dataset statistics 로깅
+    if is_main_process() and use_mlflow:
+        mlflow.log_params(
+            {
+                "dataset_train_samples": len(train_loader.dataset),
+                "dataset_val_samples": len(val_loader.dataset),
+                "dataset_train_batches": len(train_loader),
+                "dataset_val_batches": len(val_loader),
+            }
+        )
+
     logger.info(f"Total epochs: {n_epochs}")
     logger.info(f"Total batches to run: {batches_to_run}")
     logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
@@ -452,6 +464,9 @@ def run_verifiable_training(
         batches_this_period = target_batches - batch_count
 
         logger.info(f"--- Training to epoch {target_epoch:.2f} ---")
+
+        # Throughput 추적 시작
+        throughput_tracker.start_epoch()
 
         # Curriculum learning: 현재 epoch에 맞는 difficulty_weights 계산
         if use_curriculum and curriculum_schedule:
@@ -654,7 +669,7 @@ def run_verifiable_training(
                 )
 
                 # Weight distribution statistics (response 토큰만)
-                weight_dist_stats = compute_weight_statistics(weights, response_mask)
+                weight_dist_stats = compute_weight_statistics(weights, attention_mask, labels)
 
                 # Metric aggregation (분산 환경)
                 # grad_clip_stats는 clip_grad_norm_이 이미 전역 값을 반환하므로 all_reduce 불필요
@@ -668,6 +683,9 @@ def run_verifiable_training(
                     "value_loss": value_loss.item(),
                     "total_loss": total_loss.item(),
                     "td_mean": td_stats["td_mean"],
+                    "td_std": td_stats["td_std"],
+                    "td_min": td_stats["td_min"],
+                    "td_max": td_stats["td_max"],
                     "weight_mean": weight_stats["weight_mean"],
                     "value_mse": value_func_stats["value_mse"],
                     "value_mean": value_func_stats["value_mean"],
@@ -698,7 +716,10 @@ def run_verifiable_training(
                                 "train/grad_norm_pre_clip": avg_grad_norm_pre,
                                 "train/grad_clip_ratio": avg_grad_clip_ratio,
                                 "train/learning_rate": optimizer.param_groups[0]["lr"],
-                                "train/td_mean": avg_td_mean,
+                                "td/mean": avg_td_mean,
+                                "td/std": reduced["td_std"],
+                                "td/min": reduced["td_min"],
+                                "td/max": reduced["td_max"],
                                 "train/weight_mean": avg_weight_mean,
                                 "value/mse": avg_value_mse,
                                 "value/mean_prediction": avg_value_mean,
@@ -787,18 +808,27 @@ def run_verifiable_training(
         avg_val_value = reduced_val["val_value"]
 
         # Epoch-level 로깅
-        if is_main_process() and use_mlflow:
-            mlflow.log_metrics(
-                {
-                    "train/epoch_total_loss": train_total_avg,
-                    "train/epoch_weighted_ce_loss": train_weighted_ce_avg,
-                    "train/epoch_value_loss": train_value_avg,
-                    "val/total_loss": avg_val_total,
-                    "val/weighted_ce_loss": avg_val_weighted_ce,
-                    "val/value_loss": avg_val_value,
-                },
-                step=global_step,
-            )
+        if is_main_process():
+            # Throughput 및 GPU 메트릭 수집
+            throughput_metrics = throughput_tracker.get_epoch_metrics()
+            gpu_metrics_epoch = gpu_monitor.get_metrics()
+
+            if use_mlflow:
+                mlflow.log_metrics(
+                    {
+                        "train/epoch_total_loss": train_total_avg,
+                        "train/epoch_weighted_ce_loss": train_weighted_ce_avg,
+                        "train/epoch_value_loss": train_value_avg,
+                        "val/total_loss": avg_val_total,
+                        "val/weighted_ce_loss": avg_val_weighted_ce,
+                        "val/value_loss": avg_val_value,
+                        "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
+                        "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
+                        "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
+                        "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
+                    },
+                    step=global_step,
+                )
 
         logger.info(
             f"Validation - Total Loss: {avg_val_total:.4f}, "

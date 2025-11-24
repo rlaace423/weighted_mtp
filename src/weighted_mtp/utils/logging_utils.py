@@ -14,12 +14,14 @@ logger = logging.getLogger(__name__)
 def compute_weight_statistics(
     weights: torch.Tensor,
     attention_mask: torch.Tensor = None,
+    labels: torch.Tensor = None,
 ) -> dict[str, float]:
     """Weight 분포 통계 계산
 
     Args:
         weights: Token weights [batch, seq, n_heads] or [batch, seq]
         attention_mask: 유효 토큰 마스크 [batch, seq] (None이면 전체 사용)
+        labels: 학습 레이블 [batch, seq] (-100은 제외, None이면 전체 사용)
 
     Returns:
         통계 딕셔너리:
@@ -29,18 +31,36 @@ def compute_weight_statistics(
             - weight_max: 최대값
             - weight_entropy: 엔트로피
     """
+    batch, seq = weights.shape[:2]
+    n_heads = weights.shape[2] if weights.dim() == 3 else 1
+
+    # 기본 마스크: 전체 True
+    mask = torch.ones(batch, seq, dtype=torch.bool, device=weights.device)
+
+    # attention_mask 적용 (padding 제외)
     if attention_mask is not None:
-        # 유효한 토큰만 선택 (padding 제외)
-        # weights가 [batch, seq, n_heads]인 경우 처리
-        if weights.dim() == 3:
-            batch, seq, n_heads = weights.shape
-            mask = attention_mask.view(batch, seq, 1).expand(-1, -1, n_heads)
-            weights_flat = weights[mask.bool()]
-        else:
-            mask = attention_mask.view(-1).bool()
-            weights_flat = weights.view(-1)[mask]
+        mask = mask & attention_mask.bool()
+
+    # labels 적용 (instruction 토큰 제외, labels=-100)
+    if labels is not None:
+        mask = mask & (labels != -100)
+
+    # weights가 [batch, seq, n_heads]인 경우 처리
+    if weights.dim() == 3:
+        mask = mask.view(batch, seq, 1).expand(-1, -1, n_heads)
+        weights_flat = weights[mask]
     else:
-        weights_flat = weights.view(-1)
+        weights_flat = weights.view(-1)[mask.view(-1)]
+
+    # 빈 텐서 처리
+    if weights_flat.numel() == 0:
+        return {
+            "weight_mean": 0.0,
+            "weight_std": 0.0,
+            "weight_min": 0.0,
+            "weight_max": 0.0,
+            "weight_entropy": 0.0,
+        }
 
     # Entropy 계산 (log base e)
     # 0에 가까운 값 방지를 위해 epsilon 추가

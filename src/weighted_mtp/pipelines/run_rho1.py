@@ -359,6 +359,17 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Train batches: {len(train_loader)}")
     logger.info(f"Validation batches: {len(val_loader)}")
 
+    # Dataset statistics 로깅
+    if is_main_process() and use_mlflow:
+        mlflow.log_params(
+            {
+                "dataset_train_samples": len(train_loader.dataset),
+                "dataset_val_samples": len(val_loader.dataset),
+                "dataset_train_batches": len(train_loader),
+                "dataset_val_batches": len(val_loader),
+            }
+        )
+
     # 6. Optimizer (MTP heads만 - Value head 없음) - Meta MTP 논문 설정
     optimizer = torch.optim.AdamW(
         adapter.parameters(),
@@ -422,6 +433,9 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
         batches_this_period = target_batches - batch_count
 
         logger.info(f"--- Training to epoch {target_epoch:.2f} ---")
+
+        # Throughput 추적 시작
+        throughput_tracker.start_epoch()
 
         # DataLoader에서 필요한 만큼만 사용
         epoch_train_loader = iter(train_loader)
@@ -505,6 +519,11 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             batch_count += 1
             period_batches += 1
 
+            # Throughput 추적
+            batch_size_actual = input_ids.size(0)
+            n_tokens = (attention_mask.sum()).item()
+            throughput_tracker.update(batch_size_actual, int(n_tokens))
+
             # Period metrics 누적 (batch 단위)
             period_metrics_sum["weighted_ce_loss"] += weighted_ce_loss.item()
             period_metrics_sum["excess_loss"] += selection_stats.get('head_1_excess_mean', 0.0)
@@ -540,8 +559,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 # GPU metrics
                 gpu_metrics = gpu_monitor.get_metrics()
 
-                # Weight distribution statistics (padding 제외)
-                weight_dist_stats = compute_weight_statistics(weights, attention_mask)
+                # Weight distribution statistics (response 토큰만)
+                weight_dist_stats = compute_weight_statistics(weights, attention_mask, labels)
 
                 # Metric aggregation (분산 환경)
                 # grad_clip_stats는 clip_grad_norm_이 이미 전역 값을 반환하므로 all_reduce 불필요
@@ -557,6 +576,10 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     "head_1_ratio": selection_stats.get('head_1_ratio', 0.0),
                     "head_2_ratio": selection_stats.get('head_2_ratio', 0.0),
                     "head_3_ratio": selection_stats.get('head_3_ratio', 0.0),
+                    "head_1_excess_mean": selection_stats.get('head_1_excess_mean', 0.0),
+                    "head_2_excess_mean": selection_stats.get('head_2_excess_mean', 0.0),
+                    "head_3_excess_mean": selection_stats.get('head_3_excess_mean', 0.0),
+                    "avg_heads_per_pos": selection_stats.get('avg_heads_per_position', 0.0),
                     "weight_mean": weight_dist_stats["weight_mean"],
                     "weight_std": weight_dist_stats["weight_std"],
                     "weight_min": weight_dist_stats["weight_min"],
@@ -572,10 +595,14 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                             {
                                 "train/weighted_ce_loss": avg_weighted_ce,
                                 "train/selection_ratio": avg_selection_ratio,
+                                "train/avg_heads_per_pos": reduced["avg_heads_per_pos"],
                                 "train/head_0_ratio": reduced["head_0_ratio"],
                                 "train/head_1_ratio": reduced["head_1_ratio"],
                                 "train/head_2_ratio": reduced["head_2_ratio"],
                                 "train/head_3_ratio": reduced["head_3_ratio"],
+                                "train/head_1_excess": reduced["head_1_excess_mean"],
+                                "train/head_2_excess": reduced["head_2_excess_mean"],
+                                "train/head_3_excess": reduced["head_3_excess_mean"],
                                 "train/grad_norm": avg_grad_norm_post,
                                 "train/grad_norm_pre_clip": avg_grad_norm_pre,
                                 "train/grad_clip_ratio": avg_grad_clip_ratio,
@@ -642,6 +669,10 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         # Epoch-level 로깅 (Rank 0만)
         if is_main_process():
+            # Throughput 및 GPU 메트릭 수집
+            throughput_metrics = throughput_tracker.get_epoch_metrics()
+            gpu_metrics_epoch = gpu_monitor.get_metrics()
+
             if use_mlflow:
                 mlflow.log_metrics(
                     {
@@ -649,6 +680,10 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         "train/epoch_excess_loss": train_excess_avg,
                         "val/weighted_ce_loss": val_metrics["val_weighted_ce_loss"],
                         "val/excess_loss": val_metrics["val_excess_loss"],
+                        "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
+                        "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
+                        "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
+                        "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
                     },
                     step=global_step,
                 )

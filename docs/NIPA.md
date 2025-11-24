@@ -304,6 +304,7 @@ uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
 
 # Rho-1
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+  --master_port=29501 \
   -m weighted_mtp.pipelines.run_rho1 \
   --config configs/rho1/rho1.yaml
 ```

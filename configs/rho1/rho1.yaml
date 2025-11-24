@@ -64,14 +64,14 @@ data_sampling:
 # 학습 설정 (H200 4-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 32  # Per GPU (Reference model 메모리 고려)
-  gradient_accumulation_steps: 1  # Effective batch size = 128
+  batch_size: 16  # Per GPU (Reference model 메모리 고려)
+  gradient_accumulation_steps: 2  # Effective batch size = 128
   learning_rate: 5.0e-5
   max_grad_norm: 0.1
 
   # Rho-1 weighting
   temperature: 1.0  # Rho-1 temperature
-  k_percent: 0.6  # Top-k threshold
+  k_percent: 0.4  # Top-k threshold
 
   log_interval: 1
 

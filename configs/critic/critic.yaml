@@ -44,7 +44,7 @@ dataset:
 data_sampling:
   n_samples: 100000
   val_n_samples: 1000
-  auto_data_balancing: true
+  auto_data_balancing: false
   correct_ratio: 0.5  # Correct/Incorrect 균형
   problem_id_filter:
     accuracy_range: [0.4, 0.6]  # 정답률 40-60%
@@ -74,7 +74,7 @@ training:
 # 체크포인트
 checkpoint:
   save_dir: storage/checkpoints/critic/${experiment.name}
-  save_checkpoint_every: 0.25
+  save_checkpoint_every: 0.2
   save_best: true
   save_final: true
   save_total_limit: 2
