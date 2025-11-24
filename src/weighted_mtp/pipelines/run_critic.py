@@ -608,9 +608,20 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     # Metric aggregation (분산 환경)
                     avg_grad_norm_post = grad_clip_stats["grad_norm_post_clip"]
 
-                    # Loss만 all_reduce (1회 통신)
-                    reduced = all_reduce_scalars({"loss": value_loss.item()})
+                    # Value prediction std 계산 (유효 토큰만)
+                    valid_values = value_logits[valid_label_mask.bool()]
+                    value_std = valid_values.std().item() if valid_values.numel() > 0 else 0.0
+
+                    # Loss와 std all_reduce (1회 통신)
+                    reduced = all_reduce_scalars({
+                        "loss": value_loss.item(),
+                        "value_std": value_std,
+                    })
                     avg_loss = reduced["loss"]
+                    avg_value_std = reduced["value_std"]
+
+                    # Value head LR 가져오기 (param_groups[1]이 value_head)
+                    value_head_lr = optimizer.param_groups[1]["lr"] if len(optimizer.param_groups) > 1 else optimizer.param_groups[0]["lr"]
 
                     if is_main_process():
                         if use_mlflow:
@@ -618,7 +629,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                                 {
                                     "train/loss": avg_loss,
                                     "train/grad_norm": avg_grad_norm_post,
-                                    "train/learning_rate": optimizer.param_groups[0]["lr"],
+                                    "train/learning_rate": value_head_lr,
+                                    "value/std": avg_value_std,
                                     "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
                                     "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
                                 },
@@ -628,7 +640,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         f"Step {global_step}/{total_optimization_steps}, "
                         f"Loss: {avg_loss:.4f}, "
                         f"Grad Norm: {avg_grad_norm_post:.4f}, "
-                        f"LR: {optimizer.param_groups[0]['lr']:.2e}"
+                        f"LR: {value_head_lr:.2e}"
                     )
 
         # Period loop 종료

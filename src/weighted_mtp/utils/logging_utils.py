@@ -142,48 +142,59 @@ def compute_critic_classification_counts(
     attention_mask: torch.Tensor,
     threshold: float = 0.5,
 ) -> dict[str, float]:
-    """Critic 분류 성능을 위한 count 계산 (micro-average용)
+    """Critic 분류 성능을 위한 count 계산 (토큰 단위, micro-average용)
 
-    배치별로 TP/FP/FN과 예측값 합계를 반환하여 epoch 단위 누적 후 최종 메트릭 계산
+    각 토큰의 value prediction이 해당 시퀀스의 정답 여부를 맞추는지 평가
+    V(s_t) → P(Success | s_t) 학습 목표에 부합
 
     Args:
         value_logits: Value predictions [batch, seq, 1]
-        is_correct: Binary labels [batch]
+        is_correct: Binary labels [batch] - 시퀀스별 정답 여부
         attention_mask: 유효 토큰 마스크 [batch, seq]
         threshold: Binary classification threshold
 
     Returns:
         count 딕셔너리:
-            - tp: True Positives
-            - fp: False Positives
-            - fn: False Negatives
-            - correct_sum: correct 시퀀스 예측값 합
-            - correct_count: correct 시퀀스 개수
-            - incorrect_sum: incorrect 시퀀스 예측값 합
-            - incorrect_count: incorrect 시퀀스 개수
+            - tp: True Positives (토큰 단위)
+            - fp: False Positives (토큰 단위)
+            - fn: False Negatives (토큰 단위)
+            - correct_sum: correct 시퀀스 내 토큰 예측값 합
+            - correct_count: correct 시퀀스 내 유효 토큰 개수
+            - incorrect_sum: incorrect 시퀀스 내 토큰 예측값 합
+            - incorrect_count: incorrect 시퀀스 내 유효 토큰 개수
     """
-    # 시퀀스별 평균 value 계산 (유효 토큰만)
+    # value_logits: [batch, seq, 1] -> [batch, seq]
     values = value_logits.squeeze(-1)
-    masked_values = values * attention_mask
-    seq_means = masked_values.sum(dim=1) / (attention_mask.sum(dim=1) + 1e-8)
+    batch_size, seq_len = values.shape
 
-    # correct/incorrect 분리
-    correct_mask = is_correct.bool()
-    incorrect_mask = ~correct_mask
+    # 시퀀스 정답을 토큰에 broadcast: [batch] -> [batch, seq]
+    token_labels = is_correct.view(-1, 1).expand(-1, seq_len)
 
-    # 예측값 합계 (pred_gap 계산용)
-    correct_sum = seq_means[correct_mask].sum().item() if correct_mask.any() else 0.0
-    correct_count = correct_mask.sum().item()
-    incorrect_sum = seq_means[incorrect_mask].sum().item() if incorrect_mask.any() else 0.0
-    incorrect_count = incorrect_mask.sum().item()
+    # 유효 토큰 마스크
+    valid_mask = attention_mask.bool()
 
-    # TP/FP/FN 계산 (시퀀스 단위)
-    pred_positive = (seq_means > threshold)
-    actual_positive = correct_mask
+    # 토큰 단위 예측
+    pred_positive = (values > threshold)
+    actual_positive = token_labels.bool()
 
-    tp = (pred_positive & actual_positive).sum().item()
-    fp = (pred_positive & ~actual_positive).sum().item()
-    fn = (~pred_positive & actual_positive).sum().item()
+    # TP/FP/FN 계산 (유효 토큰만)
+    tp = ((pred_positive & actual_positive) & valid_mask).sum().item()
+    fp = ((pred_positive & ~actual_positive) & valid_mask).sum().item()
+    fn = ((~pred_positive & actual_positive) & valid_mask).sum().item()
+
+    # pred_gap 계산용: correct/incorrect 시퀀스 내 토큰 예측값
+    correct_seq_mask = is_correct.bool()  # [batch]
+    incorrect_seq_mask = ~correct_seq_mask
+
+    # correct 시퀀스 내 유효 토큰들의 예측값 합계
+    correct_token_mask = correct_seq_mask.view(-1, 1).expand(-1, seq_len) & valid_mask
+    correct_sum = values[correct_token_mask].sum().item() if correct_token_mask.any() else 0.0
+    correct_count = correct_token_mask.sum().item()
+
+    # incorrect 시퀀스 내 유효 토큰들의 예측값 합계
+    incorrect_token_mask = incorrect_seq_mask.view(-1, 1).expand(-1, seq_len) & valid_mask
+    incorrect_sum = values[incorrect_token_mask].sum().item() if incorrect_token_mask.any() else 0.0
+    incorrect_count = incorrect_token_mask.sum().item()
 
     return {
         "tp": tp,
