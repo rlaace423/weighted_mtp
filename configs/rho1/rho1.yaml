@@ -50,6 +50,7 @@ dataset:
 # 데이터 샘플링
 data_sampling:
   n_samples: 200000
+  val_n_samples: 5000
   auto_data_balancing: false
   correct_ratio: 1.0  # Rho-1은 정답만 학습
   difficulty_bins:

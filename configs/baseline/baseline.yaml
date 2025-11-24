@@ -43,6 +43,7 @@ dataset:
 # 데이터 샘플링
 data_sampling:
   n_samples: 200000 # 기존 13만개 3epoch -> 20만개 2epoch (이전 실험에서 1.5epoch 이후 과적합 확인)
+  val_n_samples: 5000
   auto_data_balancing: false
   correct_ratio: 1.0  # Baseline은 정답만 학습
   difficulty_bins:

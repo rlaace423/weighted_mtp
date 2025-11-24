@@ -363,19 +363,16 @@ def run_verifiable_training(
         shuffle=True,
     )
 
-    # Validation 샘플 수: train의 5% 또는 최소 100개
-    val_n_samples = max(100, config.data_sampling.n_samples // 20)
-
     val_loader = create_dataloader(
         dataset_path=config.dataset.validation,
         tokenizer=tokenizer,
         batch_size=config.training.batch_size,
         max_length=config.dataset.max_length,
-        n_samples=val_n_samples,
+        n_samples=config.data_sampling.val_n_samples,
         auto_data_balancing=config.data_sampling.auto_data_balancing,
         correct_ratio=config.data_sampling.correct_ratio,
-        difficulty_weights=initial_weights,
-        difficulty_bins=difficulty_bins,
+        difficulty_weights=None,
+        difficulty_bins=None,
         seed=config.data_sampling.seed,
         shuffle=False,
     )
