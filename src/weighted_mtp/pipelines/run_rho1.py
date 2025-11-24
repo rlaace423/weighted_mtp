@@ -190,9 +190,10 @@ def validate_rho1(
                 # 모델 dtype 일치
                 weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
 
-                mask_sum_k = combined_mask_k.sum()
-                if mask_sum_k > 0:
-                    batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
+                # 선택된 토큰 수로 나눠서 정확한 평균 계산
+                selected_sum_k = (weights_k.reshape(-1) * combined_mask_k.reshape(-1)).sum()
+                if selected_sum_k > 0:
+                    batch_weighted_ce_loss += weighted_ce_k.sum() / selected_sum_k
 
             weighted_ce_loss = batch_weighted_ce_loss / n_future
 
@@ -505,9 +506,10 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 # 모델 dtype 일치
                 weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
 
-                mask_sum_k = combined_mask_k.sum()
-                if mask_sum_k > 0:
-                    batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
+                # 선택된 토큰 수로 나눠서 정확한 평균 계산
+                selected_sum_k = (weights_k.reshape(-1) * combined_mask_k.reshape(-1)).sum()
+                if selected_sum_k > 0:
+                    batch_weighted_ce_loss += weighted_ce_k.sum() / selected_sum_k
 
             weighted_ce_loss = batch_weighted_ce_loss / n_future
 
