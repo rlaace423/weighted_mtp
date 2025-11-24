@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: critic-pretrain-mlp
+  name: critic-pretrain-mlp-originsample-2layers
   description: "Value head pretraining for TD error calculation"
   stage: critic
   tags:
