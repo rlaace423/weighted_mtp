@@ -59,7 +59,7 @@ training:
   n_epochs: 2.0
   batch_size: 32  # Per GPU
   gradient_accumulation_steps: 1  # Effective batch size = 128
-  trunk_learning_rate: 5.0e-5  # Trunk peak LR
+  trunk_learning_rate: 3.0e-5  # Trunk peak LR
   value_head_learning_rate: 5.0e-5  # Value head peak LR
   max_grad_norm: 0.1
 

@@ -67,43 +67,32 @@ def compute_td_targets(
     # TD targets 초기화 (모델 dtype 유지)
     td_targets = torch.zeros(batch_size, seq_len, device=device, dtype=dtype)
 
-    # TD(0) 모드: 기존 방식 (빠른 연산)
-    if lam == 0.0:
-        # Intermediate targets: γ * V(s_{t+1})
-        if seq_len > 1:
-            td_targets[:, :-1] = gamma * values[:, 1:]
+    # GAE 기반 역방향 계산 (lam=0: TD(0), lam=0.95: GAE, lam=1: MC)
+    for b in range(batch_size):
+        last_gae = 0.0
+        term_idx = terminal_indices[b].item()
 
-        # Terminal targets: R
-        batch_indices = torch.arange(batch_size, device=device)
-        td_targets[batch_indices, terminal_indices] = rewards
+        # 역방향으로 GAE 계산
+        for t in range(int(term_idx), -1, -1):
+            if t == term_idx:
+                # Terminal: δ_T = R - V(s_T)
+                next_value = 0.0
+                reward = rewards[b].item()
+            else:
+                # Intermediate: δ_t = γV(s_{t+1}) - V(s_t)
+                next_value = values[b, t + 1].item()
+                reward = 0.0
 
-    # GAE 모드: 역방향 계산
-    else:
-        for b in range(batch_size):
-            last_gae = 0.0
-            term_idx = terminal_indices[b].item()
+            # TD error
+            delta = reward + gamma * next_value - values[b, t].item()
 
-            # 역방향으로 GAE 계산
-            for t in range(int(term_idx), -1, -1):
-                if t == term_idx:
-                    # Terminal: δ_T = R - V(s_T)
-                    next_value = 0.0
-                    reward = rewards[b].item()
-                else:
-                    # Intermediate: δ_t = γV(s_{t+1}) - V(s_t)
-                    next_value = values[b, t + 1].item()
-                    reward = 0.0
+            # GAE: A_t = δ_t + γλ * A_{t+1}
+            gae = delta + gamma * lam * last_gae
 
-                # TD error
-                delta = reward + gamma * next_value - values[b, t].item()
+            # Target: V(s_t) + A_t
+            td_targets[b, t] = values[b, t].item() + gae
 
-                # GAE: A_t = δ_t + γλ * A_{t+1}
-                gae = delta + gamma * lam * last_gae
-
-                # Target: V(s_t) + A_t
-                td_targets[b, t] = values[b, t].item() + gae
-
-                last_gae = gae
+            last_gae = gae
 
     # Padding 마스킹 (dtype 유지)
     td_targets = td_targets * attention_mask.to(dtype)

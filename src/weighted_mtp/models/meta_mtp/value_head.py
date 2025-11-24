@@ -7,10 +7,10 @@ from torch import nn
 
 
 class ValueHead(nn.Module):
-    """Unbounded linear value head
+    """2-layer MLP value head (DIAL style)
 
-    RLHF 표준: 활성화 함수 없이 Linear layer만 사용
-    표현력 유지 위해 unbounded 설계
+    DIAL 논문 기반: bottleneck MLP로 표현력 증가 + 과적합 방지
+    구조: hidden_size → hidden_size//8 → hidden_size//16 → 1
 
     Args:
         hidden_size: Transformer hidden dimension
@@ -20,7 +20,18 @@ class ValueHead(nn.Module):
     def __init__(self, hidden_size: int, bias: bool = False):
         super().__init__()
         self.hidden_size = hidden_size
-        self.linear = nn.Linear(hidden_size, 1, bias=bias)
+
+        # DIAL 스타일 2-layer MLP (4096 → 512 → 256 → 1)
+        hidden1 = hidden_size // 8   # 512 for 4096 dim
+        hidden2 = hidden_size // 16  # 256 for 4096 dim
+
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size, hidden1, bias=bias),
+            nn.GELU(),
+            nn.Linear(hidden1, hidden2, bias=bias),
+            nn.GELU(),
+            nn.Linear(hidden2, 1, bias=bias),
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward pass
@@ -31,7 +42,7 @@ class ValueHead(nn.Module):
         Returns:
             value: [batch, seq, 1]
         """
-        return self.linear(hidden_states)
+        return self.mlp(hidden_states)
 
     def save_checkpoint(self, path: Path):
         """Value head checkpoint 저장

@@ -91,8 +91,6 @@ def validate_critic(
     adapter.eval()
 
     total_loss = 0.0
-    total_value_var = 0.0
-    total_target_var = 0.0
     total_value_mean = 0.0
     total_value_std = 0.0
     total_target_mean = 0.0
@@ -140,31 +138,28 @@ def validate_critic(
             masked_loss = loss_per_token * loss_mask
             value_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)
 
-            # 6. Metrics 수집
+            # 6. Metrics 수집 (valid_label_mask 적용하여 padding/instruction 제외)
             total_loss += value_loss.item()
-            total_value_var += value_logits.var().item()
-            total_target_var += td_targets.var().item()
-            total_value_mean += value_logits.mean().item()
-            total_value_std += value_logits.std().item()
-            total_target_mean += td_targets.mean().item()
+
+            # Masked statistics (padding, instruction 제외)
+            valid_values = value_logits[loss_mask.bool()]
+            valid_targets = td_targets[loss_mask.bool()]
+
+            if valid_values.numel() > 0:
+                total_value_mean += valid_values.mean().item()
+                total_value_std += valid_values.std().item()
+                total_target_mean += valid_targets.mean().item()
+
             n_batches += 1
 
     # 평균 metrics 계산
     avg_loss = total_loss / n_batches
-    avg_target_var = total_target_var / n_batches
     avg_value_mean = total_value_mean / n_batches
     avg_value_std = total_value_std / n_batches
     avg_target_mean = total_target_mean / n_batches
 
-    # Value explained variance 계산
-    if avg_target_var > 1e-8:
-        explained_var = 1.0 - (avg_loss / avg_target_var)
-    else:
-        explained_var = 0.0
-
     metrics = {
         "val_loss": avg_loss,
-        "val_explained_variance": explained_var,
         "val_mean_prediction": avg_value_mean,
         "val_std_prediction": avg_value_std,
         "val_return_mean": avg_target_mean,
@@ -582,11 +577,6 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     avg_grad_norm_pre = grad_clip_stats["grad_norm_pre_clip"]
                     avg_grad_clip_ratio = grad_clip_stats["grad_clip_ratio"]
 
-                    # 디버깅: valid token ratio 계산
-                    n_valid_tokens = loss_mask.sum().item()
-                    n_total_tokens = attention_mask.sum().item()
-                    valid_token_ratio = n_valid_tokens / (n_total_tokens + 1e-8)
-
                     # 나머지 메트릭 배치 all_reduce (1회 통신)
                     reduced = all_reduce_scalars({
                         "loss": value_loss.item(),
@@ -594,16 +584,12 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         "value_std": value_stats["value_std"],
                         "value_mse": value_stats["value_mse"],
                         "return_mean": value_stats["return_mean"],
-                        "valid_token_ratio": valid_token_ratio,
-                        "n_valid_tokens": n_valid_tokens,
                     })
                     avg_loss = reduced["loss"]
                     avg_value_mean = reduced["value_mean"]
                     avg_value_std = reduced["value_std"]
                     avg_value_mse = reduced["value_mse"]
                     avg_return_mean = reduced["return_mean"]
-                    avg_valid_token_ratio = reduced["valid_token_ratio"]
-                    avg_n_valid_tokens = reduced["n_valid_tokens"]
 
                     if is_main_process():
                         if use_mlflow:
@@ -618,8 +604,6 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                                     "value/std_prediction": avg_value_std,
                                     "value/mse": avg_value_mse,
                                     "value/return_mean": avg_return_mean,
-                                    "debug/valid_token_ratio": avg_valid_token_ratio,
-                                    "debug/n_valid_tokens": avg_n_valid_tokens,
                                     "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
                                     "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
                                 },
@@ -629,7 +613,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         f"Step {global_step}/{total_optimization_steps}, "
                         f"Loss: {avg_loss:.4f}, "
                         f"Grad Norm: {avg_grad_norm_post:.4f} (Clip Ratio: {avg_grad_clip_ratio:.2f}), "
-                        f"Return Mean: {avg_return_mean:.4f}, Valid Tokens: {avg_n_valid_tokens:.0f} ({avg_valid_token_ratio:.1%})"
+                        f"Return Mean: {avg_return_mean:.4f}"
                     )
 
         # Period loop 종료
@@ -682,13 +666,11 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         # Validation metrics aggregation (1회 통신)
         reduced_val = all_reduce_scalars({
             "val_loss": val_metrics["val_loss"],
-            "val_explained_variance": val_metrics["val_explained_variance"],
             "val_mean_prediction": val_metrics["val_mean_prediction"],
             "val_std_prediction": val_metrics["val_std_prediction"],
             "val_return_mean": val_metrics["val_return_mean"],
         })
         avg_val_loss = reduced_val["val_loss"]
-        avg_val_explained_var = reduced_val["val_explained_variance"]
         avg_val_mean_pred = reduced_val["val_mean_prediction"]
         avg_val_std_pred = reduced_val["val_std_prediction"]
         avg_val_return_mean = reduced_val["val_return_mean"]
@@ -703,7 +685,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     {
                         "train/epoch_loss": train_loss_avg,
                         "val/loss": avg_val_loss,
-                        "val/explained_variance": avg_val_explained_var,
+                        "val/mse": avg_val_loss,  # train/value/mse와 비교용
                         "val/mean_prediction": avg_val_mean_pred,
                         "val/std_prediction": avg_val_std_pred,
                         "val/return_mean": avg_val_return_mean,
@@ -717,7 +699,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         logger.info(
             f"Validation - Loss: {val_metrics['val_loss']:.4f}, "
-            f"Explained Variance: {val_metrics['val_explained_variance']:.4f}"
+            f"Mean Pred: {val_metrics['val_mean_prediction']:.4f}"
         )
 
         # Checkpoint 저장 (validation loss 개선 시만)

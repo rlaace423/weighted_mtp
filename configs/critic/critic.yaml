@@ -42,27 +42,29 @@ dataset:
 
 # 데이터 샘플링
 data_sampling:
-  n_samples: 80000
+  n_samples: 200000
   val_n_samples: 5000
   auto_data_balancing: true
   correct_ratio: 0.5  # Correct/Incorrect 균형
   difficulty_bins:
-    all: [1, 25]  # 0 제외
+    diff_7: [7, 7]    # 데이터 많음 (약 90만 -> 비중 축소 필요)
+    else: [8, 25]     # 데이터 적당 (약 60만)
   difficulty_weights:
-    all: 1.0
-  seed: 42
+    diff_7: 0.35  # 90만개 중 일부만 샘플링 (약 35% 할당)
+    else: 0.65    # 어려운 문제 집중 (약 60% 할당)
+  seed: 84
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
-  n_epochs: 3.0
-  batch_size: 32  # Per GPU
-  gradient_accumulation_steps: 2  # Effective batch size = 192
-  trunk_learning_rate: 1e-5  # Trunk (unfrozen layers) peak LR
-  value_head_learning_rate: 3e-5  # Value head peak LR
-  max_grad_norm: 0.3
+  n_epochs: 1.0
+  batch_size: 64  # Per GPU
+  gradient_accumulation_steps: 1  # Effective batch size = 256
+  trunk_learning_rate: 5e-6  # Trunk LR (미사용, num_unfrozen_layers=0)
+  value_head_learning_rate: 1e-5  # Value head peak LR
+  max_grad_norm: 1.0
   gamma: 1.0
   lam: 1.0  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
-  num_unfrozen_layers: 6  # 마지막 N개 TransformerBlock unfreeze (0=value head만)
+  num_unfrozen_layers: 0  # Value head만 학습 (backbone 동결)
   log_interval: 1
 
   # Learning rate scheduler
