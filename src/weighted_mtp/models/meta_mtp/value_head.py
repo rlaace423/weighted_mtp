@@ -33,6 +33,20 @@ class ValueHead(nn.Module):
             nn.Linear(hidden2, 1, bias=bias),
         )
 
+        # RLHF 표준 초기화: 출력 layer zero init으로 초기 예측을 0에 가깝게
+        self._init_weights()
+
+    def _init_weights(self):
+        """RLHF 표준 초기화: 마지막 layer zero init
+
+        출력 layer를 0으로 초기화하여 초기 value 예측이 0에 가깝도록 함.
+        이는 학습 초기 손실을 줄이고 안정적인 학습 시작을 보장.
+        """
+        # 마지막 Linear layer (출력층) zero init
+        nn.init.zeros_(self.mlp[-1].weight)
+        if self.mlp[-1].bias is not None:
+            nn.init.zeros_(self.mlp[-1].bias)
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward pass
 

@@ -25,9 +25,10 @@ from weighted_mtp.utils import (
     ThroughputTracker,
     cleanup_old_checkpoints,
     cleanup_s3_checkpoints,
+    compute_classification_metrics_from_counts,
+    compute_critic_classification_counts,
     compute_gradient_clip_stats,
     compute_gradient_norm,
-    compute_value_function_stats,
     create_param_groups,
     create_scheduler,
     get_model_size,
@@ -91,10 +92,16 @@ def validate_critic(
     adapter.eval()
 
     total_loss = 0.0
-    total_value_mean = 0.0
-    total_value_std = 0.0
-    total_target_mean = 0.0
     n_batches = 0
+
+    # 분류 메트릭용 누적 변수 (micro-average)
+    total_tp = 0.0
+    total_fp = 0.0
+    total_fn = 0.0
+    total_correct_sum = 0.0
+    total_correct_count = 0.0
+    total_incorrect_sum = 0.0
+    total_incorrect_count = 0.0
 
     # 모델 dtype 감지
     model_dtype = next(adapter.parameters()).dtype
@@ -114,9 +121,7 @@ def validate_critic(
             outputs = adapter(input_ids, attention_mask, return_value_logits=True)
             value_logits = outputs["value_logits"]
 
-            batch_size, seq_len, _ = value_logits.shape
-
-            # 4. TD target 계산 (MC 방식 삭제, TD Learning 적용)
+            # 4. TD target 계산
             td_targets = compute_td_targets(
                 value_logits=value_logits,
                 rewards=rewards,
@@ -127,42 +132,54 @@ def validate_critic(
 
             # Mask padded tokens AND instruction tokens (labels != -100)
             valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
-            loss_mask = valid_label_mask
 
             # 5. Value loss 계산 (MSE)
             loss_per_token = torch.nn.functional.mse_loss(
                 value_logits, td_targets, reduction="none"
             )
 
-            # Masked loss
-            masked_loss = loss_per_token * loss_mask
-            value_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)
+            masked_loss = loss_per_token * valid_label_mask
+            value_loss = masked_loss.sum() / (valid_label_mask.sum() + 1e-8)
 
-            # 6. Metrics 수집 (valid_label_mask 적용하여 padding/instruction 제외)
             total_loss += value_loss.item()
 
-            # Masked statistics (padding, instruction 제외)
-            valid_values = value_logits[loss_mask.bool()]
-            valid_targets = td_targets[loss_mask.bool()]
-
-            if valid_values.numel() > 0:
-                total_value_mean += valid_values.mean().item()
-                total_value_std += valid_values.std().item()
-                total_target_mean += valid_targets.mean().item()
+            # 6. 분류 메트릭 count 누적 (micro-average)
+            valid_mask_2d = (labels != -100).to(model_dtype)
+            cls_counts = compute_critic_classification_counts(
+                value_logits=value_logits,
+                is_correct=is_correct,
+                attention_mask=valid_mask_2d,
+            )
+            total_tp += cls_counts["tp"]
+            total_fp += cls_counts["fp"]
+            total_fn += cls_counts["fn"]
+            total_correct_sum += cls_counts["correct_sum"]
+            total_correct_count += cls_counts["correct_count"]
+            total_incorrect_sum += cls_counts["incorrect_sum"]
+            total_incorrect_count += cls_counts["incorrect_count"]
 
             n_batches += 1
 
-    # 평균 metrics 계산
+    # 평균 loss 계산
     avg_loss = total_loss / n_batches
-    avg_value_mean = total_value_mean / n_batches
-    avg_value_std = total_value_std / n_batches
-    avg_target_mean = total_target_mean / n_batches
+
+    # 분류 메트릭 최종 계산 (micro-average)
+    cls_metrics = compute_classification_metrics_from_counts(
+        tp=total_tp,
+        fp=total_fp,
+        fn=total_fn,
+        correct_sum=total_correct_sum,
+        correct_count=total_correct_count,
+        incorrect_sum=total_incorrect_sum,
+        incorrect_count=total_incorrect_count,
+    )
 
     metrics = {
         "val_loss": avg_loss,
-        "val_mean_prediction": avg_value_mean,
-        "val_std_prediction": avg_value_std,
-        "val_return_mean": avg_target_mean,
+        "val_pred_gap": cls_metrics["pred_gap"],
+        "val_precision": cls_metrics["precision"],
+        "val_recall": cls_metrics["recall"],
+        "val_f1": cls_metrics["f1"],
     }
 
     return metrics
@@ -471,6 +488,15 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         period_metrics_sum = {"train_loss": 0.0}
         period_batches = 0
 
+        # Train 분류 메트릭용 누적 변수 (micro-average)
+        train_tp = 0.0
+        train_fp = 0.0
+        train_fn = 0.0
+        train_correct_sum = 0.0
+        train_correct_count = 0.0
+        train_incorrect_sum = 0.0
+        train_incorrect_count = 0.0
+
         for _ in range(batches_this_period):
             try:
                 batch = next(epoch_train_loader)
@@ -531,6 +557,21 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             # Period metrics 누적 (batch 단위)
             period_metrics_sum["train_loss"] += value_loss.item()
 
+            # Train 분류 메트릭 count 누적 (micro-average)
+            valid_mask_2d = (labels != -100).to(model_dtype)
+            cls_counts = compute_critic_classification_counts(
+                value_logits=value_logits,
+                is_correct=is_correct,
+                attention_mask=valid_mask_2d,
+            )
+            train_tp += cls_counts["tp"]
+            train_fp += cls_counts["fp"]
+            train_fn += cls_counts["fn"]
+            train_correct_sum += cls_counts["correct_sum"]
+            train_correct_count += cls_counts["correct_count"]
+            train_incorrect_sum += cls_counts["incorrect_sum"]
+            train_incorrect_count += cls_counts["incorrect_count"]
+
             # Optimizer step (accumulation 완료 시에만)
             if accumulation_counter >= gradient_accumulation_steps:
                 # Gradient clipping (누적된 gradient에 적용)
@@ -564,32 +605,12 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     # GPU metrics
                     gpu_metrics = gpu_monitor.get_metrics()
 
-                    # Value function statistics (response 토큰만)
-                    value_stats = compute_value_function_stats(
-                        values=value_logits.squeeze(-1),
-                        returns=td_targets.squeeze(-1),
-                        attention_mask=valid_label_mask.squeeze(-1),
-                    )
-
                     # Metric aggregation (분산 환경)
-                    # grad_clip_stats는 clip_grad_norm_이 이미 전역 값을 반환하므로 all_reduce 불필요
                     avg_grad_norm_post = grad_clip_stats["grad_norm_post_clip"]
-                    avg_grad_norm_pre = grad_clip_stats["grad_norm_pre_clip"]
-                    avg_grad_clip_ratio = grad_clip_stats["grad_clip_ratio"]
 
-                    # 나머지 메트릭 배치 all_reduce (1회 통신)
-                    reduced = all_reduce_scalars({
-                        "loss": value_loss.item(),
-                        "value_mean": value_stats["value_mean"],
-                        "value_std": value_stats["value_std"],
-                        "value_mse": value_stats["value_mse"],
-                        "return_mean": value_stats["return_mean"],
-                    })
+                    # Loss만 all_reduce (1회 통신)
+                    reduced = all_reduce_scalars({"loss": value_loss.item()})
                     avg_loss = reduced["loss"]
-                    avg_value_mean = reduced["value_mean"]
-                    avg_value_std = reduced["value_std"]
-                    avg_value_mse = reduced["value_mse"]
-                    avg_return_mean = reduced["return_mean"]
 
                     if is_main_process():
                         if use_mlflow:
@@ -597,13 +618,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                                 {
                                     "train/loss": avg_loss,
                                     "train/grad_norm": avg_grad_norm_post,
-                                    "train/grad_norm_pre_clip": avg_grad_norm_pre,
-                                    "train/grad_clip_ratio": avg_grad_clip_ratio,
                                     "train/learning_rate": optimizer.param_groups[0]["lr"],
-                                    "value/mean_prediction": avg_value_mean,
-                                    "value/std_prediction": avg_value_std,
-                                    "value/mse": avg_value_mse,
-                                    "value/return_mean": avg_return_mean,
                                     "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
                                     "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
                                 },
@@ -612,8 +627,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     logger.info(
                         f"Step {global_step}/{total_optimization_steps}, "
                         f"Loss: {avg_loss:.4f}, "
-                        f"Grad Norm: {avg_grad_norm_post:.4f} (Clip Ratio: {avg_grad_clip_ratio:.2f}), "
-                        f"Return Mean: {avg_return_mean:.4f}"
+                        f"Grad Norm: {avg_grad_norm_post:.4f}, "
+                        f"LR: {optimizer.param_groups[0]['lr']:.2e}"
                     )
 
         # Period loop 종료
@@ -641,12 +656,36 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         # Period-level metrics 계산
         train_loss_avg = period_metrics_sum["train_loss"] / period_batches
-        reduced_period = all_reduce_scalars({"train_loss": train_loss_avg})
-        train_loss_avg = reduced_period["train_loss"]
+
+        # Train 분류 메트릭 all_reduce (분산 환경에서 count 합산)
+        reduced_train = all_reduce_scalars({
+            "train_loss": train_loss_avg,
+            "train_tp": train_tp,
+            "train_fp": train_fp,
+            "train_fn": train_fn,
+            "train_correct_sum": train_correct_sum,
+            "train_correct_count": train_correct_count,
+            "train_incorrect_sum": train_incorrect_sum,
+            "train_incorrect_count": train_incorrect_count,
+        }, op="sum")
+        train_loss_avg = reduced_train["train_loss"] / max(1, torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1)
+
+        # Train 분류 메트릭 최종 계산 (micro-average)
+        train_cls_metrics = compute_classification_metrics_from_counts(
+            tp=reduced_train["train_tp"],
+            fp=reduced_train["train_fp"],
+            fn=reduced_train["train_fn"],
+            correct_sum=reduced_train["train_correct_sum"],
+            correct_count=reduced_train["train_correct_count"],
+            incorrect_sum=reduced_train["train_incorrect_sum"],
+            incorrect_count=reduced_train["train_incorrect_count"],
+        )
 
         logger.info(
             f"Epoch {current_epoch:.2f} 도달 - "
-            f"Train Loss: {train_loss_avg:.4f}"
+            f"Train Loss: {train_loss_avg:.4f}, "
+            f"Pred Gap: {train_cls_metrics['pred_gap']:.4f}, "
+            f"F1: {train_cls_metrics['f1']:.3f}"
         )
 
         # Throughput metrics 계산
@@ -666,14 +705,16 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         # Validation metrics aggregation (1회 통신)
         reduced_val = all_reduce_scalars({
             "val_loss": val_metrics["val_loss"],
-            "val_mean_prediction": val_metrics["val_mean_prediction"],
-            "val_std_prediction": val_metrics["val_std_prediction"],
-            "val_return_mean": val_metrics["val_return_mean"],
+            "val_pred_gap": val_metrics["val_pred_gap"],
+            "val_precision": val_metrics["val_precision"],
+            "val_recall": val_metrics["val_recall"],
+            "val_f1": val_metrics["val_f1"],
         })
         avg_val_loss = reduced_val["val_loss"]
-        avg_val_mean_pred = reduced_val["val_mean_prediction"]
-        avg_val_std_pred = reduced_val["val_std_prediction"]
-        avg_val_return_mean = reduced_val["val_return_mean"]
+        avg_val_pred_gap = reduced_val["val_pred_gap"]
+        avg_val_precision = reduced_val["val_precision"]
+        avg_val_recall = reduced_val["val_recall"]
+        avg_val_f1 = reduced_val["val_f1"]
 
         # GPU metrics (epoch-level)
         gpu_metrics_epoch = gpu_monitor.get_metrics()
@@ -683,12 +724,19 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             if use_mlflow:
                 mlflow.log_metrics(
                     {
+                        # Train metrics
                         "train/epoch_loss": train_loss_avg,
+                        "train/pred_gap": train_cls_metrics["pred_gap"],
+                        "train/precision": train_cls_metrics["precision"],
+                        "train/recall": train_cls_metrics["recall"],
+                        "train/f1": train_cls_metrics["f1"],
+                        # Validation metrics
                         "val/loss": avg_val_loss,
-                        "val/mse": avg_val_loss,  # train/value/mse와 비교용
-                        "val/mean_prediction": avg_val_mean_pred,
-                        "val/std_prediction": avg_val_std_pred,
-                        "val/return_mean": avg_val_return_mean,
+                        "val/pred_gap": avg_val_pred_gap,
+                        "val/precision": avg_val_precision,
+                        "val/recall": avg_val_recall,
+                        "val/f1": avg_val_f1,
+                        # Performance metrics
                         "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
                         "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
                         "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
@@ -699,7 +747,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         logger.info(
             f"Validation - Loss: {val_metrics['val_loss']:.4f}, "
-            f"Mean Pred: {val_metrics['val_mean_prediction']:.4f}"
+            f"Pred Gap: {val_metrics['val_pred_gap']:.4f}, "
+            f"F1: {val_metrics['val_f1']:.3f}"
         )
 
         # Checkpoint 저장 (validation loss 개선 시만)

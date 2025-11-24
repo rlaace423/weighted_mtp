@@ -346,11 +346,62 @@ tail -f logs/baseline_*.log
 
 ### 6.1 결과물 로컬로 가져오기
 
+> **주의**: rsync/scp가 "channel 0: rcvd too much data" 또는 "Received message too long" 오류로 실패할 경우, 아래 근본 원인 해결 또는 대안 방법을 사용.
+
+**근본 원인 해결 (권장)**
+
+이 오류는 서버의 `.bashrc`가 비대화형 세션에서도 출력을 생성하기 때문에 발생. 서버에서 아래와 같이 수정:
+
 ```bash
-# 로컬에서 실행
-rsync -avz --progress -e "ssh -p 10507" \
-  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/checkpoints/ \
+# 서버에 접속
+ssh nipa
+
+# .bashrc 파일 상단에 아래 코드 추가
+# 비대화형 세션에서는 나머지 .bashrc 실행을 건너뜀
+nano ~/.bashrc
+# 파일 최상단에 추가:
+# [[ $- != *i* ]] && return
+```
+
+이후 rsync/scp가 정상 작동.
+
+**방법 1: 서버에서 압축 후 전송 (권장)**
+
+```bash
+# 1. 서버에서 압축
+ssh -p 10507 work@proxy1.nipa2025.ktcloud.com \
+  "cd ~/grad_school/wooshikwon/weighted_mtp/storage/checkpoints/baseline && tar czvf baseline-mtp.tar.gz baseline-mtp"
+
+# 2. 로컬에서 다운로드
+mkdir -p ./storage/checkpoints_nipa
+scp -P 10507 \
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/checkpoints/baseline/baseline-mtp.tar.gz \
   ./storage/checkpoints_nipa/
+
+# 3. 압축 해제
+cd ./storage/checkpoints_nipa && tar xzf baseline-mtp.tar.gz && rm baseline-mtp.tar.gz
+```
+
+**방법 2: sftp 사용**
+
+```bash
+  mkdir -p ./storage/checkpoints_nipa/baseline-mtp
+  cd ./storage/checkpoints_nipa/baseline-mtp
+  sftp -oPort=10507 work@proxy1.nipa2025.ktcloud.com
+  
+# 접속 후:
+cd /home/work/grad_school/wooshikwon/weighted_mtp/storage/checkpoints/baseline/baseline-mtp
+get checkpoint_epoch_1.50.pt
+bye
+```
+
+**방법 3: 단일파일만**
+
+```bash
+  mkdir -p ./storage/checkpoints_nipa/baseline-mtp
+  scp -P 10507 \
+work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/checkpoints/baseline/baseline-mtp/checkpoint_epoch_1.50.pt \
+    ./storage/checkpoints_nipa/baseline-mtp/
 ```
 
 ---

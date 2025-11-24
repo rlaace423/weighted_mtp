@@ -24,6 +24,8 @@ from weighted_mtp.utils.metrics_utils import (
     get_system_info,
 )
 from weighted_mtp.utils.logging_utils import (
+    compute_classification_metrics_from_counts,
+    compute_critic_classification_counts,
     compute_gradient_clip_stats,
     compute_value_function_stats,
     compute_weight_statistics,
@@ -66,6 +68,8 @@ __all__ = [
     "shutdown_s3_executor",
     "upload_to_s3_async",
     # Logging utils
+    "compute_classification_metrics_from_counts",
+    "compute_critic_classification_counts",
     "compute_gradient_clip_stats",
     "compute_value_function_stats",
     "compute_weight_statistics",

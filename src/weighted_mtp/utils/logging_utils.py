@@ -134,3 +134,104 @@ def compute_value_function_stats(
         "value_std": values_flat.std().item(),
         "return_mean": returns_flat.mean().item(),
     }
+
+
+def compute_critic_classification_counts(
+    value_logits: torch.Tensor,
+    is_correct: torch.Tensor,
+    attention_mask: torch.Tensor,
+    threshold: float = 0.5,
+) -> dict[str, float]:
+    """Critic 분류 성능을 위한 count 계산 (micro-average용)
+
+    배치별로 TP/FP/FN과 예측값 합계를 반환하여 epoch 단위 누적 후 최종 메트릭 계산
+
+    Args:
+        value_logits: Value predictions [batch, seq, 1]
+        is_correct: Binary labels [batch]
+        attention_mask: 유효 토큰 마스크 [batch, seq]
+        threshold: Binary classification threshold
+
+    Returns:
+        count 딕셔너리:
+            - tp: True Positives
+            - fp: False Positives
+            - fn: False Negatives
+            - correct_sum: correct 시퀀스 예측값 합
+            - correct_count: correct 시퀀스 개수
+            - incorrect_sum: incorrect 시퀀스 예측값 합
+            - incorrect_count: incorrect 시퀀스 개수
+    """
+    # 시퀀스별 평균 value 계산 (유효 토큰만)
+    values = value_logits.squeeze(-1)
+    masked_values = values * attention_mask
+    seq_means = masked_values.sum(dim=1) / (attention_mask.sum(dim=1) + 1e-8)
+
+    # correct/incorrect 분리
+    correct_mask = is_correct.bool()
+    incorrect_mask = ~correct_mask
+
+    # 예측값 합계 (pred_gap 계산용)
+    correct_sum = seq_means[correct_mask].sum().item() if correct_mask.any() else 0.0
+    correct_count = correct_mask.sum().item()
+    incorrect_sum = seq_means[incorrect_mask].sum().item() if incorrect_mask.any() else 0.0
+    incorrect_count = incorrect_mask.sum().item()
+
+    # TP/FP/FN 계산 (시퀀스 단위)
+    pred_positive = (seq_means > threshold)
+    actual_positive = correct_mask
+
+    tp = (pred_positive & actual_positive).sum().item()
+    fp = (pred_positive & ~actual_positive).sum().item()
+    fn = (~pred_positive & actual_positive).sum().item()
+
+    return {
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "correct_sum": correct_sum,
+        "correct_count": correct_count,
+        "incorrect_sum": incorrect_sum,
+        "incorrect_count": incorrect_count,
+    }
+
+
+def compute_classification_metrics_from_counts(
+    tp: float,
+    fp: float,
+    fn: float,
+    correct_sum: float,
+    correct_count: float,
+    incorrect_sum: float,
+    incorrect_count: float,
+) -> dict[str, float]:
+    """누적된 count로부터 최종 분류 메트릭 계산 (micro-average)
+
+    Args:
+        tp, fp, fn: 누적된 True Positives, False Positives, False Negatives
+        correct_sum, correct_count: correct 시퀀스 예측값 합계와 개수
+        incorrect_sum, incorrect_count: incorrect 시퀀스 예측값 합계와 개수
+
+    Returns:
+        메트릭 딕셔너리:
+            - pred_gap: correct - incorrect 평균 예측값 차이
+            - precision: TP / (TP + FP)
+            - recall: TP / (TP + FN)
+            - f1: 2 * P * R / (P + R)
+    """
+    # Pred gap 계산
+    mean_correct = correct_sum / (correct_count + 1e-8)
+    mean_incorrect = incorrect_sum / (incorrect_count + 1e-8)
+    pred_gap = mean_correct - mean_incorrect if correct_count > 0 and incorrect_count > 0 else 0.0
+
+    # Precision/Recall/F1 계산
+    precision = tp / (tp + fp + 1e-8)
+    recall = tp / (tp + fn + 1e-8)
+    f1 = 2 * precision * recall / (precision + recall + 1e-8)
+
+    return {
+        "pred_gap": pred_gap,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
