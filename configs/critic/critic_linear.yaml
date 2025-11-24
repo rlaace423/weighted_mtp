@@ -1,0 +1,113 @@
+# Critic Pre-training (Stage 1)
+# Value head pretraining for TD error calculation
+# 프로덕션 설정 (VESSL H200 4-GPU)
+
+# 프로젝트 정보
+project:
+  name: weighted-mtp
+  version: "2.0.0"
+
+# 실험 메타정보
+experiment:
+  name: critic-pretrain-linear
+  description: "Value head pretraining for TD error calculation"
+  stage: critic
+  tags:
+    - critic
+    - linear-value-head
+    - unfrozen-trunk:2
+
+# 모델 설정
+models:
+  policy:
+    name: meta-llama-mtp
+    path: storage/models/meta-llama-mtp
+    tokenizer_path: storage/models/meta-llama-mtp/tokenizer
+    params:
+      dim: 4096
+      n_layers: 32
+      n_heads: 32
+      n_future_tokens: 4
+      intermediate_size: 11008
+      rope_theta: 10000.0
+      vocab_size: 32000
+    dtype: bfloat16
+
+# 데이터셋 설정
+dataset:
+  name: codecontests
+  train: storage/datasets/codecontests/processed/train.jsonl
+  validation: storage/datasets/codecontests/processed/valid.jsonl
+  max_length: 2048
+
+# 데이터 샘플링
+data_sampling:
+  sampling_method: "problems"
+  seed: 84
+  val_n_samples: 1000
+
+  problems:
+    max_samples: 100000
+    accuracy_range: [0.4, 0.6]
+    sample_count_range: [50, 500]
+
+# 학습 설정 (H200 4-GPU 최적화)
+training:
+  n_epochs: 1.0
+  batch_size: 64
+  gradient_accumulation_steps: 1
+  trunk_learning_rate: 5e-6
+  value_head_learning_rate: 3e-4
+  max_grad_norm: 1.0
+  gamma: 1.0
+  lam: 1.0  # MC (sigmoid value_head_type 필수 조건)
+  num_unfrozen_layers: 1
+  value_head_type: linear  # BCE loss + Sigmoid
+  log_interval: 1
+
+  # Learning rate scheduler
+  lr_scheduler:
+    type: cosine  # "cosine", "linear", "constant"
+    warmup_ratio: 0.03  # Total steps의 5%
+    min_lr_ratio: 0.005  # Peak LR의 0% (완전 decay)
+
+# 체크포인트
+checkpoint:
+  save_dir: storage/checkpoints/critic/${experiment.name}
+  save_checkpoint_every: 0.2
+  save_best: true
+  save_final: true
+  save_total_limit: 2
+  s3_upload: true
+
+# 런타임 설정
+runtime:
+  device: cuda
+  seed: 42
+  mixed_precision: true
+
+# 분산학습 설정
+distributed:
+  fsdp:
+    sharding_strategy: FULL_SHARD
+    mixed_precision: true
+    cpu_offload: false
+    activation_checkpointing: true
+
+# 스토리지
+storage:
+  root: storage
+  models_dir: storage/models
+  datasets_dir: storage/datasets
+  checkpoints_dir: storage/checkpoints
+
+# MLflow 추적
+mlflow:
+  tracking_uri: "http://13.50.240.176"
+  experiment: "weighted-mtp/production"
+  s3_artifacts: "s3://wmtp/mlflow-artifacts"
+
+# 로깅
+logging:
+  level: INFO
+  format: "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"

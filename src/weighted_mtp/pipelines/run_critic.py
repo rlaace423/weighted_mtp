@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 
 from weighted_mtp.core.env import ensure_env_loaded
 from weighted_mtp.core.logging import setup_logging
-from weighted_mtp.data.dataloader import create_dataloader, get_difficulty_config
+from weighted_mtp.data.dataloader import create_dataloader
 from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
 from weighted_mtp.models.tokenizer_utils import load_tokenizer_from_config
 from weighted_mtp.utils import (
@@ -80,6 +80,7 @@ def validate_critic(
     device: torch.device,
     gamma: float = 1.0,
     lam: float = 0.0,
+    value_head_type: str = "mlp",
 ) -> dict[str, float]:
     """Validation 수행
 
@@ -89,6 +90,7 @@ def validate_critic(
         device: 디바이스
         gamma: TD discount factor
         lam: GAE lambda
+        value_head_type: "linear" (BCE) 또는 "mlp" (MSE)
 
     Returns:
         Validation metrics
@@ -137,10 +139,17 @@ def validate_critic(
             # Mask padded tokens AND instruction tokens (labels != -100)
             valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
 
-            # 5. Value loss 계산 (MSE)
-            loss_per_token = torch.nn.functional.mse_loss(
-                value_logits, td_targets, reduction="none"
-            )
+            # 5. Value loss 계산 (value_head_type에 따라 분기)
+            if value_head_type == "sigmoid":
+                # BCE loss (sigmoid 출력)
+                loss_per_token = torch.nn.functional.binary_cross_entropy(
+                    value_logits, td_targets, reduction="none"
+                )
+            else:
+                # MSE loss (linear, mlp)
+                loss_per_token = torch.nn.functional.mse_loss(
+                    value_logits, td_targets, reduction="none"
+                )
 
             masked_loss = loss_per_token * valid_label_mask
             value_loss = masked_loss.sum() / (valid_label_mask.sum() + 1e-8)
@@ -360,43 +369,37 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Train: {config.dataset.train}")
     logger.info(f"Validation: {config.dataset.validation}")
 
-    # Difficulty 설정 추출 (정적 weights 또는 curriculum)
-    difficulty_weights, difficulty_bins = get_difficulty_config(config)
-    if difficulty_weights:
-        logger.info(f"Difficulty-based sampling: bins={difficulty_bins}, weights={difficulty_weights}")
-
-    # Problem ID 필터 설정 추출
-    problem_id_filter = config.data_sampling.get("problem_id_filter", None)
-    if problem_id_filter:
-        problem_id_filter = dict(problem_id_filter)
-        logger.info(f"Problem ID 기반 필터링: {problem_id_filter}")
+    # sampling_config를 dict로 변환
+    from omegaconf import OmegaConf
+    sampling_config = OmegaConf.to_container(config.data_sampling, resolve=True)
+    sampling_method = sampling_config.get("sampling_method")
+    logger.info(f"샘플링 방식: {sampling_method}")
 
     train_loader = create_dataloader(
         dataset_path=config.dataset.train,
         tokenizer=tokenizer,
         batch_size=config.training.batch_size,
         max_length=config.dataset.max_length,
-        n_samples=config.data_sampling.n_samples,
-        auto_data_balancing=config.data_sampling.auto_data_balancing,
-        correct_ratio=config.data_sampling.correct_ratio,
-        difficulty_weights=difficulty_weights,
-        difficulty_bins=difficulty_bins,
-        problem_id_filter=problem_id_filter,
+        sampling_config=sampling_config,
         seed=config.data_sampling.seed,
         shuffle=True,
     )
+
+    # Validation용 sampling_config (동일 방식, val_n_samples 사용)
+    val_sampling_config = sampling_config.copy()
+    if sampling_method == "problems":
+        val_sampling_config["problems"] = val_sampling_config.get("problems", {}).copy()
+        val_sampling_config["problems"]["max_samples"] = config.data_sampling.val_n_samples
+    elif sampling_method == "difficulty":
+        val_sampling_config["difficulty"] = val_sampling_config.get("difficulty", {}).copy()
+        val_sampling_config["difficulty"]["n_samples"] = config.data_sampling.val_n_samples
 
     val_loader = create_dataloader(
         dataset_path=config.dataset.validation,
         tokenizer=tokenizer,
         batch_size=config.training.batch_size,
         max_length=config.dataset.max_length,
-        n_samples=config.data_sampling.val_n_samples,
-        auto_data_balancing=config.data_sampling.auto_data_balancing,
-        correct_ratio=config.data_sampling.correct_ratio,
-        difficulty_weights=None,
-        difficulty_bins=None,
-        problem_id_filter=problem_id_filter,
+        sampling_config=val_sampling_config,
         seed=config.data_sampling.seed,
         shuffle=False,
     )
@@ -548,10 +551,18 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             attn_mask_expanded = attention_mask.unsqueeze(-1).to(model_dtype)
             loss_mask = valid_label_mask * attn_mask_expanded
 
-            # Value loss 계산 (MSE)
-            loss_per_token = torch.nn.functional.mse_loss(
-                value_logits, td_targets, reduction="none"
-            )
+            # Value loss 계산 (value_head_type에 따라 분기)
+            value_head_type = config.training.value_head_type
+            if value_head_type == "sigmoid":
+                # BCE loss (sigmoid 출력)
+                loss_per_token = torch.nn.functional.binary_cross_entropy(
+                    value_logits, td_targets, reduction="none"
+                )
+            else:
+                # MSE loss (linear, mlp)
+                loss_per_token = torch.nn.functional.mse_loss(
+                    value_logits, td_targets, reduction="none"
+                )
 
             masked_loss = loss_per_token * loss_mask
             value_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)
@@ -746,6 +757,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             device=device,
             gamma=config.training.gamma,
             lam=getattr(config.training, "lam", 0.0),
+            value_head_type=config.training.value_head_type,
         )
 
         # Validation metrics aggregation (1회 통신)

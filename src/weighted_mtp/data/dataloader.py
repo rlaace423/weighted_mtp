@@ -90,12 +90,7 @@ def create_dataloader(
     tokenizer: AutoTokenizer,
     batch_size: int,
     max_length: int,
-    n_samples: int,
-    auto_data_balancing: bool = False,
-    correct_ratio: float = 0.5,
-    difficulty_weights: Optional[dict] = None,
-    difficulty_bins: Optional[dict] = None,
-    problem_id_filter: Optional[dict] = None,
+    sampling_config: dict,
     seed: int = 42,
     shuffle: bool = True,
 ) -> DataLoader:
@@ -109,12 +104,10 @@ def create_dataloader(
         tokenizer: Tokenizer
         batch_size: 배치 크기 (per GPU)
         max_length: 최대 시퀀스 길이
-        n_samples: 전체 샘플 수
-        auto_data_balancing: is_correct 균형 샘플링 여부
-        correct_ratio: correct 샘플 비율 (0.5 = 50:50)
-        difficulty_weights: 난이도별 가중치 (curriculum learning용, Optional)
-        difficulty_bins: 난이도 구간 정의 (Optional)
-        problem_id_filter: Problem ID 기반 필터 조건 (accuracy_range, sample_count_range)
+        sampling_config: 샘플링 설정 딕셔너리
+            - sampling_method: "problems" 또는 "difficulty"
+            - problems: {n_problems, max_samples, accuracy_range, sample_count_range}
+            - difficulty: {n_samples, auto_data_balancing, correct_ratio, difficulty_weights, difficulty_bins}
         seed: 랜덤 시드
         shuffle: 셔플 여부
 
@@ -122,21 +115,19 @@ def create_dataloader(
         DataLoader
 
     Examples:
-        >>> # Baseline: 정답만 100,000개
-        >>> loader = create_dataloader(
-        ...     "storage/datasets/codecontests/processed/train.jsonl",
-        ...     tokenizer, batch_size=4, max_length=2048,
-        ...     n_samples=100000, auto_data_balancing=False, correct_ratio=1.0
-        ... )
+        >>> # Problems 방식
+        >>> sampling_config = {
+        ...     "sampling_method": "problems",
+        ...     "problems": {"n_problems": 500, "max_samples": 100000}
+        ... }
+        >>> loader = create_dataloader(path, tokenizer, 4, 2048, sampling_config)
         >>>
-        >>> # Verifiable: Curriculum learning
-        >>> loader = create_dataloader(
-        ...     "storage/datasets/codecontests/processed/train.jsonl",
-        ...     tokenizer, batch_size=4, max_length=2048,
-        ...     n_samples=100000, auto_data_balancing=True, correct_ratio=0.5,
-        ...     difficulty_weights={"low": 0.7, "medium": 0.3, "high": 0.0},
-        ...     difficulty_bins={"low": [1,3], "medium": [4,7], "high": [8,11]}
-        ... )
+        >>> # Difficulty 방식
+        >>> sampling_config = {
+        ...     "sampling_method": "difficulty",
+        ...     "difficulty": {"n_samples": 100000, "correct_ratio": 0.5}
+        ... }
+        >>> loader = create_dataloader(path, tokenizer, 4, 2048, sampling_config)
     """
     # 데이터셋 이름 및 스플릿 추출
     dataset_path_obj = Path(dataset_path)
@@ -158,12 +149,7 @@ def create_dataloader(
     dataset = load_dataset(
         dataset_name=dataset_name,
         split=split,
-        n_samples=n_samples,
-        auto_data_balancing=auto_data_balancing,
-        correct_ratio=correct_ratio,
-        difficulty_weights=difficulty_weights,
-        difficulty_bins=difficulty_bins,
-        problem_id_filter=problem_id_filter,
+        sampling_config=sampling_config,
         seed=seed,
         rank=rank,
         world_size=world_size,

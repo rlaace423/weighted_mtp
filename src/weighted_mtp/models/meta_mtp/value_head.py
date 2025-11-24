@@ -7,7 +7,7 @@ from torch import nn
 
 
 class LinearValueHead(nn.Module):
-    """단일 Linear layer value head (표준 PPO style)
+    """단일 Linear layer value head (MSE loss용)
 
     구조: hidden_size → 1
 
@@ -41,6 +41,47 @@ class LinearValueHead(nn.Module):
             value: [batch, seq, 1]
         """
         return self.linear(hidden_states)
+
+
+class SigmoidValueHead(nn.Module):
+    """Linear + Sigmoid value head (BCE loss용)
+
+    구조: hidden_size → 1 → Sigmoid
+    출력이 [0, 1] 확률값이므로 BCE loss와 함께 사용
+    MC (gamma=1, lam=1)일 때만 사용 가능
+
+    Args:
+        hidden_size: Transformer hidden dimension
+        bias: Linear layer bias (기본값 False, RLHF 표준)
+    """
+
+    def __init__(self, hidden_size: int, bias: bool = False):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.head_type = "sigmoid"
+
+        self.linear = nn.Linear(hidden_size, 1, bias=bias)
+        self.sigmoid = nn.Sigmoid()
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """RLHF 표준 초기화: zero init"""
+        nn.init.zeros_(self.linear.weight)
+        if self.linear.bias is not None:
+            nn.init.zeros_(self.linear.bias)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Forward pass
+
+        Args:
+            hidden_states: [batch, seq, hidden_size]
+
+        Returns:
+            value: [batch, seq, 1] (0~1 확률값)
+        """
+        logits = self.linear(hidden_states)
+        return self.sigmoid(logits)
 
 
 class MLPValueHead(nn.Module):
@@ -92,7 +133,7 @@ class MLPValueHead(nn.Module):
 
 
 # Type alias
-ValueHeadType = Union[LinearValueHead, MLPValueHead]
+ValueHeadType = Union[LinearValueHead, SigmoidValueHead, MLPValueHead]
 
 
 def create_value_head(hidden_size: int, head_type: str = "mlp") -> ValueHeadType:
@@ -100,17 +141,19 @@ def create_value_head(hidden_size: int, head_type: str = "mlp") -> ValueHeadType
 
     Args:
         hidden_size: Transformer hidden dimension
-        head_type: "linear" 또는 "mlp"
+        head_type: "linear", "sigmoid", 또는 "mlp"
 
     Returns:
         ValueHead 인스턴스
     """
     if head_type == "linear":
         return LinearValueHead(hidden_size)
+    elif head_type == "sigmoid":
+        return SigmoidValueHead(hidden_size)
     elif head_type == "mlp":
         return MLPValueHead(hidden_size)
     else:
-        raise ValueError(f"Unknown value head type: {head_type}. Use 'linear' or 'mlp'.")
+        raise ValueError(f"Unknown value head type: {head_type}. Use 'linear', 'sigmoid', or 'mlp'.")
 
 
 # 하위 호환성을 위한 alias

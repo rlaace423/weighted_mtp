@@ -3,8 +3,10 @@
 #
 # 사용법:
 #   ./scripts/vessl/critic.sh --ngpus 4
+#   ./scripts/vessl/critic.sh --ngpus 4 --value-head sigmoid
+#   ./scripts/vessl/critic.sh --ngpus 4 --value-head mlp
 #   ./scripts/vessl/critic.sh --ngpus 1 --batch-size 8 --grad-accum 2
-#   ./scripts/vessl/critic.sh --ngpus 4 --n-samples 50000
+#   ./scripts/vessl/critic.sh --ngpus 4 --max-samples 50000
 
 set -e
 
@@ -12,7 +14,8 @@ set -e
 NGPUS=4
 BATCH_SIZE=""
 GRAD_ACCUM=""
-N_SAMPLES=""
+MAX_SAMPLES=""
+VALUE_HEAD="sigmoid"  # sigmoid, linear, mlp
 USE_CUSTOM_IMAGE=false
 
 # CLI 인자 파싱
@@ -34,17 +37,30 @@ while [[ $# -gt 0 ]]; do
       USE_CUSTOM_IMAGE=true
       shift 1
       ;;
-    --n-samples)
-      N_SAMPLES="$2"
+    --max-samples)
+      MAX_SAMPLES="$2"
+      shift 2
+      ;;
+    --value-head)
+      VALUE_HEAD="$2"
       shift 2
       ;;
     *)
       echo "알 수 없는 옵션: $1"
-      echo "사용법: $0 --ngpus <1|2|4> [--batch-size N] [--grad-accum N] [--n-samples N] [--use-custom-image]"
+      echo "사용법: $0 --ngpus <1|2|4> [--value-head sigmoid|linear|mlp] [--batch-size N] [--grad-accum N] [--max-samples N] [--use-custom-image]"
       exit 1
       ;;
   esac
 done
+
+# value_head 검증
+case $VALUE_HEAD in
+  sigmoid|linear|mlp) ;;
+  *)
+    echo "오류: VALUE_HEAD=$VALUE_HEAD (sigmoid, linear, mlp만 지원)"
+    exit 1
+    ;;
+esac
 
 # Preset 자동 선택
 case $NGPUS in
@@ -62,14 +78,20 @@ CONFIG="configs/critic/critic.yaml"
 
 # Override 인자 생성
 OVERRIDE_ARGS=""
+# value_head_type 설정
+OVERRIDE_ARGS="$OVERRIDE_ARGS --override training.value_head_type=$VALUE_HEAD"
+# sigmoid는 MC 필수
+if [ "$VALUE_HEAD" = "sigmoid" ]; then
+  OVERRIDE_ARGS="$OVERRIDE_ARGS --override training.gamma=1.0 --override training.lam=1.0"
+fi
 if [ -n "$BATCH_SIZE" ]; then
   OVERRIDE_ARGS="$OVERRIDE_ARGS --override training.batch_size=$BATCH_SIZE"
 fi
 if [ -n "$GRAD_ACCUM" ]; then
   OVERRIDE_ARGS="$OVERRIDE_ARGS --override training.gradient_accumulation_steps=$GRAD_ACCUM"
 fi
-if [ -n "$N_SAMPLES" ]; then
-  OVERRIDE_ARGS="$OVERRIDE_ARGS --override data_sampling.n_samples=$N_SAMPLES"
+if [ -n "$MAX_SAMPLES" ]; then
+  OVERRIDE_ARGS="$OVERRIDE_ARGS --override data_sampling.problems.max_samples=$MAX_SAMPLES"
 fi
 
 # Train command 생성
@@ -161,9 +183,10 @@ echo "임시 YAML: $TEMP_YAML"
 echo ""
 echo "=== 실행 설정 ==="
 echo "GPU 개수: $NGPUS"
+echo "Value Head: $VALUE_HEAD"
 [ -n "$BATCH_SIZE" ] && echo "Batch Size: $BATCH_SIZE (override)"
 [ -n "$GRAD_ACCUM" ] && echo "Gradient Accumulation: $GRAD_ACCUM (override)"
-[ -n "$N_SAMPLES" ] && echo "N Samples: $N_SAMPLES (override)"
+[ -n "$MAX_SAMPLES" ] && echo "Max Samples: $MAX_SAMPLES (override)"
 
 # VESSL Run 실행
 echo ""
