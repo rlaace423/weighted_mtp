@@ -7,12 +7,82 @@
 from pathlib import Path
 from typing import Optional
 
+from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 from weighted_mtp.data.datasets import load_dataset
 from weighted_mtp.data.collators import AlpacaDataCollator
 from weighted_mtp.runtime.distributed import get_rank, get_world_size
+
+
+def get_curriculum_weights(
+    current_epoch: float,
+    curriculum_schedule: list[dict],
+) -> dict[str, float]:
+    """Curriculum schedule에서 현재 epoch에 맞는 difficulty_weights 추출
+
+    Args:
+        current_epoch: 현재 epoch (0.0 ~ n_epochs)
+        curriculum_schedule: Config의 curriculum_schedule
+
+    Returns:
+        difficulty_weights (예: {"low": 0.7, "medium": 0.3, "high": 0.0})
+    """
+    for schedule in curriculum_schedule:
+        epoch_range = schedule["epoch_range"]
+        if epoch_range[0] <= current_epoch < epoch_range[1]:
+            return dict(schedule["difficulty_weights"])
+
+    # 마지막 schedule 반환 (현재 epoch이 범위 밖인 경우)
+    return dict(curriculum_schedule[-1]["difficulty_weights"])
+
+
+def get_difficulty_config(
+    config: DictConfig,
+    current_epoch: float = 0.0,
+) -> tuple[Optional[dict], Optional[dict]]:
+    """Config에서 difficulty 설정 추출
+
+    우선순위:
+    1. curriculum_schedule 있고 curriculum_learning=true → epoch별 동적 weights
+    2. difficulty_weights 있음 → 정적 weights
+    3. 둘 다 없음 → None (기존 동작 유지)
+
+    Args:
+        config: 전체 config (OmegaConf DictConfig)
+        current_epoch: 현재 epoch (curriculum용)
+
+    Returns:
+        (difficulty_weights, difficulty_bins) - 둘 다 None일 수 있음
+
+    Examples:
+        >>> # 정적 weights 사용
+        >>> weights, bins = get_difficulty_config(config)
+        >>>
+        >>> # curriculum learning (epoch별 동적 weights)
+        >>> weights, bins = get_difficulty_config(config, current_epoch=1.5)
+    """
+    data_sampling = config.data_sampling
+
+    # difficulty_bins 추출
+    difficulty_bins = data_sampling.get("difficulty_bins", None)
+    if difficulty_bins:
+        difficulty_bins = dict(difficulty_bins)
+
+    # 1순위: curriculum_schedule (동적)
+    use_curriculum = data_sampling.get("curriculum_learning", False)
+    curriculum_schedule = data_sampling.get("curriculum_schedule", None)
+
+    if use_curriculum and curriculum_schedule:
+        difficulty_weights = get_curriculum_weights(current_epoch, list(curriculum_schedule))
+    # 2순위: difficulty_weights (정적)
+    elif data_sampling.get("difficulty_weights", None):
+        difficulty_weights = dict(data_sampling.difficulty_weights)
+    else:
+        difficulty_weights = None
+
+    return difficulty_weights, difficulty_bins
 
 
 def create_dataloader(

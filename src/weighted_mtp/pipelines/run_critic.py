@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 
 from weighted_mtp.core.env import ensure_env_loaded
 from weighted_mtp.core.logging import setup_logging
-from weighted_mtp.data.dataloader import create_dataloader
+from weighted_mtp.data.dataloader import create_dataloader, get_difficulty_config
 from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
 from weighted_mtp.models.tokenizer_utils import load_tokenizer_from_config
 from weighted_mtp.utils import (
@@ -93,6 +93,9 @@ def validate_critic(
     total_loss = 0.0
     total_value_var = 0.0
     total_target_var = 0.0
+    total_value_mean = 0.0
+    total_value_std = 0.0
+    total_target_mean = 0.0
     n_batches = 0
 
     # 모델 dtype 감지
@@ -141,11 +144,17 @@ def validate_critic(
             total_loss += value_loss.item()
             total_value_var += value_logits.var().item()
             total_target_var += td_targets.var().item()
+            total_value_mean += value_logits.mean().item()
+            total_value_std += value_logits.std().item()
+            total_target_mean += td_targets.mean().item()
             n_batches += 1
 
     # 평균 metrics 계산
     avg_loss = total_loss / n_batches
     avg_target_var = total_target_var / n_batches
+    avg_value_mean = total_value_mean / n_batches
+    avg_value_std = total_value_std / n_batches
+    avg_target_mean = total_target_mean / n_batches
 
     # Value explained variance 계산
     if avg_target_var > 1e-8:
@@ -156,6 +165,9 @@ def validate_critic(
     metrics = {
         "val_loss": avg_loss,
         "val_explained_variance": explained_var,
+        "val_mean_prediction": avg_value_mean,
+        "val_std_prediction": avg_value_std,
+        "val_return_mean": avg_target_mean,
     }
 
     return metrics
@@ -330,6 +342,11 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Train: {config.dataset.train}")
     logger.info(f"Validation: {config.dataset.validation}")
 
+    # Difficulty 설정 추출 (정적 weights 또는 curriculum)
+    difficulty_weights, difficulty_bins = get_difficulty_config(config)
+    if difficulty_weights:
+        logger.info(f"Difficulty-based sampling: bins={difficulty_bins}, weights={difficulty_weights}")
+
     train_loader = create_dataloader(
         dataset_path=config.dataset.train,
         tokenizer=tokenizer,
@@ -338,8 +355,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         n_samples=config.data_sampling.n_samples,
         auto_data_balancing=config.data_sampling.auto_data_balancing,
         correct_ratio=config.data_sampling.correct_ratio,
-        difficulty_weights=None,
-        difficulty_bins=None,
+        difficulty_weights=difficulty_weights,
+        difficulty_bins=difficulty_bins,
         seed=config.data_sampling.seed,
         shuffle=True,
     )
@@ -355,8 +372,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         n_samples=val_n_samples,
         auto_data_balancing=config.data_sampling.auto_data_balancing,
         correct_ratio=config.data_sampling.correct_ratio,
-        difficulty_weights=None,
-        difficulty_bins=None,
+        difficulty_weights=difficulty_weights,
+        difficulty_bins=difficulty_bins,
         seed=config.data_sampling.seed,
         shuffle=False,
     )
@@ -669,9 +686,15 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         reduced_val = all_reduce_scalars({
             "val_loss": val_metrics["val_loss"],
             "val_explained_variance": val_metrics["val_explained_variance"],
+            "val_mean_prediction": val_metrics["val_mean_prediction"],
+            "val_std_prediction": val_metrics["val_std_prediction"],
+            "val_return_mean": val_metrics["val_return_mean"],
         })
         avg_val_loss = reduced_val["val_loss"]
         avg_val_explained_var = reduced_val["val_explained_variance"]
+        avg_val_mean_pred = reduced_val["val_mean_prediction"]
+        avg_val_std_pred = reduced_val["val_std_prediction"]
+        avg_val_return_mean = reduced_val["val_return_mean"]
 
         # GPU metrics (epoch-level)
         gpu_metrics_epoch = gpu_monitor.get_metrics()
@@ -684,12 +707,15 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         "train/epoch_loss": train_loss_avg,
                         "val/loss": avg_val_loss,
                         "val/explained_variance": avg_val_explained_var,
-                    "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
-                    "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
-                    "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
-                    "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
-                },
-                step=int(current_epoch * 100),  # Epoch을 정수로 변환 (0.5 -> 50)
+                        "val/mean_prediction": avg_val_mean_pred,
+                        "val/std_prediction": avg_val_std_pred,
+                        "val/return_mean": avg_val_return_mean,
+                        "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
+                        "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
+                        "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
+                        "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
+                    },
+                    step=global_step,
                 )
 
         logger.info(
@@ -718,25 +744,25 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             if is_main_process():
                 logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
 
-            # S3 업로드 (비동기)
-            if is_main_process() and use_s3_upload:
-                s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_s3_upload)
+                # S3 업로드 (비동기)
+                if use_s3_upload:
+                    s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_s3_upload)
 
-            # 오래된 checkpoint 정리 (최대 3개 유지)
-            if config.checkpoint.save_total_limit:
-                cleanup_old_checkpoints(
-                    checkpoint_dir=checkpoint_dir,
-                    save_total_limit=config.checkpoint.save_total_limit,
-                )
-
-                # S3 정리 (비동기)
-                if is_main_process() and use_s3_upload:
-                    s3_upload_executor.submit(
-                        cleanup_s3_checkpoints,
-                        experiment_id=mlflow.active_run().info.experiment_id,
-                        run_id=mlflow.active_run().info.run_id,
+                # 오래된 checkpoint 정리
+                if config.checkpoint.save_total_limit:
+                    cleanup_old_checkpoints(
+                        checkpoint_dir=checkpoint_dir,
                         save_total_limit=config.checkpoint.save_total_limit,
                     )
+
+                    # S3 정리 (비동기)
+                    if use_s3_upload:
+                        s3_upload_executor.submit(
+                            cleanup_s3_checkpoints,
+                            experiment_id=mlflow.active_run().info.experiment_id,
+                            run_id=mlflow.active_run().info.run_id,
+                            save_total_limit=config.checkpoint.save_total_limit,
+                        )
         else:
             logger.info(f"Validation loss did not improve ({avg_val_loss:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
 

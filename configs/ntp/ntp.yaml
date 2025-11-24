@@ -43,20 +43,20 @@ dataset:
 
 # 데이터 샘플링
 data_sampling:
-  n_samples: 130000
+  n_samples: 200000 # 기존 13만개 3epoch -> 20만개 2epoch (이전 실험에서 1.5epoch 이후 과적합 확인)
   auto_data_balancing: false
-  correct_ratio: 1.0  # 정답만 학습
+  correct_ratio: 1.0  # Baseline은 정답만 학습
   difficulty_bins:
-    all: [1, 25]  # 0 제외
-  curriculum_schedule:
-    - epoch_range: [0.0, 3.0]
-      difficulty_weights:
-        all: 1.0
+    diff_7: [7, 7]    # 데이터 많음 (약 90만 -> 비중 축소 필요)
+    else: [8, 25]     # 데이터 적당 (약 60만)
+  difficulty_weights:
+    diff_7: 0.35  # 90만개 중 일부만 샘플링 (약 35% 할당)
+    else: 0.65    # 어려운 문제 집중 (약 60% 할당)
   seed: 42
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
-  n_epochs: 3.0
+  n_epochs: 2.0
   batch_size: 32  # Per GPU
   gradient_accumulation_steps: 1  # Effective batch size = 128
   learning_rate: 5.0e-5

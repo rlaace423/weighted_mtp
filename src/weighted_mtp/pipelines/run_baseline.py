@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 
 from weighted_mtp.core.env import ensure_env_loaded
 from weighted_mtp.core.logging import setup_logging
-from weighted_mtp.data.dataloader import create_dataloader
+from weighted_mtp.data.dataloader import create_dataloader, get_difficulty_config
 from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
 from weighted_mtp.models.tokenizer_utils import load_tokenizer_from_config
 from weighted_mtp.utils import (
@@ -249,6 +249,11 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Train: {config.dataset.train}")
     logger.info(f"Validation: {config.dataset.validation}")
 
+    # Difficulty 설정 추출 (정적 weights 또는 curriculum)
+    difficulty_weights, difficulty_bins = get_difficulty_config(config)
+    if difficulty_weights:
+        logger.info(f"Difficulty-based sampling: bins={difficulty_bins}, weights={difficulty_weights}")
+
     train_loader = create_dataloader(
         dataset_path=config.dataset.train,
         tokenizer=tokenizer,
@@ -257,6 +262,8 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
         n_samples=config.data_sampling.n_samples,
         auto_data_balancing=config.data_sampling.auto_data_balancing,
         correct_ratio=config.data_sampling.correct_ratio,
+        difficulty_weights=difficulty_weights,
+        difficulty_bins=difficulty_bins,
         seed=config.data_sampling.seed,
         shuffle=True,
     )
@@ -272,6 +279,8 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
         n_samples=val_n_samples,
         auto_data_balancing=config.data_sampling.auto_data_balancing,
         correct_ratio=config.data_sampling.correct_ratio,
+        difficulty_weights=difficulty_weights,
+        difficulty_bins=difficulty_bins,
         seed=config.data_sampling.seed,
         shuffle=False,
     )
@@ -550,7 +559,7 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
         # Throughput metrics 계산
         throughput_metrics = throughput_tracker.get_epoch_metrics()
 
-        # Epoch-level 로깅
+        # Epoch-level 로깅 (global_step 기준으로 train/loss와 동일한 x축 사용)
         if is_main_process():
             if use_mlflow:
                 mlflow.log_metrics(
@@ -562,7 +571,7 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
                         "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
                     },
-                    step=int(current_epoch * 100),
+                    step=global_step,
                 )
 
         logger.info(f"Validation - Loss: {val_metrics['val_loss']:.4f}")
@@ -588,25 +597,25 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             if is_main_process():
                 logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
 
-            # S3 업로드 (비동기)
-            if is_main_process() and use_s3_upload:
-                s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_s3_upload)
+                # S3 업로드 (비동기)
+                if use_s3_upload:
+                    s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_s3_upload)
 
-            # 오래된 checkpoint 정리
-            if config.checkpoint.save_total_limit:
-                cleanup_old_checkpoints(
-                    checkpoint_dir=checkpoint_dir,
-                    save_total_limit=config.checkpoint.save_total_limit,
-                )
-
-                # S3 정리 (비동기)
-                if is_main_process() and use_s3_upload:
-                    s3_upload_executor.submit(
-                        cleanup_s3_checkpoints,
-                        experiment_id=mlflow.active_run().info.experiment_id,
-                        run_id=mlflow.active_run().info.run_id,
+                # 오래된 checkpoint 정리
+                if config.checkpoint.save_total_limit:
+                    cleanup_old_checkpoints(
+                        checkpoint_dir=checkpoint_dir,
                         save_total_limit=config.checkpoint.save_total_limit,
                     )
+
+                    # S3 정리 (비동기)
+                    if use_s3_upload:
+                        s3_upload_executor.submit(
+                            cleanup_s3_checkpoints,
+                            experiment_id=mlflow.active_run().info.experiment_id,
+                            run_id=mlflow.active_run().info.run_id,
+                            save_total_limit=config.checkpoint.save_total_limit,
+                        )
         else:
             logger.info(f"Validation loss did not improve ({avg_val_loss:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
 

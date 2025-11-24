@@ -24,6 +24,9 @@ def save_checkpoint(
 ) -> None:
     """Checkpoint 저장 (FSDP 지원)
 
+    FSDP 환경에서는 모든 rank가 state_dict gathering에 참여해야 하며,
+    실제 파일 저장은 rank 0만 수행합니다.
+
     Args:
         adapter: MetaLlamaMTPAdapter (FSDP-wrapped 또는 일반 모델)
         optimizer: torch.optim.Optimizer
@@ -36,14 +39,15 @@ def save_checkpoint(
     Saved checkpoint format:
         {
             "epoch": float,
-            "adapter_state_dict": dict,  # 전체 adapter (Stage 2 final checkpoint용)
-            "value_head_state_dict": dict,  # Value head만 (Stage 2 초기화용)
+            "adapter_state_dict": dict,
+            "value_head_state_dict": dict,
             "optimizer_state_dict": dict,
             "train_metrics": dict,
             "val_metrics": dict,
-            "config": dict,  # 학습 설정 (모델 경로 등)
+            "config": dict,
         }
     """
+    import torch.distributed as dist
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
     from torch.distributed.fsdp.fully_sharded_data_parallel import (
         StateDictType,
@@ -52,9 +56,8 @@ def save_checkpoint(
     from weighted_mtp.runtime.fsdp import unwrap_model
 
     checkpoint_path = Path(checkpoint_path)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # FSDP Full state dict gathering
+    # FSDP Full state dict gathering (모든 rank가 참여해야 함)
     if isinstance(adapter, FSDP):
         with FSDP.state_dict_type(
             adapter,
@@ -62,9 +65,16 @@ def save_checkpoint(
             FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
         ):
             adapter_state_dict = adapter.state_dict()
+
+        # rank 0만 실제 저장 수행
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
     else:
         # 일반 모델 (single-device 환경)
         adapter_state_dict = adapter.state_dict()
+
+    # 이하 저장 로직 (rank 0만 실행)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
     checkpoint = {
         "epoch": epoch,
@@ -75,8 +85,7 @@ def save_checkpoint(
         "config": config,
     }
 
-    # Value head state dict 별도 저장 (FSDP/일반 모델 모두)
-    # unwrap 후 접근하여 FSDP wrapper와 무관하게 동일 처리
+    # Value head state dict 별도 저장
     unwrapped_adapter = unwrap_model(adapter)
     if hasattr(unwrapped_adapter, "value_head") and unwrapped_adapter.value_head is not None:
         checkpoint["value_head_state_dict"] = unwrapped_adapter.value_head.state_dict()

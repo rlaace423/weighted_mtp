@@ -18,7 +18,11 @@ from torch.utils.data import DataLoader
 
 from weighted_mtp.core.env import ensure_env_loaded
 from weighted_mtp.core.logging import setup_logging
-from weighted_mtp.data.dataloader import create_dataloader
+from weighted_mtp.data.dataloader import (
+    create_dataloader,
+    get_curriculum_weights,
+    get_difficulty_config,
+)
 from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
 from weighted_mtp.models.tokenizer_utils import load_tokenizer_from_config
 from weighted_mtp.utils import (
@@ -54,28 +58,6 @@ from weighted_mtp.value_weighting.td_weighting import (
     compute_td_stats,
     compute_weight_stats,
 )
-
-
-def get_curriculum_weights(
-    current_epoch: float,
-    curriculum_schedule: list[dict],
-) -> dict[str, float]:
-    """Curriculum schedule에서 현재 epoch에 맞는 difficulty_weights 추출
-
-    Args:
-        current_epoch: 현재 epoch (0.0 ~ n_epochs)
-        curriculum_schedule: Config의 curriculum_schedule
-
-    Returns:
-        difficulty_weights (예: {"low": 0.7, "medium": 0.3, "high": 0.0})
-    """
-    for schedule in curriculum_schedule:
-        epoch_range = schedule["epoch_range"]
-        if epoch_range[0] <= current_epoch < epoch_range[1]:
-            return schedule["difficulty_weights"]
-
-    # 마지막 schedule 반환 (현재 epoch이 범위 밖인 경우)
-    return curriculum_schedule[-1]["difficulty_weights"]
 
 
 def validate_verifiable(
@@ -350,19 +332,18 @@ def run_verifiable_training(
     # Curriculum learning 설정
     use_curriculum = config.data_sampling.get("curriculum_learning", False)
     curriculum_schedule = config.data_sampling.get("curriculum_schedule", [])
-    difficulty_bins = config.data_sampling.get("difficulty_bins", None)
+
+    # Difficulty 설정 추출 (get_difficulty_config 활용)
+    initial_weights, difficulty_bins = get_difficulty_config(config, current_epoch=0.0)
 
     if use_curriculum:
         logger.info("Curriculum Learning: Enabled")
         logger.info(f"Difficulty bins: {difficulty_bins}")
     else:
-        logger.info("Curriculum Learning: Disabled")
-
-    # 초기 DataLoader 생성 (epoch 0.0 기준)
-    if use_curriculum and curriculum_schedule:
-        initial_weights = get_curriculum_weights(0.0, curriculum_schedule)
-    else:
-        initial_weights = None
+        if initial_weights:
+            logger.info(f"Difficulty-based sampling: bins={difficulty_bins}, weights={initial_weights}")
+        else:
+            logger.info("Curriculum Learning: Disabled")
 
     logger.info(f"Dataset: {config.dataset.name}")
     logger.info(f"Train: {config.dataset.train}")
@@ -393,7 +374,7 @@ def run_verifiable_training(
         n_samples=val_n_samples,
         auto_data_balancing=config.data_sampling.auto_data_balancing,
         correct_ratio=config.data_sampling.correct_ratio,
-        difficulty_weights=initial_weights if use_curriculum else None,
+        difficulty_weights=initial_weights,
         difficulty_bins=difficulty_bins,
         seed=config.data_sampling.seed,
         shuffle=False,
@@ -805,7 +786,7 @@ def run_verifiable_training(
                     "val/weighted_ce_loss": avg_val_weighted_ce,
                     "val/value_loss": avg_val_value,
                 },
-                step=int(current_epoch * 100),
+                step=global_step,
             )
 
         logger.info(
@@ -839,25 +820,25 @@ def run_verifiable_training(
             if is_main_process():
                 logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
 
-            # S3 업로드 (비동기)
-            if is_main_process() and use_s3_upload:
-                s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_s3_upload)
+                # S3 업로드 (비동기)
+                if use_s3_upload:
+                    s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_s3_upload)
 
-            # 오래된 checkpoint 정리 (최대 3개 유지)
-            if config.checkpoint.get("save_total_limit"):
-                cleanup_old_checkpoints(
-                    checkpoint_dir=checkpoint_dir,
-                    save_total_limit=config.checkpoint.save_total_limit,
-                )
-
-                # S3 정리 (비동기)
-                if is_main_process() and use_s3_upload:
-                    s3_upload_executor.submit(
-                        cleanup_s3_checkpoints,
-                        experiment_id=mlflow.active_run().info.experiment_id,
-                        run_id=mlflow.active_run().info.run_id,
+                # 오래된 checkpoint 정리
+                if config.checkpoint.get("save_total_limit"):
+                    cleanup_old_checkpoints(
+                        checkpoint_dir=checkpoint_dir,
                         save_total_limit=config.checkpoint.save_total_limit,
                     )
+
+                    # S3 정리 (비동기)
+                    if use_s3_upload:
+                        s3_upload_executor.submit(
+                            cleanup_s3_checkpoints,
+                            experiment_id=mlflow.active_run().info.experiment_id,
+                            run_id=mlflow.active_run().info.run_id,
+                            save_total_limit=config.checkpoint.save_total_limit,
+                        )
         else:
             logger.info(f"Validation loss did not improve ({avg_val_total:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
 

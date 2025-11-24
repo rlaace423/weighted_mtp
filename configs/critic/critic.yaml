@@ -47,10 +47,8 @@ data_sampling:
   correct_ratio: 0.5  # Correct/Incorrect 균형
   difficulty_bins:
     all: [1, 25]  # 0 제외
-  curriculum_schedule:
-    - epoch_range: [0.0, 3.0]
-      difficulty_weights:
-        all: 1.0
+  difficulty_weights:
+    all: 1.0
   seed: 42
 
 # 학습 설정 (H200 4-GPU 최적화)
