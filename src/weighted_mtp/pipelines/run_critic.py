@@ -370,7 +370,6 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Validation: {config.dataset.validation}")
 
     # sampling_config를 dict로 변환
-    from omegaconf import OmegaConf
     sampling_config = OmegaConf.to_container(config.data_sampling, resolve=True)
     sampling_method = sampling_config.get("sampling_method")
     logger.info(f"샘플링 방식: {sampling_method}")

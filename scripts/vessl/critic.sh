@@ -73,17 +73,15 @@ case $NGPUS in
     ;;
 esac
 
-# Config 설정 (항상 critic.yaml 사용)
-CONFIG="configs/critic/critic.yaml"
+# Config 설정 (value_head에 따라 선택)
+CONFIG="configs/critic/critic_${VALUE_HEAD}.yaml"
+if [ ! -f "$CONFIG" ]; then
+  echo "오류: Config 파일을 찾을 수 없습니다: $CONFIG"
+  exit 1
+fi
 
 # Override 인자 생성
 OVERRIDE_ARGS=""
-# value_head_type 설정
-OVERRIDE_ARGS="$OVERRIDE_ARGS --override training.value_head_type=$VALUE_HEAD"
-# sigmoid는 MC 필수
-if [ "$VALUE_HEAD" = "sigmoid" ]; then
-  OVERRIDE_ARGS="$OVERRIDE_ARGS --override training.gamma=1.0 --override training.lam=1.0"
-fi
 if [ -n "$BATCH_SIZE" ]; then
   OVERRIDE_ARGS="$OVERRIDE_ARGS --override training.batch_size=$BATCH_SIZE"
 fi

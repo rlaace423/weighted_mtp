@@ -40,7 +40,6 @@ def save_checkpoint(
         {
             "epoch": float,
             "adapter_state_dict": dict,
-            "value_head_state_dict": dict,
             "optimizer_state_dict": dict,
             "train_metrics": dict,
             "val_metrics": dict,
@@ -53,7 +52,6 @@ def save_checkpoint(
         StateDictType,
         FullStateDictConfig,
     )
-    from weighted_mtp.runtime.fsdp import unwrap_model
 
     checkpoint_path = Path(checkpoint_path)
 
@@ -84,11 +82,6 @@ def save_checkpoint(
         "val_metrics": val_metrics,
         "config": config,
     }
-
-    # Value head state dict 별도 저장
-    unwrapped_adapter = unwrap_model(adapter)
-    if hasattr(unwrapped_adapter, "value_head") and unwrapped_adapter.value_head is not None:
-        checkpoint["value_head_state_dict"] = unwrapped_adapter.value_head.state_dict()
 
     torch.save(checkpoint, checkpoint_path)
     logger.info(f"Checkpoint 저장 완료: {checkpoint_path}")
