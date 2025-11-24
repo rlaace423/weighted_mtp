@@ -84,7 +84,7 @@ training:
 # 체크포인트
 checkpoint:
   save_dir: storage/checkpoints/rho1/${experiment.name}
-  save_checkpoint_every: 0.5
+  save_checkpoint_every: 0.25
   save_best: true
   save_final: true
   save_total_limit: 3

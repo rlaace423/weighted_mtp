@@ -76,23 +76,28 @@ def compute_mtp_selective_weights(
         mask_k = attention_mask[:, k:k+valid_len]                      # [batch, valid_len]
 
         # Per-token CE loss (float32로 계산하여 정밀도 보장)
+        # labels=-100인 토큰은 제외 (ignore_index)
         policy_ce = F.cross_entropy(
             policy_logits_k.reshape(-1, vocab_size),
             labels_k.reshape(-1),
-            reduction='none'
+            reduction='none',
+            ignore_index=-100,
         ).view(batch_size, valid_len).float()
 
         ref_ce = F.cross_entropy(
             ref_logits_k.reshape(-1, vocab_size),
             labels_k.reshape(-1),
-            reduction='none'
+            reduction='none',
+            ignore_index=-100,
         ).view(batch_size, valid_len).float()
 
         # Signed excess loss (NOT abs)
         excess_loss = policy_ce - ref_ce  # [batch, valid_len], float32
 
         # Batch-wise top-k selection
-        valid_mask = mask_k.bool()
+        # labels=-100인 토큰도 제외 (instruction tokens)
+        valid_label_mask = (labels_k != -100)
+        valid_mask = mask_k.bool() & valid_label_mask
         valid_excess = excess_loss[valid_mask]
 
         if valid_excess.numel() == 0:
@@ -104,12 +109,13 @@ def compute_mtp_selective_weights(
         threshold = torch.quantile(valid_excess, 1 - k_percent)
 
         # Binary selection: 1 if >= threshold, 0 otherwise
-        selected = (excess_loss >= threshold).float() * mask_k.float()
+        # valid_mask를 사용하여 labels=-100 토큰도 제외
+        selected = (excess_loss >= threshold).float() * valid_mask.float()
         weights[:, :valid_len, head_idx] = selected
 
         # Statistics
         stats[f'head_{head_idx}_count'] = selected.sum().item()
-        total_valid = mask_k.sum().item()
+        total_valid = valid_mask.sum().item()
         stats[f'head_{head_idx}_ratio'] = selected.sum().item() / (total_valid + 1e-8)
         stats[f'head_{head_idx}_excess_mean'] = valid_excess.mean().item()
         stats[f'head_{head_idx}_threshold'] = threshold.item()

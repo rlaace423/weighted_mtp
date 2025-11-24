@@ -180,12 +180,17 @@ def validate_rho1(
                     policy_logits_k.reshape(-1, vocab_size),
                     labels_k.reshape(-1),
                     reduction="none",
+                    ignore_index=-100,
                 )
 
-                # 모델 dtype 일치
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.to(model_dtype).reshape(-1)
+                # labels=-100인 토큰은 loss=0, mask에서도 제외
+                valid_label_mask_k = (labels_k != -100).float()
+                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
 
-                mask_sum_k = mask_k.to(model_dtype).sum()
+                # 모델 dtype 일치
+                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
+
+                mask_sum_k = combined_mask_k.sum()
                 if mask_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
 
@@ -476,12 +481,17 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     policy_logits_k.reshape(-1, vocab_size),
                     labels_k.reshape(-1),
                     reduction="none",
+                    ignore_index=-100,
                 )
 
-                # 모델 dtype 일치
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * mask_k.to(model_dtype).reshape(-1)
+                # labels=-100인 토큰은 loss=0, mask에서도 제외
+                valid_label_mask_k = (labels_k != -100).float()
+                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
 
-                mask_sum_k = mask_k.to(model_dtype).sum()
+                # 모델 dtype 일치
+                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
+
+                mask_sum_k = combined_mask_k.sum()
                 if mask_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
 

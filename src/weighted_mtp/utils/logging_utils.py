@@ -226,11 +226,13 @@ def compute_classification_metrics_from_counts(
     Returns:
         메트릭 딕셔너리:
             - pred_gap: correct - incorrect 평균 예측값 차이
+            - mean_correct: correct 토큰 평균 예측값
+            - mean_incorrect: incorrect 토큰 평균 예측값
             - precision: TP / (TP + FP)
             - recall: TP / (TP + FN)
             - f1: 2 * P * R / (P + R)
     """
-    # Pred gap 계산
+    # 평균 예측값 계산
     mean_correct = correct_sum / (correct_count + 1e-8)
     mean_incorrect = incorrect_sum / (incorrect_count + 1e-8)
     pred_gap = mean_correct - mean_incorrect if correct_count > 0 and incorrect_count > 0 else 0.0
@@ -242,6 +244,8 @@ def compute_classification_metrics_from_counts(
 
     return {
         "pred_gap": pred_gap,
+        "mean_correct": mean_correct,
+        "mean_incorrect": mean_incorrect,
         "precision": precision,
         "recall": recall,
         "f1": f1,

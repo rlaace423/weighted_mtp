@@ -177,6 +177,8 @@ def validate_critic(
     metrics = {
         "val_loss": avg_loss,
         "val_pred_gap": cls_metrics["pred_gap"],
+        "val_mean_correct": cls_metrics["mean_correct"],
+        "val_mean_incorrect": cls_metrics["mean_incorrect"],
         "val_precision": cls_metrics["precision"],
         "val_recall": cls_metrics["recall"],
         "val_f1": cls_metrics["f1"],
@@ -612,13 +614,30 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     valid_values = value_logits[valid_label_mask.bool()]
                     value_std = valid_values.std().item() if valid_values.numel() > 0 else 0.0
 
-                    # Loss와 std all_reduce (1회 통신)
+                    # 배치 단위 mean_correct/mean_incorrect 계산
+                    batch_correct_mask = is_correct.bool()
+                    batch_incorrect_mask = ~batch_correct_mask
+                    valid_mask_2d_step = valid_label_mask.squeeze(-1).bool()
+
+                    # correct 시퀀스 내 토큰 평균
+                    correct_token_mask = batch_correct_mask.view(-1, 1).expand_as(valid_mask_2d_step) & valid_mask_2d_step
+                    batch_mean_correct = value_logits.squeeze(-1)[correct_token_mask].mean().item() if correct_token_mask.any() else 0.0
+
+                    # incorrect 시퀀스 내 토큰 평균
+                    incorrect_token_mask = batch_incorrect_mask.view(-1, 1).expand_as(valid_mask_2d_step) & valid_mask_2d_step
+                    batch_mean_incorrect = value_logits.squeeze(-1)[incorrect_token_mask].mean().item() if incorrect_token_mask.any() else 0.0
+
+                    # Loss, std, mean_correct/incorrect all_reduce (1회 통신)
                     reduced = all_reduce_scalars({
                         "loss": value_loss.item(),
                         "value_std": value_std,
+                        "mean_correct": batch_mean_correct,
+                        "mean_incorrect": batch_mean_incorrect,
                     })
                     avg_loss = reduced["loss"]
                     avg_value_std = reduced["value_std"]
+                    avg_mean_correct = reduced["mean_correct"]
+                    avg_mean_incorrect = reduced["mean_incorrect"]
 
                     # Value head LR 가져오기 (param_groups[1]이 value_head)
                     value_head_lr = optimizer.param_groups[1]["lr"] if len(optimizer.param_groups) > 1 else optimizer.param_groups[0]["lr"]
@@ -631,6 +650,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                                     "train/grad_norm": avg_grad_norm_post,
                                     "train/learning_rate": value_head_lr,
                                     "value/std": avg_value_std,
+                                    "value/mean_correct": avg_mean_correct,
+                                    "value/mean_incorrect": avg_mean_incorrect,
                                     "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
                                     "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
                                 },
@@ -718,12 +739,16 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         reduced_val = all_reduce_scalars({
             "val_loss": val_metrics["val_loss"],
             "val_pred_gap": val_metrics["val_pred_gap"],
+            "val_mean_correct": val_metrics["val_mean_correct"],
+            "val_mean_incorrect": val_metrics["val_mean_incorrect"],
             "val_precision": val_metrics["val_precision"],
             "val_recall": val_metrics["val_recall"],
             "val_f1": val_metrics["val_f1"],
         })
         avg_val_loss = reduced_val["val_loss"]
         avg_val_pred_gap = reduced_val["val_pred_gap"]
+        avg_val_mean_correct = reduced_val["val_mean_correct"]
+        avg_val_mean_incorrect = reduced_val["val_mean_incorrect"]
         avg_val_precision = reduced_val["val_precision"]
         avg_val_recall = reduced_val["val_recall"]
         avg_val_f1 = reduced_val["val_f1"]
@@ -738,13 +763,15 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     {
                         # Train metrics
                         "train/epoch_loss": train_loss_avg,
-                        "train/pred_gap": train_cls_metrics["pred_gap"],
+                        "train/mean_correct": train_cls_metrics["mean_correct"],
+                        "train/mean_incorrect": train_cls_metrics["mean_incorrect"],
                         "train/precision": train_cls_metrics["precision"],
                         "train/recall": train_cls_metrics["recall"],
                         "train/f1": train_cls_metrics["f1"],
                         # Validation metrics
                         "val/loss": avg_val_loss,
-                        "val/pred_gap": avg_val_pred_gap,
+                        "val/mean_correct": avg_val_mean_correct,
+                        "val/mean_incorrect": avg_val_mean_incorrect,
                         "val/precision": avg_val_precision,
                         "val/recall": avg_val_recall,
                         "val/f1": avg_val_f1,
