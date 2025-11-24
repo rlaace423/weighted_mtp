@@ -95,6 +95,7 @@ def create_dataloader(
     correct_ratio: float = 0.5,
     difficulty_weights: Optional[dict] = None,
     difficulty_bins: Optional[dict] = None,
+    problem_id_filter: Optional[dict] = None,
     seed: int = 42,
     shuffle: bool = True,
 ) -> DataLoader:
@@ -113,6 +114,7 @@ def create_dataloader(
         correct_ratio: correct 샘플 비율 (0.5 = 50:50)
         difficulty_weights: 난이도별 가중치 (curriculum learning용, Optional)
         difficulty_bins: 난이도 구간 정의 (Optional)
+        problem_id_filter: Problem ID 기반 필터 조건 (accuracy_range, sample_count_range)
         seed: 랜덤 시드
         shuffle: 셔플 여부
 
@@ -161,6 +163,7 @@ def create_dataloader(
         correct_ratio=correct_ratio,
         difficulty_weights=difficulty_weights,
         difficulty_bins=difficulty_bins,
+        problem_id_filter=problem_id_filter,
         seed=seed,
         rank=rank,
         world_size=world_size,

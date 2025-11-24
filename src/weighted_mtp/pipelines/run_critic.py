@@ -365,6 +365,12 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     if difficulty_weights:
         logger.info(f"Difficulty-based sampling: bins={difficulty_bins}, weights={difficulty_weights}")
 
+    # Problem ID 필터 설정 추출
+    problem_id_filter = config.data_sampling.get("problem_id_filter", None)
+    if problem_id_filter:
+        problem_id_filter = dict(problem_id_filter)
+        logger.info(f"Problem ID 기반 필터링: {problem_id_filter}")
+
     train_loader = create_dataloader(
         dataset_path=config.dataset.train,
         tokenizer=tokenizer,
@@ -375,6 +381,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         correct_ratio=config.data_sampling.correct_ratio,
         difficulty_weights=difficulty_weights,
         difficulty_bins=difficulty_bins,
+        problem_id_filter=problem_id_filter,
         seed=config.data_sampling.seed,
         shuffle=True,
     )
@@ -389,6 +396,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         correct_ratio=config.data_sampling.correct_ratio,
         difficulty_weights=None,
         difficulty_bins=None,
+        problem_id_filter=problem_id_filter,
         seed=config.data_sampling.seed,
         shuffle=False,
     )
@@ -537,7 +545,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             # Mask padded tokens AND instruction tokens (labels != -100)
             valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
-            loss_mask = valid_label_mask
+            attn_mask_expanded = attention_mask.unsqueeze(-1).to(model_dtype)
+            loss_mask = valid_label_mask * attn_mask_expanded
 
             # Value loss 계산 (MSE)
             loss_per_token = torch.nn.functional.mse_loss(

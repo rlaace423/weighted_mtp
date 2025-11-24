@@ -33,6 +33,7 @@ def load_dataset(
     correct_ratio: float = 0.5,
     difficulty_weights: Optional[dict] = None,
     difficulty_bins: Optional[dict] = None,
+    problem_id_filter: Optional[dict] = None,
     seed: int = 42,
     rank: int = 0,
     world_size: int = 1,
@@ -60,6 +61,7 @@ def load_dataset(
         correct_ratio: correct 샘플 비율 (기본 0.5)
         difficulty_weights: 난이도별 가중치 (Difficulty-based sampling용)
         difficulty_bins: 난이도 구간 정의 (Difficulty-based sampling용)
+        problem_id_filter: Problem ID 기반 필터 조건 (accuracy_range, sample_count_range)
         seed: 랜덤 시드
         rank: 현재 프로세스의 global rank (기본: 0)
         world_size: 전체 프로세스 수 (기본: 1)
@@ -87,6 +89,7 @@ def load_dataset(
         correct_ratio=correct_ratio,
         difficulty_weights=difficulty_weights,
         difficulty_bins=difficulty_bins,
+        problem_id_filter=problem_id_filter,
         seed=seed,
     )
 
@@ -232,6 +235,7 @@ def _compute_sampling_indices_from_metadata(
     correct_ratio: float,
     difficulty_weights: Optional[dict],
     difficulty_bins: Optional[dict],
+    problem_id_filter: Optional[dict],
     seed: int,
 ) -> list[int]:
     """메타데이터 기반으로 샘플링 인덱스 계산 (Config-driven 자동 전략 결정)
@@ -240,10 +244,11 @@ def _compute_sampling_indices_from_metadata(
     Config 파라미터에 따라 샘플링 전략을 자동으로 결정합니다.
 
     샘플링 전략 우선순위:
-    1. difficulty_weights가 있으면 → Difficulty-based sampling
-    2. auto_data_balancing=True면 → Balanced sampling
-    3. correct_ratio=1.0이면 → Correct-only sampling
-    4. 기본값 → Random sampling
+    1. problem_id_filter가 있으면 → Problem ID 기반 필터링
+    2. difficulty_weights가 있으면 → Difficulty-based sampling
+    3. auto_data_balancing=True면 → Balanced sampling
+    4. correct_ratio=1.0이면 → Correct-only sampling
+    5. 기본값 → Random sampling
 
     Args:
         metadata: 메타데이터 리스트
@@ -252,6 +257,7 @@ def _compute_sampling_indices_from_metadata(
         correct_ratio: correct 샘플 비율
         difficulty_weights: 난이도별 가중치
         difficulty_bins: 난이도 구간 정의
+        problem_id_filter: Problem ID 기반 필터 조건 (accuracy_range, sample_count_range)
         seed: 랜덤 시드
 
     Returns:
@@ -262,7 +268,15 @@ def _compute_sampling_indices_from_metadata(
 
     total_samples = len(metadata)
 
-    # 1. Difficulty-based sampling (우선순위 최상)
+    # 1. Problem ID 기반 필터링 (우선순위 최상)
+    if problem_id_filter is not None:
+        logger.info("샘플링 전략: Problem ID 기반 필터링")
+        return _sample_by_problem_id(
+            metadata, n_samples, problem_id_filter,
+            auto_data_balancing, correct_ratio, seed
+        )
+
+    # 2. Difficulty-based sampling
     if difficulty_weights is not None and difficulty_bins is not None:
         logger.info("샘플링 전략: Difficulty-based curriculum learning")
         return _sample_by_difficulty(
@@ -270,21 +284,21 @@ def _compute_sampling_indices_from_metadata(
             auto_data_balancing, correct_ratio, seed
         )
 
-    # 2. Balanced correct/incorrect sampling
+    # 3. Balanced correct/incorrect sampling
     if auto_data_balancing:
         logger.info(f"샘플링 전략: Balanced sampling (correct_ratio={correct_ratio})")
         return _sample_balanced(
             metadata, n_samples, correct_ratio, seed
         )
 
-    # 3. Correct-only sampling
+    # 4. Correct-only sampling
     if correct_ratio == 1.0:
         logger.info("샘플링 전략: Correct-only sampling")
         return _sample_correct_only(
             metadata, n_samples, seed
         )
 
-    # 4. Random sampling (fallback)
+    # 5. Random sampling (fallback)
     logger.info("샘플링 전략: Random sampling")
     indices = random.sample(range(total_samples), min(n_samples, total_samples))
     logger.info(f"Random 샘플링 완료: {len(indices)} 인덱스")
@@ -659,6 +673,142 @@ def _sample_correct_only(
     random.shuffle(selected_indices)
 
     logger.info(f"Correct-only 샘플링 완료: {len(selected_indices)} 인덱스 (정답만)")
+
+    return selected_indices
+
+
+def _sample_by_problem_id(
+    metadata: list[dict],
+    n_samples: int,
+    problem_id_filter: dict,
+    auto_data_balancing: bool,
+    correct_ratio: float,
+    seed: int,
+) -> list[int]:
+    """Problem ID 기반 필터링 샘플링
+
+    problem_id별 정답률과 샘플수 조건에 맞는 샘플만 필터링하여 샘플링합니다.
+
+    Args:
+        metadata: 메타데이터 리스트
+        n_samples: 샘플링할 샘플 수
+        problem_id_filter: 필터 조건
+            - accuracy_range: [min, max] 정답률 범위 (0.0 ~ 1.0)
+            - sample_count_range: [min, max] 샘플수 범위
+        auto_data_balancing: is_correct 균형 샘플링 여부
+        correct_ratio: correct 샘플 비율
+        seed: 랜덤 시드
+
+    Returns:
+        선택된 인덱스 리스트
+    """
+    random.seed(seed)
+
+    # 필터 조건 추출
+    accuracy_range = problem_id_filter.get("accuracy_range", [0.0, 1.0])
+    sample_count_range = problem_id_filter.get("sample_count_range", [1, float('inf')])
+
+    min_accuracy, max_accuracy = accuracy_range
+    min_samples, max_samples = sample_count_range
+
+    logger.info(f"=== Problem ID 기반 필터링 ===")
+    logger.info(f"정답률 범위: {min_accuracy*100:.0f}%-{max_accuracy*100:.0f}%")
+    logger.info(f"샘플수 범위: {min_samples}-{max_samples}")
+
+    # problem_id 필드 확인
+    if "problem_id" not in metadata[0]:
+        raise ValueError(
+            "problem_id 필드가 메타데이터에 없습니다. "
+            "먼저 metadata에 problem_id를 추가하세요."
+        )
+
+    # problem_id별 통계 계산
+    from collections import defaultdict
+    problem_stats = defaultdict(lambda: {"correct": 0, "incorrect": 0, "indices": {"correct": [], "incorrect": []}})
+
+    for idx, meta in enumerate(metadata):
+        pid = meta.get("problem_id")
+        is_correct = meta.get("is_correct", True)
+
+        if is_correct:
+            problem_stats[pid]["correct"] += 1
+            problem_stats[pid]["indices"]["correct"].append(idx)
+        else:
+            problem_stats[pid]["incorrect"] += 1
+            problem_stats[pid]["indices"]["incorrect"].append(idx)
+
+    # 조건에 맞는 problem_id 필터링
+    valid_problems = []
+    for pid, stats in problem_stats.items():
+        total = stats["correct"] + stats["incorrect"]
+        accuracy = stats["correct"] / total if total > 0 else 0
+
+        if (min_accuracy <= accuracy <= max_accuracy and
+            min_samples <= total <= max_samples):
+            valid_problems.append(pid)
+
+    logger.info(f"전체 문제: {len(problem_stats)}개, 조건 충족: {len(valid_problems)}개")
+
+    if len(valid_problems) == 0:
+        raise ValueError(
+            f"조건을 충족하는 문제가 없습니다. "
+            f"정답률: {min_accuracy*100:.0f}%-{max_accuracy*100:.0f}%, "
+            f"샘플수: {min_samples}-{max_samples}"
+        )
+
+    # 유효한 problem_id의 인덱스 수집
+    correct_indices = []
+    incorrect_indices = []
+
+    for pid in valid_problems:
+        correct_indices.extend(problem_stats[pid]["indices"]["correct"])
+        incorrect_indices.extend(problem_stats[pid]["indices"]["incorrect"])
+
+    total_available = len(correct_indices) + len(incorrect_indices)
+    logger.info(f"가용 샘플: C={len(correct_indices):,}, I={len(incorrect_indices):,}, 합계={total_available:,}")
+
+    # 샘플링 수행
+    if auto_data_balancing:
+        # 균형 샘플링
+        n_correct_target = int(n_samples * correct_ratio)
+        n_incorrect_target = n_samples - n_correct_target
+
+        n_correct_actual = min(n_correct_target, len(correct_indices))
+        n_incorrect_actual = min(n_incorrect_target, len(incorrect_indices))
+
+        # 부족 시 보충
+        if n_correct_actual + n_incorrect_actual < n_samples:
+            shortage = n_samples - (n_correct_actual + n_incorrect_actual)
+            if len(correct_indices) > n_correct_actual:
+                n_correct_actual = min(n_correct_actual + shortage, len(correct_indices))
+            elif len(incorrect_indices) > n_incorrect_actual:
+                n_incorrect_actual = min(n_incorrect_actual + shortage, len(incorrect_indices))
+
+        sampled_correct = random.sample(correct_indices, n_correct_actual) if n_correct_actual > 0 else []
+        sampled_incorrect = random.sample(incorrect_indices, n_incorrect_actual) if n_incorrect_actual > 0 else []
+
+        selected_indices = sampled_correct + sampled_incorrect
+
+        actual_ratio = len(sampled_correct) / len(selected_indices) if selected_indices else 0
+        logger.info(f"샘플링 결과: C={len(sampled_correct):,}, I={len(sampled_incorrect):,}, 비율={actual_ratio:.1%}")
+    else:
+        # 단순 랜덤 샘플링
+        all_indices = correct_indices + incorrect_indices
+        selected_indices = random.sample(all_indices, min(n_samples, len(all_indices)))
+        logger.info(f"샘플링 결과: {len(selected_indices):,}개")
+
+    # 섞기
+    random.shuffle(selected_indices)
+
+    # 부족 시 에러
+    if len(selected_indices) < n_samples:
+        raise ValueError(
+            f"데이터 부족: {n_samples - len(selected_indices):,}개 부족. "
+            f"요청: {n_samples:,}, 가용: {len(selected_indices):,}. "
+            f"n_samples를 {len(selected_indices):,} 이하로 설정하세요."
+        )
+
+    logger.info(f"Problem ID 기반 샘플링 완료: {len(selected_indices):,} 인덱스")
 
     return selected_indices
 

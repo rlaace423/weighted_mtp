@@ -118,12 +118,15 @@ def validate_baseline(
                     logits_k.reshape(-1, vocab_size),
                     labels_k.reshape(-1),
                     reduction="none",
+                    ignore_index=-100,
                 )
 
-                # 균등 가중치 (weight=1.0, 모델 dtype 일치)
-                masked_ce_k = ce_loss_k * mask_k.to(model_dtype).reshape(-1)
+                # Output 토큰만 학습 (instruction/input/padding 제외)
+                valid_label_mask_k = (labels_k != -100).float()
+                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
+                masked_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
 
-                mask_sum_k = mask_k.to(model_dtype).sum()
+                mask_sum_k = combined_mask_k.sum()
                 if mask_sum_k > 0:
                     batch_ce_loss += masked_ce_k.sum() / mask_sum_k
 
@@ -421,12 +424,15 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     logits_k.reshape(-1, vocab_size),
                     labels_k.reshape(-1),
                     reduction="none",
+                    ignore_index=-100,
                 )
 
-                # 균등 가중치 (weight=1.0, 모델 dtype 일치)
-                masked_ce_k = ce_loss_k * mask_k.to(model_dtype).reshape(-1)
+                # Output 토큰만 학습 (instruction/input/padding 제외)
+                valid_label_mask_k = (labels_k != -100).float()
+                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
+                masked_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
 
-                mask_sum_k = mask_k.to(model_dtype).sum()
+                mask_sum_k = combined_mask_k.sum()
                 if mask_sum_k > 0:
                     batch_ce_loss += masked_ce_k.sum() / mask_sum_k
 
