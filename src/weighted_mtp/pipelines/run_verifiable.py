@@ -18,11 +18,7 @@ from torch.utils.data import DataLoader
 
 from weighted_mtp.core.env import ensure_env_loaded
 from weighted_mtp.core.logging import setup_logging
-from weighted_mtp.data.dataloader import (
-    create_dataloader,
-    get_curriculum_weights,
-    get_difficulty_config,
-)
+from weighted_mtp.data.dataloader import create_dataloader
 from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
 from weighted_mtp.models.tokenizer_utils import load_tokenizer_from_config
 from weighted_mtp.utils import (
@@ -336,50 +332,37 @@ def run_verifiable_training(
     n_epochs = config.training.n_epochs
     save_checkpoint_every = config.checkpoint.save_checkpoint_every
 
-    # Curriculum learning 설정
-    use_curriculum = config.data_sampling.get("curriculum_learning", False)
-    curriculum_schedule = config.data_sampling.get("curriculum_schedule", [])
-
-    # Difficulty 설정 추출 (get_difficulty_config 활용)
-    initial_weights, difficulty_bins = get_difficulty_config(config, current_epoch=0.0)
-
-    if use_curriculum:
-        logger.info("Curriculum Learning: Enabled")
-        logger.info(f"Difficulty bins: {difficulty_bins}")
-    else:
-        if initial_weights:
-            logger.info(f"Difficulty-based sampling: bins={difficulty_bins}, weights={initial_weights}")
-        else:
-            logger.info("Curriculum Learning: Disabled")
-
     logger.info(f"Dataset: {config.dataset.name}")
     logger.info(f"Train: {config.dataset.train}")
     logger.info(f"Validation: {config.dataset.validation}")
+
+    # sampling_config를 dict로 변환
+    sampling_config = OmegaConf.to_container(config.data_sampling, resolve=True)
+    sampling_method = sampling_config.get("sampling_method")
+    logger.info(f"샘플링 방식: {sampling_method}")
 
     train_loader = create_dataloader(
         dataset_path=config.dataset.train,
         tokenizer=tokenizer,
         batch_size=config.training.batch_size,
         max_length=config.dataset.max_length,
-        n_samples=config.data_sampling.n_samples,
-        auto_data_balancing=config.data_sampling.auto_data_balancing,
-        correct_ratio=config.data_sampling.correct_ratio,
-        difficulty_weights=initial_weights,
-        difficulty_bins=difficulty_bins,
+        sampling_config=sampling_config,
         seed=config.data_sampling.seed,
         shuffle=True,
     )
+
+    # Validation용 sampling_config (동일 방식, val_n_samples 사용)
+    val_sampling_config = sampling_config.copy()
+    if sampling_method == "difficulty":
+        val_sampling_config["difficulty"] = val_sampling_config.get("difficulty", {}).copy()
+        val_sampling_config["difficulty"]["n_samples"] = config.data_sampling.val_n_samples
 
     val_loader = create_dataloader(
         dataset_path=config.dataset.validation,
         tokenizer=tokenizer,
         batch_size=config.training.batch_size,
         max_length=config.dataset.max_length,
-        n_samples=config.data_sampling.val_n_samples,
-        auto_data_balancing=config.data_sampling.auto_data_balancing,
-        correct_ratio=config.data_sampling.correct_ratio,
-        difficulty_weights=None,
-        difficulty_bins=None,
+        sampling_config=val_sampling_config,
         seed=config.data_sampling.seed,
         shuffle=False,
     )
@@ -432,9 +415,6 @@ def run_verifiable_training(
     # 모델 dtype 감지
     model_dtype = next(adapter.parameters()).dtype
 
-    # Curriculum learning: 이전 weights 추적 (중복 DataLoader 생성 방지)
-    prev_curriculum_weights = initial_weights
-
     # FSDP 워밍업: 첫 forward에서 all-gather 동기화 문제 방지
     logger.info("FSDP warmup forward pass 시작...")
     adapter.eval()
@@ -467,34 +447,6 @@ def run_verifiable_training(
 
         # Throughput 추적 시작
         throughput_tracker.start_epoch()
-
-        # Curriculum learning: 현재 epoch에 맞는 difficulty_weights 계산
-        if use_curriculum and curriculum_schedule:
-            current_weights = get_curriculum_weights(current_epoch, curriculum_schedule)
-            logger.info(f"Curriculum weights: {current_weights}")
-
-            # weights가 변경된 경우에만 DataLoader 재생성
-            if current_weights != prev_curriculum_weights:
-                logger.info("Curriculum weights 변경 감지, DataLoader 재생성")
-                train_loader = create_dataloader(
-                    dataset_path=config.dataset.train,
-                    tokenizer=tokenizer,
-                    batch_size=config.training.batch_size,
-                    max_length=config.dataset.max_length,
-                    n_samples=config.data_sampling.n_samples,
-                    auto_data_balancing=config.data_sampling.auto_data_balancing,
-                    correct_ratio=config.data_sampling.correct_ratio,
-                    difficulty_weights=current_weights,
-                    difficulty_bins=difficulty_bins,
-                    seed=config.data_sampling.seed + int(current_epoch * 1000),
-                    shuffle=True,
-                )
-                prev_curriculum_weights = current_weights
-
-                # DataLoader 재생성 후 동기화
-                barrier()
-            else:
-                logger.info("Curriculum weights 동일, 기존 DataLoader 재사용")
 
         # DataLoader에서 필요한 만큼만 사용
         epoch_train_loader = iter(train_loader)

@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: baseline-mtp
+  name: baseline-mtp-final
   description: "Baseline MTP with uniform weights (all tokens weight=1.0)"
   stage: baseline
   tags:
@@ -42,17 +42,20 @@ dataset:
 
 # 데이터 샘플링
 data_sampling:
-  n_samples: 200000 # 기존 13만개 3epoch -> 20만개 2epoch (이전 실험에서 1.5epoch 이후 과적합 확인)
-  val_n_samples: 1000
-  auto_data_balancing: false
-  correct_ratio: 1.0  # Baseline은 정답만 학습
-  difficulty_bins:
-    diff_7: [7, 7]    # 데이터 많음 (약 90만 -> 비중 축소 필요)
-    else: [8, 25]     # 데이터 적당 (약 60만)
-  difficulty_weights:
-    diff_7: 0.35  # 90만개 중 일부만 샘플링 (약 35% 할당)
-    else: 0.65    # 어려운 문제 집중 (약 60% 할당)
+  sampling_method: "difficulty"
   seed: 42
+  val_n_samples: 2000
+
+  difficulty:
+    n_samples: 200000  # 기존 13만개 3epoch -> 20만개 2epoch (이전 실험에서 1.5epoch 이후 과적합 확인)
+    auto_data_balancing: false
+    correct_ratio: 1.0  # Baseline은 정답만 학습
+    bins:
+      diff_7: [7, 7]    # 데이터 많음 (약 90만 -> 비중 축소 필요)
+      else: [8, 25]     # 데이터 적당 (약 60만)
+    weights:
+      diff_7: 0.35  # 90만개 중 일부만 샘플링 (약 35% 할당)
+      else: 0.65    # 어려운 문제 집중 (약 60% 할당)
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
@@ -72,7 +75,7 @@ training:
 # 체크포인트
 checkpoint:
   save_dir: storage/checkpoints/baseline/${experiment.name}
-  save_checkpoint_every: 0.25
+  save_checkpoint_every: 0.2
   save_best: true
   save_final: true
   save_total_limit: 3

@@ -20,7 +20,7 @@ from transformers import AutoModelForCausalLM
 
 from weighted_mtp.core.env import ensure_env_loaded
 from weighted_mtp.core.logging import setup_logging
-from weighted_mtp.data.dataloader import create_dataloader, get_difficulty_config
+from weighted_mtp.data.dataloader import create_dataloader
 from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
 from weighted_mtp.models.tokenizer_utils import load_tokenizer_from_config
 from weighted_mtp.utils import (
@@ -326,35 +326,33 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Train: {config.dataset.train}")
     logger.info(f"Validation: {config.dataset.validation}")
 
-    # Difficulty 설정 추출 (정적 weights 또는 curriculum)
-    difficulty_weights, difficulty_bins = get_difficulty_config(config)
-    if difficulty_weights:
-        logger.info(f"Difficulty-based sampling: bins={difficulty_bins}, weights={difficulty_weights}")
+    # sampling_config를 dict로 변환
+    sampling_config = OmegaConf.to_container(config.data_sampling, resolve=True)
+    sampling_method = sampling_config.get("sampling_method")
+    logger.info(f"샘플링 방식: {sampling_method}")
 
     train_loader = create_dataloader(
         dataset_path=config.dataset.train,
         tokenizer=tokenizer,
         batch_size=config.training.batch_size,
         max_length=config.dataset.max_length,
-        n_samples=config.data_sampling.n_samples,
-        auto_data_balancing=config.data_sampling.auto_data_balancing,
-        correct_ratio=config.data_sampling.correct_ratio,
-        difficulty_weights=difficulty_weights,
-        difficulty_bins=difficulty_bins,
+        sampling_config=sampling_config,
         seed=config.data_sampling.seed,
         shuffle=True,
     )
+
+    # Validation용 sampling_config (동일 방식, val_n_samples 사용)
+    val_sampling_config = sampling_config.copy()
+    if sampling_method == "difficulty":
+        val_sampling_config["difficulty"] = val_sampling_config.get("difficulty", {}).copy()
+        val_sampling_config["difficulty"]["n_samples"] = config.data_sampling.val_n_samples
 
     val_loader = create_dataloader(
         dataset_path=config.dataset.validation,
         tokenizer=tokenizer,
         batch_size=config.training.batch_size,
         max_length=config.dataset.max_length,
-        n_samples=config.data_sampling.val_n_samples,
-        auto_data_balancing=config.data_sampling.auto_data_balancing,
-        correct_ratio=config.data_sampling.correct_ratio,
-        difficulty_weights=None,
-        difficulty_bins=None,
+        sampling_config=val_sampling_config,
         seed=config.data_sampling.seed,
         shuffle=False,
     )

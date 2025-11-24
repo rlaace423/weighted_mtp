@@ -289,6 +289,7 @@ cd ~/grad_school/wooshikwon/weighted_mtp
 
 # Baseline MTP
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+  --master_port=29501 \
   -m weighted_mtp.pipelines.run_baseline \
   --config configs/baseline/baseline.yaml
 
