@@ -164,6 +164,7 @@ def validate_rho1(
 
             # 5. Weighted CE loss (per-head)
             batch_weighted_ce_loss = 0.0
+            valid_heads = 0
 
             for k in range(1, n_future + 1):
                 valid_len = seq_len - k
@@ -194,8 +195,9 @@ def validate_rho1(
                 selected_sum_k = (weights_k.reshape(-1) * combined_mask_k.reshape(-1)).sum()
                 if selected_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / selected_sum_k
+                    valid_heads += 1
 
-            weighted_ce_loss = batch_weighted_ce_loss / n_future
+            weighted_ce_loss = batch_weighted_ce_loss / max(valid_heads, 1)
 
             # 6. Metrics 수집
             total_weighted_ce_loss += weighted_ce_loss.item()
@@ -480,6 +482,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             # Weighted CE loss (per-head)
             batch_weighted_ce_loss = 0.0
+            valid_heads = 0
 
             for k in range(1, n_future + 1):
                 valid_len = seq_len - k
@@ -510,8 +513,9 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 selected_sum_k = (weights_k.reshape(-1) * combined_mask_k.reshape(-1)).sum()
                 if selected_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / selected_sum_k
+                    valid_heads += 1
 
-            weighted_ce_loss = batch_weighted_ce_loss / n_future
+            weighted_ce_loss = batch_weighted_ce_loss / max(valid_heads, 1)
 
             # Loss scaling (gradient accumulation 적용)
             scaled_loss = weighted_ce_loss / gradient_accumulation_steps
