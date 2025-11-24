@@ -61,7 +61,7 @@ training:
   max_grad_norm: 1.0
   gamma: 1.0
   lam: 1.0  # MC (sigmoid value_head_type 필수 조건)
-  num_unfrozen_layers: 1
+  num_unfrozen_layers: 0
   value_head_type: mlp  # BCE loss + Sigmoid
   log_interval: 1
 
