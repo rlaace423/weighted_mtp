@@ -59,8 +59,8 @@ training:
   trunk_learning_rate: 5e-6  # Trunk LR (미사용, num_unfrozen_layers=0)
   value_head_learning_rate: 3e-4  # Value head peak LR
   max_grad_norm: 1.0
-  gamma: 1.0
-  lam: 1.0  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
+  gamma: 0.99
+  lam: 0.95  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
   num_unfrozen_layers: 1  # Value head만 학습 (backbone 동결)
   value_head_type: linear  # "linear" (4096→1) 또는 "mlp" (4096→512→256→1)
   log_interval: 1

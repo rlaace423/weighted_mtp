@@ -45,7 +45,7 @@ data_sampling:
   n_samples: 200000
   val_n_samples: 1000
   auto_data_balancing: true
-  correct_ratio: 0.5  # Correct/Incorrect 균형
+  correct_ratio: 1.0  # Correct/Incorrect 균형
   difficulty_bins:
     diff_7: [7, 7]    # 데이터 많음 (약 90만 -> 비중 축소 필요)
     else: [8, 25]     # 데이터 적당 (약 60만)
