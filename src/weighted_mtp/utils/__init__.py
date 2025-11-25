@@ -7,6 +7,7 @@ from weighted_mtp.utils.checkpoint_utils import (
     cleanup_old_checkpoints,
     load_checkpoint_for_evaluation,
     save_checkpoint,
+    save_hf_checkpoint,
 )
 from weighted_mtp.utils.evaluation_utils import (
     compute_pass_at_k,
@@ -52,6 +53,7 @@ __all__ = [
     "cleanup_old_checkpoints",
     "load_checkpoint_for_evaluation",
     "save_checkpoint",
+    "save_hf_checkpoint",
     # Evaluation utils
     "compute_pass_at_k",
     "evaluate_gsm8k_answer",

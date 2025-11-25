@@ -1,9 +1,9 @@
-name: weighted-mtp-rho1-{{NGPUS}}gpu
-description: Rho-1 WMTP A100 {{NGPUS}}-GPU 프로덕션 학습
+name: weighted-mtp-ref-tuning-{{NGPUS}}gpu
+description: Reference Model Fine-tuning A100 {{NGPUS}}-GPU (HuggingFace NTP)
 tags:
   - weighted-mtp
-  - rho1
-  - reference-weighting
+  - ref-tuning
+  - huggingface
   - a100
   - {{NGPUS}}gpu
   - production
@@ -40,7 +40,7 @@ run:
       echo "Datasets:"
       ls -lh storage/datasets/ | head -5
 
-      echo "=== Rho-1 WMTP 학습 시작 ({{NGPUS}}-GPU) ==="
+      echo "=== Reference Model Fine-tuning 시작 ({{NGPUS}}-GPU) ==="
       {{TRAIN_COMMAND}}
 
       echo "=== 학습 완료 ==="

@@ -100,11 +100,10 @@ storage:
   datasets_dir: storage/datasets
   checkpoints_dir: storage/checkpoints
 
-# MLflow 추적
+# MLflow 추적 (로컬 파일 기반)
 mlflow:
-  tracking_uri: "http://13.50.240.176"
+  tracking_uri: ""  # 빈 문자열 = ./mlruns 디렉터리 사용
   experiment: "weighted-mtp/production"
-  s3_artifacts: "s3://wmtp/mlflow-artifacts"
 
 # 로깅
 logging:

@@ -1,25 +1,25 @@
-# Baseline MTP Local Test (Micro model)
+# Reference Model Fine-tuning Local Test
 # M3 Mac 경량 테스트용
 
 project:
   name: weighted-mtp
-  version: "0.2.0"
+  version: "2.0.0"
 
 experiment:
-  name: baseline-mtp-local
-  description: "Local test with micro model (uniform weights)"
-  stage: baseline
+  name: ref-tuning-local
+  description: "Local test for reference model fine-tuning"
+  stage: ref-tuning
   tags:
-    - baseline
+    - ref-tuning
     - local
-    - micro-model
+    - huggingface
 
+# 모델 설정 (HuggingFace 형식)
 models:
   policy:
-    name: micro-mtp
-    path: storage/models/micro-mtp
-    tokenizer_path: storage/models/meta-llama-mtp/tokenizer
-    dtype: float16
+    name: micro-ref-hf
+    path: storage/models/micro-ref-hf
+    dtype: float32
 
 dataset:
   name: codecontests
@@ -30,10 +30,10 @@ dataset:
 data_sampling:
   sampling_method: "difficulty"
   seed: 42
-  val_n_samples: 100
+  val_n_samples: 10
 
   difficulty:
-    n_samples: 500
+    n_samples: 20
     auto_data_balancing: false
     correct_ratio: 1.0
     bins:
@@ -44,44 +44,43 @@ data_sampling:
       else: 0.65
 
 training:
-  n_epochs: 0.2
+  n_epochs: 0.1
   batch_size: 2
   gradient_accumulation_steps: 2
-  learning_rate: 1.0e-5
+  learning_rate: 2.0e-5
   max_grad_norm: 1.0
   log_interval: 5
 
-  # Learning rate scheduler
   lr_scheduler:
     type: cosine
     warmup_ratio: 0.05
     min_lr_ratio: 0.0
 
 checkpoint:
-  save_dir: storage/checkpoints/baseline/${experiment.name}
-  save_checkpoint_every: 0.2
+  save_dir: storage/checkpoints/ref-tuning/${experiment.name}
+  save_checkpoint_every: 0.1
   save_best: true
   save_final: true
   save_total_limit: 2
+  s3_upload: false
 
 runtime:
   device: mps
   seed: 42
   mixed_precision: false
 
-storage:
-  root: storage
-  models_dir: storage/models
-  datasets_dir: storage/datasets
-  checkpoints_dir: storage/checkpoints
-  s3_bucket: "s3://wmtp"
-  s3_checkpoints_prefix: "checkpoints/baseline"
-
 distributed:
   fsdp:
     sharding_strategy: NO_SHARD
     mixed_precision: false
     cpu_offload: false
+    activation_checkpointing: false
+
+storage:
+  root: storage
+  models_dir: storage/models
+  datasets_dir: storage/datasets
+  checkpoints_dir: storage/checkpoints
 
 mlflow:
   tracking_uri: ""

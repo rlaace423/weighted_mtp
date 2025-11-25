@@ -136,7 +136,7 @@ def validate_config(config: DictConfig) -> None:
 
     # 2. Stage 값 검증
     if hasattr(config, "experiment") and hasattr(config.experiment, "stage"):
-        valid_stages = ["baseline", "critic", "verifiable", "rho1"]
+        valid_stages = ["baseline", "critic", "verifiable", "rho1", "ref-tuning"]
         stage = config.experiment.stage
         if stage not in valid_stages:
             errors.append(f"잘못된 stage: {stage}. 유효 값: {valid_stages}")

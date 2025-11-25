@@ -25,6 +25,26 @@ from weighted_mtp.runtime.distributed import is_distributed, is_main_process
 logger = logging.getLogger(__name__)
 
 
+def _detect_transformer_layer_cls(model: torch.nn.Module) -> set:
+    """모델 타입에 따른 Transformer Layer 클래스 감지
+
+    Args:
+        model: 원본 모델
+
+    Returns:
+        FSDP auto_wrap_policy에 사용할 transformer_layer_cls set
+    """
+    # HuggingFace LlamaForCausalLM 감지
+    # model.model.layers 구조를 가짐
+    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+        return {LlamaDecoderLayer}
+
+    # MetaLlamaMTPAdapter (기본)
+    from weighted_mtp.models.meta_mtp.transformer import TransformerBlock
+    return {TransformerBlock}
+
+
 def wrap_model_fsdp(
     model: torch.nn.Module,
     device: torch.device,
@@ -37,6 +57,7 @@ def wrap_model_fsdp(
     """FSDP로 모델 래핑
 
     Distributed 환경에서만 FSDP 적용, MPS/CPU local test는 skip
+    MetaLlamaMTPAdapter와 HuggingFace LlamaForCausalLM 모두 지원
 
     Args:
         model: 원본 모델
@@ -86,12 +107,12 @@ def wrap_model_fsdp(
     # CPU offload 설정
     cpu_offload_config = CPUOffload(offload_params=True) if cpu_offload else None
 
-    # Auto Wrap Policy 설정 (TransformerBlock 단위 wrapping)
-    from weighted_mtp.models.meta_mtp.transformer import TransformerBlock
+    # Auto Wrap Policy 설정 (모델 타입에 따라 자동 감지)
+    transformer_layer_cls = _detect_transformer_layer_cls(model)
 
     fsdp_auto_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
-        transformer_layer_cls={TransformerBlock},
+        transformer_layer_cls=transformer_layer_cls,
     )
 
     # FSDP wrapping
@@ -119,10 +140,12 @@ def wrap_model_fsdp(
             checkpoint_impl=CheckpointImpl.NO_REENTRANT,
         )
 
+        # 모델 타입에 따른 체크 함수 생성
+        layer_cls_tuple = tuple(transformer_layer_cls)
         apply_activation_checkpointing(
             wrapped_model,
             checkpoint_wrapper_fn=non_reentrant_wrapper,
-            check_fn=lambda submodule: isinstance(submodule, TransformerBlock),
+            check_fn=lambda submodule: isinstance(submodule, layer_cls_tuple),
         )
 
     if is_main_process():

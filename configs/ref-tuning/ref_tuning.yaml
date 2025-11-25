@@ -1,5 +1,5 @@
-# Baseline MTP (Uniform Weighting)
-# 균등 가중치 기반 표준 MTP (비교 기준선)
+# Reference Model Fine-tuning (HuggingFace NTP)
+# Rho-1에서 사용할 Reference Model을 codecontests 도메인에 적응
 # 프로덕션 설정 (VESSL H200 4-GPU)
 
 # 프로젝트 정보
@@ -9,28 +9,20 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: baseline-mtp-final
-  description: "Baseline MTP with uniform weights (all tokens weight=1.0)"
-  stage: baseline
+  name: ref-tuning-codecontests
+  description: "Reference model fine-tuning for Rho-1 (HuggingFace LlamaForCausalLM)"
+  stage: ref-tuning
   tags:
-    - baseline
-    - uniform-weight
+    - ref-tuning
+    - huggingface
+    - ntp
     - production
 
-# 모델 설정
+# 모델 설정 (HuggingFace 형식)
 models:
   policy:
-    name: meta-llama-mtp
-    path: storage/models/meta-llama-mtp
-    tokenizer_path: storage/models/meta-llama-mtp/tokenizer
-    params:
-      dim: 4096
-      n_layers: 32
-      n_heads: 32
-      n_future_tokens: 4
-      intermediate_size: 11008
-      rope_theta: 10000.0
-      vocab_size: 32000
+    name: ref-sheared-llama-2.7b
+    path: storage/models/ref-sheared-llama-2.7b/raw
     dtype: bfloat16
 
 # 데이터셋 설정
@@ -40,29 +32,29 @@ dataset:
   validation: storage/datasets/codecontests/processed/valid.jsonl
   max_length: 2048
 
-# 데이터 샘플링
+# 데이터 샘플링 (Rho-1과 동일: 정답만 학습)
 data_sampling:
   sampling_method: "difficulty"
   seed: 42
   val_n_samples: 1000
 
   difficulty:
-    n_samples: 200000  # 기존 13만개 3epoch -> 20만개 2epoch (이전 실험에서 1.5epoch 이후 과적합 확인)
+    n_samples: 100000
     auto_data_balancing: false
-    correct_ratio: 1.0  # Baseline은 정답만 학습
+    correct_ratio: 1.0
     bins:
-      diff_7: [7, 7]    # 데이터 많음 (약 90만 -> 비중 축소 필요)
-      else: [8, 25]     # 데이터 적당 (약 60만)
+      diff_7: [7, 7]
+      else: [8, 25]
     weights:
-      diff_7: 0.35  # 90만개 중 일부만 샘플링 (약 35% 할당)
-      else: 0.65    # 어려운 문제 집중 (약 60% 할당)
+      diff_7: 0.35
+      else: 0.65
 
-# 학습 설정 (H200 4-GPU 최적화)
+# 학습 설정 (2.7B 모델, 2-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 32  # Per GPU
-  gradient_accumulation_steps: 1  # Effective batch size = 128
-  learning_rate: 5.0e-5 
+  batch_size: 32
+  gradient_accumulation_steps: 2
+  learning_rate: 5.0e-5
   max_grad_norm: 0.1
   log_interval: 1
 
@@ -74,7 +66,7 @@ training:
 
 # 체크포인트
 checkpoint:
-  save_dir: storage/checkpoints/baseline/${experiment.name}
+  save_dir: storage/checkpoints/ref-tuning/${experiment.name}
   save_checkpoint_every: 0.2
   save_best: true
   save_final: true

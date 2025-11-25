@@ -1,16 +1,14 @@
 #!/bin/bash
-# VESSL Run: Verifiable WMTP (Unified)
+# VESSL Run: Reference Model Fine-tuning (HuggingFace NTP)
 #
 # 사용법:
-#   ./scripts/vessl/verifiable.sh --ngpus 4
-#   ./scripts/vessl/verifiable.sh --ngpus 4 --critic-checkpoint storage/checkpoints/critic/best.pt
-#   ./scripts/vessl/verifiable.sh --ngpus 4 --batch-size 4 --grad-accum 4
+#   ./scripts/vessl/ref_tuning.sh --ngpus 2
+#   ./scripts/vessl/ref_tuning.sh --ngpus 2 --n-samples 100 --batch-size 8
 
 set -e
 
 # 기본값
-NGPUS=4
-CRITIC_CHECKPOINT=""
+NGPUS=2
 BATCH_SIZE=""
 GRAD_ACCUM=""
 N_SAMPLES=""
@@ -21,10 +19,6 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --ngpus)
       NGPUS="$2"
-      shift 2
-      ;;
-    --critic-checkpoint)
-      CRITIC_CHECKPOINT="$2"
       shift 2
       ;;
     --batch-size)
@@ -45,7 +39,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "알 수 없는 옵션: $1"
-      echo "사용법: $0 --ngpus <1|2|4> [--critic-checkpoint <경로>] [--batch-size N] [--grad-accum N] [--n-samples N] [--use-custom-image]"
+      echo "사용법: $0 --ngpus <1|2|4> [--batch-size N] [--grad-accum N] [--n-samples N] [--use-custom-image]"
       exit 1
       ;;
   esac
@@ -62,14 +56,11 @@ case $NGPUS in
     ;;
 esac
 
-# Config (모든 GPU 수에 대해 동일)
-CONFIG="configs/verifiable/verifiable.yaml"
+# Config
+CONFIG="configs/ref-tuning/ref_tuning.yaml"
 
 # Override 인자 생성
 OVERRIDE_ARGS=""
-if [ -n "$CRITIC_CHECKPOINT" ]; then
-  OVERRIDE_ARGS="$OVERRIDE_ARGS --override experiment.critic_checkpoint=\\\"\$CRITIC_CHECKPOINT\\\""
-fi
 if [ -n "$BATCH_SIZE" ]; then
   OVERRIDE_ARGS="$OVERRIDE_ARGS --override training.batch_size=$BATCH_SIZE"
 fi
@@ -77,17 +68,16 @@ if [ -n "$GRAD_ACCUM" ]; then
   OVERRIDE_ARGS="$OVERRIDE_ARGS --override training.gradient_accumulation_steps=$GRAD_ACCUM"
 fi
 if [ -n "$N_SAMPLES" ]; then
-  OVERRIDE_ARGS="$OVERRIDE_ARGS --override data_sampling.n_samples=$N_SAMPLES"
+  OVERRIDE_ARGS="$OVERRIDE_ARGS --override data_sampling.difficulty.n_samples=$N_SAMPLES"
 fi
 
 # Train command 생성
 if [ "$NGPUS" -eq 1 ]; then
-  TRAIN_CMD="uv run python -m weighted_mtp.pipelines.run_verifiable --config $CONFIG$OVERRIDE_ARGS"
-  NCCL_DEBUG=""
+  TRAIN_CMD="uv run python -m weighted_mtp.pipelines.run_ref_tuning --config $CONFIG$OVERRIDE_ARGS"
+  NCCL_ENV_VARS=""
 else
-  TRAIN_CMD="uv run torchrun --nproc_per_node=$NGPUS --nnodes=1 --node_rank=0 -m weighted_mtp.pipelines.run_verifiable --config $CONFIG$OVERRIDE_ARGS"
-  # NCCL 환경변수 (디버깅 강화)
-  NCCL_DEBUG="\n  NCCL_TIMEOUT: \"3600\"\n  NCCL_IB_DISABLE: \"1\"\n  NCCL_SOCKET_IFNAME: \"eth0\"\n  NCCL_DEBUG: \"WARN\"\n  NCCL_DEBUG_SUBSYS: \"ALL\"\n  NCCL_ASYNC_ERROR_HANDLING: \"1\""
+  TRAIN_CMD="uv run torchrun --nproc_per_node=$NGPUS --nnodes=1 --node_rank=0 -m weighted_mtp.pipelines.run_ref_tuning --config $CONFIG$OVERRIDE_ARGS"
+  NCCL_ENV_VARS="\n  NCCL_TIMEOUT: \"3600\"\n  NCCL_IB_DISABLE: \"1\"\n  NCCL_SOCKET_IFNAME: \"eth0\"\n  NCCL_DEBUG: \"INFO\""
 fi
 
 # .env 파일 로드
@@ -101,7 +91,7 @@ fi
 
 # 임시 YAML 파일 생성
 TEMP_YAML=$(mktemp)
-cp scripts/vessl/verifiable.yaml.template "$TEMP_YAML"
+cp scripts/vessl/ref_tuning.yaml.template "$TEMP_YAML"
 
 # Image 및 Setup Command 설정
 if [ "$USE_CUSTOM_IMAGE" = true ]; then
@@ -143,11 +133,10 @@ fi
 sed -i.bak "s|{{NGPUS}}|$NGPUS|g" "$TEMP_YAML"
 sed -i.bak "s|{{PRESET}}|$PRESET|g" "$TEMP_YAML"
 sed -i.bak "s|{{TRAIN_COMMAND}}|$TRAIN_CMD|g" "$TEMP_YAML"
-sed -i.bak "s|{{NCCL_DEBUG}}|$NCCL_DEBUG|g" "$TEMP_YAML"
-sed -i.bak "s|{{CRITIC_CHECKPOINT}}|$CRITIC_CHECKPOINT|g" "$TEMP_YAML"
+sed -i.bak "s|{{NCCL_DEBUG}}|$NCCL_ENV_VARS|g" "$TEMP_YAML"
 sed -i.bak "s|{{IMAGE}}|$IMAGE|g" "$TEMP_YAML"
 
-# SETUP_COMMANDS 치환 (임시 파일 사용 - 개행 및 특수문자 안전 처리)
+# SETUP_COMMANDS 치환 (임시 파일 사용)
 SETUP_FILE=$(mktemp)
 printf "%s" "$SETUP_COMMANDS" > "$SETUP_FILE"
 sed -i.bak "/{{SETUP_COMMANDS}}/{
@@ -166,14 +155,13 @@ echo "임시 YAML: $TEMP_YAML"
 echo ""
 echo "=== 실행 설정 ==="
 echo "GPU 개수: $NGPUS"
-[ -n "$CRITIC_CHECKPOINT" ] && echo "Critic Checkpoint: $CRITIC_CHECKPOINT (override)"
 [ -n "$BATCH_SIZE" ] && echo "Batch Size: $BATCH_SIZE (override)"
 [ -n "$GRAD_ACCUM" ] && echo "Gradient Accumulation: $GRAD_ACCUM (override)"
 [ -n "$N_SAMPLES" ] && echo "N Samples: $N_SAMPLES (override)"
 
 # VESSL Run 실행
 echo ""
-echo "=== VESSL Run 실행: Verifiable WMTP ($NGPUS-GPU) ==="
+echo "=== VESSL Run 실행: Reference Model Fine-tuning ($NGPUS-GPU) ==="
 vessl run create -f "$TEMP_YAML"
 
 # 정리
@@ -190,5 +178,3 @@ echo ""
 echo "로컬 다운로드:"
 echo "  vessl storage copy-file -r vessl-storage/checkpoints ./checkpoints"
 echo "  vessl storage copy-file -r vessl-storage/mlruns ./mlruns"
-echo ""
-echo "참고: Verifiable은 Critic checkpoint를 로드하여 학습합니다."

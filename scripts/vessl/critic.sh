@@ -115,16 +115,16 @@ fi
 TEMP_YAML=$(mktemp)
 cp scripts/vessl/critic.yaml.template "$TEMP_YAML"
 
-# 변수 치환
 # Image 및 Setup Command 설정
 if [ "$USE_CUSTOM_IMAGE" = true ]; then
   IMAGE="ghcr.io/wooshikwon/weighted_mtp:main"
   SETUP_COMMANDS="
       echo \"=== Storage 심볼릭 링크 생성 ===\"
       mkdir -p storage
-      ln -s /vessl/models storage/models
-      ln -s /vessl/datasets storage/datasets
-      ln -s /vessl/checkpoints storage/checkpoints
+      ln -s /workspace/models storage/models
+      ln -s /workspace/datasets storage/datasets
+      ln -s /workspace/checkpoints storage/checkpoints
+      ln -s /workspace/mlruns mlruns
       ls -lh storage/
   "
 else
@@ -140,9 +140,10 @@ else
 
       echo \"=== Storage 심볼릭 링크 생성 ===\"
       mkdir -p storage
-      ln -s /vessl/models storage/models
-      ln -s /vessl/datasets storage/datasets
-      ln -s /vessl/checkpoints storage/checkpoints
+      ln -s /workspace/models storage/models
+      ln -s /workspace/datasets storage/datasets
+      ln -s /workspace/checkpoints storage/checkpoints
+      ln -s /workspace/mlruns mlruns
       ls -lh storage/
 
       echo \"=== Python 의존성 설치 ===\"
@@ -167,11 +168,6 @@ d
 rm -f "$SETUP_FILE"
 
 # 환경변수 치환
-sed -i.bak "s|{{MLFLOW_TRACKING_USERNAME}}|$MLFLOW_TRACKING_USERNAME|g" "$TEMP_YAML"
-sed -i.bak "s|{{MLFLOW_TRACKING_PASSWORD}}|$MLFLOW_TRACKING_PASSWORD|g" "$TEMP_YAML"
-sed -i.bak "s|{{AWS_ACCESS_KEY_ID}}|$AWS_ACCESS_KEY_ID|g" "$TEMP_YAML"
-sed -i.bak "s|{{AWS_SECRET_ACCESS_KEY}}|$AWS_SECRET_ACCESS_KEY|g" "$TEMP_YAML"
-sed -i.bak "s|{{AWS_DEFAULT_REGION}}|$AWS_DEFAULT_REGION|g" "$TEMP_YAML"
 sed -i.bak "s|{{HF_TOKEN}}|$HF_TOKEN|g" "$TEMP_YAML"
 
 echo "환경변수 치환 완료"
@@ -197,6 +193,13 @@ rm -f "$TEMP_YAML" "${TEMP_YAML}.bak"
 echo ""
 echo "=== 실행 완료 ==="
 echo "VESSL 웹 UI에서 실행 상태를 확인하세요: https://vessl.ai"
-echo "MLflow UI: http://13.50.240.176"
+echo ""
+echo "=== VESSL Storage 저장 경로 ==="
+echo "Checkpoints: volume://vessl-storage/checkpoints"
+echo "MLflow: volume://vessl-storage/mlruns"
+echo ""
+echo "로컬 다운로드:"
+echo "  vessl storage copy-file -r vessl-storage/checkpoints ./checkpoints"
+echo "  vessl storage copy-file -r vessl-storage/mlruns ./mlruns"
 echo ""
 echo "참고: Critic 학습 완료 후 checkpoint를 Verifiable 파이프라인에서 사용합니다."

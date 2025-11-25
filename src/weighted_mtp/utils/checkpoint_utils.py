@@ -230,3 +230,84 @@ def cleanup_old_checkpoints(
         for checkpoint_path in epoch_checkpoints[:n_to_delete]:
             logger.info(f"오래된 checkpoint 삭제: {checkpoint_path.name}")
             checkpoint_path.unlink()
+
+
+def save_hf_checkpoint(
+    model,
+    tokenizer,
+    save_dir: Path | str,
+    epoch: float,
+    val_metrics: dict[str, float],
+) -> None:
+    """HuggingFace 형식 checkpoint 저장
+
+    AutoModelForCausalLM.from_pretrained()로 로드 가능한 형식으로 저장합니다.
+    FSDP 환경에서는 모든 rank가 state_dict gathering에 참여하고,
+    실제 저장은 rank 0만 수행합니다.
+
+    Args:
+        model: HuggingFace 모델 (FSDP-wrapped 또는 일반 모델)
+        tokenizer: HuggingFace 토크나이저
+        save_dir: 저장 디렉터리 경로
+        epoch: 현재 epoch
+        val_metrics: Validation metrics
+
+    저장되는 파일:
+        save_dir/
+        ├── config.json
+        ├── model.safetensors (또는 pytorch_model.bin)
+        ├── tokenizer.json
+        ├── tokenizer_config.json
+        └── training_state.json  # epoch, val_metrics 등
+    """
+    import json
+    import torch.distributed as dist
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp.fully_sharded_data_parallel import (
+        StateDictType,
+        FullStateDictConfig,
+    )
+
+    save_dir = Path(save_dir)
+
+    # FSDP Full state dict gathering (모든 rank가 참여해야 함)
+    if isinstance(model, FSDP):
+        with FSDP.state_dict_type(
+            model,
+            StateDictType.FULL_STATE_DICT,
+            FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+        ):
+            state_dict = model.state_dict()
+
+        # rank 0만 실제 저장 수행
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+
+        # FSDP unwrap된 원본 모델 구조 필요
+        unwrapped_model = model.module
+    else:
+        # 일반 모델 (single-device 환경)
+        state_dict = model.state_dict()
+        unwrapped_model = model
+
+    # 저장 디렉터리 생성
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # HuggingFace 모델 저장 (state_dict 적용 후)
+    unwrapped_model.load_state_dict(state_dict)
+    unwrapped_model.save_pretrained(save_dir)
+
+    # 토크나이저 저장
+    tokenizer.save_pretrained(save_dir)
+
+    # 학습 상태 저장 (별도 파일)
+    training_state = {
+        "epoch": epoch,
+        "val_metrics": val_metrics,
+    }
+    with open(save_dir / "training_state.json", "w") as f:
+        json.dump(training_state, f, indent=2)
+
+    logger.info(f"HuggingFace checkpoint 저장 완료: {save_dir}")
+    logger.info(f"  Epoch: {epoch}")
+    logger.info(f"  Val loss: {val_metrics.get('val_loss', 'N/A')}")

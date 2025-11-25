@@ -12,25 +12,21 @@ resources:
   preset: {{PRESET}}
 image: {{IMAGE}}
 import:
-  /app:
+  /workspace/code:
     git:
-      url: github.com/wooshikwon/weighted_mtp.git
+      url: https://github.com/wooshikwon/weighted_mtp.git
       ref: main
-  /vessl/models: volume://vessl-storage/models
-  /vessl/datasets: volume://vessl-storage/datasets
-  /vessl/checkpoints: volume://vessl-storage/checkpoints
+  /workspace/models: volume://vessl-storage/models
+  /workspace/datasets: volume://vessl-storage/datasets
+  /workspace/checkpoints: volume://vessl-storage/checkpoints
+  /workspace/mlruns: volume://vessl-storage/mlruns
 env:
-  MLFLOW_TRACKING_USERNAME: "{{MLFLOW_TRACKING_USERNAME}}"
-  MLFLOW_TRACKING_PASSWORD: "{{MLFLOW_TRACKING_PASSWORD}}"
-  AWS_ACCESS_KEY_ID: "{{AWS_ACCESS_KEY_ID}}"
-  AWS_SECRET_ACCESS_KEY: "{{AWS_SECRET_ACCESS_KEY}}"
-  AWS_DEFAULT_REGION: "{{AWS_DEFAULT_REGION}}"
   HF_TOKEN: "{{HF_TOKEN}}"
   PYTHONUNBUFFERED: "1"
-  TOKENIZERS_PARALLELISM: "false"{{NCCL_DEBUG}}
-  CRITIC_CHECKPOINT: "{{CRITIC_CHECKPOINT}}"
+  TOKENIZERS_PARALLELISM: "false"
+  CRITIC_CHECKPOINT: "{{CRITIC_CHECKPOINT}}"{{NCCL_DEBUG}}
 run:
-  - workdir: /app
+  - workdir: /workspace/code
     command: |
       set -e
 
@@ -58,3 +54,7 @@ run:
 
       echo "=== Verifiable WMTP 학습 시작 ({{NGPUS}}-GPU) ==="
       {{TRAIN_COMMAND}}
+
+      echo "=== 학습 완료 ==="
+      echo "Checkpoints: VESSL Storage (volume://vessl-storage/checkpoints)"
+      echo "MLflow: VESSL Storage (volume://vessl-storage/mlruns)"

@@ -55,6 +55,7 @@ def compute_mtp_selective_weights(
 
     # Statistics
     stats = {}
+    total_valid_possible = 0  # 실제 선택 가능한 토큰 수 (labels != -100)
 
     # HEAD 0,1,2,3 (t+1~t+4): 모두 Rho-1 selection
     for k in range(1, n_future + 1):  # k = 1, 2, 3, 4
@@ -121,14 +122,15 @@ def compute_mtp_selective_weights(
         # Statistics
         stats[f'head_{head_idx}_count'] = selected.sum().item()
         total_valid = valid_mask.sum().item()
+        total_valid_possible += total_valid  # 실제 선택 가능한 토큰 누적
         stats[f'head_{head_idx}_ce_mean'] = policy_ce[valid_mask].mean().item()
         stats[f'head_{head_idx}_excess_mean'] = valid_excess.mean().item()
         stats[f'head_{head_idx}_threshold'] = threshold.item()
 
     # Overall statistics
-    total_possible = attention_mask.sum().item() * n_future
     total_selected = weights.sum().item()
-    stats['selection_ratio'] = total_selected / (total_possible + 1e-8)
+    # selection_ratio: 실제 선택 가능한 토큰(labels != -100) 대비 선택된 비율
+    stats['selection_ratio'] = total_selected / (total_valid_possible + 1e-8)
     stats['avg_heads_per_position'] = total_selected / (attention_mask.sum().item() + 1e-8)
 
     return weights, stats

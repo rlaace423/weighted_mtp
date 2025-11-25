@@ -176,7 +176,10 @@ class TestValidateConfigLogicalConsistency:
                     "batch_size": 200,
                     "learning_rate": 1e-4,
                 },
-                "data_sampling": {"n_samples": 100},
+                "data_sampling": {
+                    "sampling_method": "difficulty",
+                    "difficulty": {"n_samples": 100},
+                },
             }
         )
 
@@ -371,9 +374,12 @@ class TestValidateConfigPathChecks:
                     "weight_clip_max": 3.0,
                 },
                 "data_sampling": {
-                    "n_samples": 100,
-                    "auto_data_balancing": True,
-                    "correct_ratio": 0.5,
+                    "sampling_method": "difficulty",
+                    "difficulty": {
+                        "n_samples": 100,
+                        "auto_data_balancing": True,
+                        "correct_ratio": 0.5,
+                    },
                 },
             }
         )

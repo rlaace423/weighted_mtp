@@ -315,6 +315,8 @@ uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   --config configs/verifiable/verifiable.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 
+MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
+
 # Rho-1
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   --master_port=29501 \

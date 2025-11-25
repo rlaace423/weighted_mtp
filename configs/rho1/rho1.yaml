@@ -66,14 +66,14 @@ data_sampling:
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
-  n_epochs: 2.0
+  n_epochs: 1.0
   batch_size: 16  # Per GPU (Reference model 메모리 고려)
   gradient_accumulation_steps: 2  # Effective batch size = 128
   learning_rate: 5.0e-5
   max_grad_norm: 0.1
 
   # Rho-1 weighting
-  rho1_mode: "difficult"  # "signed" (Policy > Ref만) / "absolute" (차이 큰 모든 토큰) / "difficult" (Ref가 어려워하는 토큰)
+  rho1_mode: "absolute"  # "signed" (Policy > Ref만) / "absolute" (차이 큰 모든 토큰) / "difficult" (Ref가 어려워하는 토큰)
   temperature: 1.0  # Rho-1 temperature
   k_percent: 0.7  # Top-k threshold
 
@@ -115,11 +115,10 @@ storage:
   datasets_dir: storage/datasets
   checkpoints_dir: storage/checkpoints
 
-# MLflow 추적
+# MLflow 추적 (로컬 파일 기반)
 mlflow:
-  tracking_uri: "http://13.50.240.176"
+  tracking_uri: ""  # 빈 문자열 = ./mlruns 디렉터리 사용
   experiment: "weighted-mtp/production"
-  s3_artifacts: "s3://wmtp/mlflow-artifacts"
 
 # 로깅
 logging:

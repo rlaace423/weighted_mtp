@@ -129,6 +129,7 @@ def validate_rho1(
     ref_model.eval()
 
     total_weighted_ce_loss = 0.0
+    total_unweighted_ce_loss = 0.0
     total_head0_ce_loss = 0.0
     total_excess_loss = 0.0
     n_batches = 0
@@ -162,8 +163,9 @@ def validate_rho1(
                 mode=rho1_mode,
             )
 
-            # 5. Weighted CE loss (per-head) 및 Head0 CE loss
+            # 5. Weighted CE loss (per-head) 및 Head0 CE loss, Unweighted CE loss
             batch_weighted_ce_loss = 0.0
+            batch_unweighted_ce_loss = 0.0
             batch_head0_ce_loss = 0.0
             valid_heads = 0
 
@@ -195,40 +197,52 @@ def validate_rho1(
                     if valid_count > 0:
                         batch_head0_ce_loss = (ce_loss_k * combined_mask_k.reshape(-1)).sum() / valid_count
 
-                # 모델 dtype 일치
+                # Weighted CE (선택된 토큰만)
                 weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
+                # Unweighted CE (모든 valid 토큰)
+                unweighted_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
 
                 # 선택된 토큰 수로 나눠서 정확한 평균 계산
                 selected_sum_k = (weights_k.reshape(-1) * combined_mask_k.reshape(-1)).sum()
+                mask_sum_k = combined_mask_k.sum()
+
                 if selected_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / selected_sum_k
                     valid_heads += 1
+                if mask_sum_k > 0:
+                    batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
 
             weighted_ce_loss = batch_weighted_ce_loss / max(valid_heads, 1)
+            unweighted_ce_loss = batch_unweighted_ce_loss / n_future
 
             # 6. Metrics 수집
             total_weighted_ce_loss += weighted_ce_loss.item()
+            total_unweighted_ce_loss += unweighted_ce_loss.item()
             total_head0_ce_loss += batch_head0_ce_loss.item() if isinstance(batch_head0_ce_loss, torch.Tensor) else batch_head0_ce_loss
             total_excess_loss += selection_stats.get('head_1_excess_mean', 0.0)
             n_batches += 1
 
     # 평균 metrics 계산
     avg_weighted_ce_loss = total_weighted_ce_loss / n_batches
+    avg_unweighted_ce_loss = total_unweighted_ce_loss / n_batches
     avg_head0_ce_loss = total_head0_ce_loss / n_batches
     avg_excess_loss = total_excess_loss / n_batches
 
     # Validation metrics aggregation (DDP) - 1회 통신
     reduced_val = all_reduce_scalars({
         "weighted_ce_loss": avg_weighted_ce_loss,
+        "unweighted_ce_loss": avg_unweighted_ce_loss,
         "head0_ce_loss": avg_head0_ce_loss,
         "excess_loss": avg_excess_loss,
     })
     avg_weighted_ce_loss = reduced_val["weighted_ce_loss"]
+    avg_unweighted_ce_loss = reduced_val["unweighted_ce_loss"]
     avg_head0_ce_loss = reduced_val["head0_ce_loss"]
     avg_excess_loss = reduced_val["excess_loss"]
 
     metrics = {
         "val_weighted_ce_loss": avg_weighted_ce_loss,
+        "val_unweighted_ce_loss": avg_unweighted_ce_loss,
         "val_head0_ce_loss": avg_head0_ce_loss,
         "val_excess_loss": avg_excess_loss,
         "val_loss": avg_head0_ce_loss,  # Best tracking용 (Head0 CE loss)
@@ -454,7 +468,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         # DataLoader에서 필요한 만큼만 사용
         epoch_train_loader = iter(train_loader)
-        period_metrics_sum = {"weighted_ce_loss": 0.0, "excess_loss": 0.0}
+        period_metrics_sum = {"weighted_ce_loss": 0.0, "unweighted_ce_loss": 0.0, "excess_loss": 0.0}
         period_batches = 0
 
         for _ in range(batches_this_period):
@@ -493,8 +507,9 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 mode=config.training.rho1_mode,
             )
 
-            # Weighted CE loss (per-head)
+            # Weighted CE loss + Unweighted CE loss (per-head)
             batch_weighted_ce_loss = 0.0
+            batch_unweighted_ce_loss = 0.0
             valid_heads = 0
 
             for k in range(1, n_future + 1):
@@ -519,16 +534,23 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 valid_label_mask_k = (labels_k != -100).float()
                 combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
 
-                # 모델 dtype 일치
+                # Weighted CE (선택된 토큰만)
                 weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
+                # Unweighted CE (모든 valid 토큰)
+                unweighted_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
 
                 # 선택된 토큰 수로 나눠서 정확한 평균 계산
                 selected_sum_k = (weights_k.reshape(-1) * combined_mask_k.reshape(-1)).sum()
+                mask_sum_k = combined_mask_k.sum()
+
                 if selected_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / selected_sum_k
                     valid_heads += 1
+                if mask_sum_k > 0:
+                    batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
 
             weighted_ce_loss = batch_weighted_ce_loss / max(valid_heads, 1)
+            unweighted_ce_loss = batch_unweighted_ce_loss / n_future
 
             # Loss scaling (gradient accumulation 적용)
             scaled_loss = weighted_ce_loss / gradient_accumulation_steps
@@ -545,6 +567,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             # Period metrics 누적 (batch 단위)
             period_metrics_sum["weighted_ce_loss"] += weighted_ce_loss.item()
+            period_metrics_sum["unweighted_ce_loss"] += unweighted_ce_loss.item()
             period_metrics_sum["excess_loss"] += selection_stats.get('head_1_excess_mean', 0.0)
 
             # Optimizer step (accumulation 완료 시에만)
@@ -590,6 +613,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 # 모든 로컬 메트릭 배치 all_reduce (1회 통신)
                 reduced = all_reduce_scalars({
                     "weighted_ce": weighted_ce_loss.item(),
+                    "unweighted_ce": unweighted_ce_loss.item(),
                     "selection_ratio": selection_stats['selection_ratio'],
                     "head_0_ce_mean": selection_stats.get('head_0_ce_mean', 0.0),
                     "head_1_ce_mean": selection_stats.get('head_1_ce_mean', 0.0),
@@ -606,6 +630,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     "weight_entropy": weight_dist_stats["weight_entropy"],
                 })
                 avg_weighted_ce = reduced["weighted_ce"]
+                avg_unweighted_ce = reduced["unweighted_ce"]
                 avg_selection_ratio = reduced["selection_ratio"]
 
                 if is_main_process():
@@ -613,6 +638,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         mlflow.log_metrics(
                             {
                                 "train/weighted_ce_loss": avg_weighted_ce,
+                                "train/unweighted_ce_loss": avg_unweighted_ce,
                                 "train/selection_ratio": avg_selection_ratio,
                                 "train/avg_heads_per_pos": reduced["avg_heads_per_pos"],
                                 "train/head_0_ce": reduced["head_0_ce_mean"],
@@ -668,6 +694,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         # Period-level metrics 계산
         train_weighted_ce_avg = period_metrics_sum["weighted_ce_loss"] / period_batches
+        train_unweighted_ce_avg = period_metrics_sum["unweighted_ce_loss"] / period_batches
         train_excess_avg = period_metrics_sum["excess_loss"] / period_batches
 
         logger.info(
@@ -697,8 +724,10 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 mlflow.log_metrics(
                     {
                         "train/epoch_weighted_ce_loss": train_weighted_ce_avg,
+                        "train/epoch_unweighted_ce_loss": train_unweighted_ce_avg,
                         "train/epoch_excess_loss": train_excess_avg,
                         "val/weighted_ce_loss": val_metrics["val_weighted_ce_loss"],
+                        "val/unweighted_ce_loss": val_metrics["val_unweighted_ce_loss"],
                         "val/head0_ce_loss": val_metrics["val_head0_ce_loss"],
                         "val/excess_loss": val_metrics["val_excess_loss"],
                         "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
