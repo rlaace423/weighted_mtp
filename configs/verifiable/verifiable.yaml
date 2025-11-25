@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: verifiable-wmtp
+  name: verifiable-wmtp-final
   description: "WMTP with TD error-based token weighting"
   stage: verifiable
   tags:
@@ -21,7 +21,7 @@ experiment:
 models:
   policy:
     name: meta-llama-mtp
-    path: storage/checkpoints/critic/critic-pretrain-linear-overfitting/checkpoint_epoch_0.60.pt
+    path: storage/checkpoints/critic/critic-pretrain-linear-final/checkpoint_epoch_0.80.pt
     tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     params:
       dim: 4096
@@ -59,7 +59,7 @@ data_sampling:
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
-  n_epochs: 2.0
+  n_epochs: 1.0
   batch_size: 32  # Per GPU
   gradient_accumulation_steps: 1  # Effective batch size = 128
   trunk_learning_rate: 3.0e-5  # Trunk peak LR

@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: critic-pretrain-linear-overfitting
+  name: critic-pretrain-linear-final
   description: "Value head pretraining for TD error calculation"
   stage: critic
   tags:

@@ -306,6 +306,8 @@ uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   --config configs/critic/critic_linear.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 
+MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
+
 # Verifiable Reward
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   --master_port=29501 \

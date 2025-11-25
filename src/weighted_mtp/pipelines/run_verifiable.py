@@ -51,7 +51,6 @@ from weighted_mtp.value_weighting.td_weighting import (
     compute_td_errors,
     compute_td_targets,
     compute_td_stats,
-    compute_weight_stats,
 )
 
 
@@ -85,6 +84,7 @@ def validate_verifiable(
     adapter.eval()
 
     total_weighted_ce_loss = 0.0
+    total_unweighted_ce_loss = 0.0
     total_value_loss = 0.0
     total_loss_sum = 0.0
     n_batches = 0
@@ -131,8 +131,9 @@ def validate_verifiable(
                 max_weight=weight_clip_max,
             )
 
-            # 6. Weighted CE loss
+            # 6. Weighted CE loss + Unweighted CE loss (baseline 비교용)
             batch_weighted_ce_loss = 0.0
+            batch_unweighted_ce_loss = 0.0
 
             for k in range(1, n_future + 1):
                 valid_len = seq_len - k
@@ -154,14 +155,18 @@ def validate_verifiable(
                 valid_label_mask_k = (labels_k != -100).float()
                 combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
 
-                # 모델 dtype 일치
+                # Weighted CE (TD error 기반 가중치 적용)
                 weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
+                # Unweighted CE (baseline 비교용, 균등 가중치)
+                unweighted_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
 
                 mask_sum_k = combined_mask_k.sum()
                 if mask_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
+                    batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
 
             weighted_ce_loss = batch_weighted_ce_loss / n_future
+            unweighted_ce_loss = batch_unweighted_ce_loss / n_future
 
             # 7. Value loss (TD target 기반)
             td_targets = compute_td_targets(
@@ -188,17 +193,20 @@ def validate_verifiable(
 
             # 9. Metrics 수집
             total_weighted_ce_loss += weighted_ce_loss.item()
+            total_unweighted_ce_loss += unweighted_ce_loss.item()
             total_value_loss += value_loss.item()
             total_loss_sum += total_loss.item()
             n_batches += 1
 
     # 평균 metrics 계산
     avg_weighted_ce_loss = total_weighted_ce_loss / n_batches
+    avg_unweighted_ce_loss = total_unweighted_ce_loss / n_batches
     avg_value_loss = total_value_loss / n_batches
     avg_total_loss = total_loss_sum / n_batches
 
     metrics = {
         "val_weighted_ce_loss": avg_weighted_ce_loss,
+        "val_unweighted_ce_loss": avg_unweighted_ce_loss,
         "val_value_loss": avg_value_loss,
         "val_loss": avg_total_loss,
     }
@@ -453,6 +461,7 @@ def run_verifiable_training(
         epoch_train_loader = iter(train_loader)
         period_metrics_sum = {
             "weighted_ce_loss": 0.0,
+            "unweighted_ce_loss": 0.0,
             "value_loss": 0.0,
             "total_loss": 0.0,
         }
@@ -505,8 +514,9 @@ def run_verifiable_training(
                 max_weight=config.training.weight_clip_max,
             )
 
-            # Weighted CE loss
+            # Weighted CE loss + Unweighted CE loss (baseline 비교용)
             batch_weighted_ce_loss = 0.0
+            batch_unweighted_ce_loss = 0.0
 
             for k in range(1, n_future + 1):
                 valid_len = seq_len - k
@@ -528,14 +538,18 @@ def run_verifiable_training(
                 valid_label_mask_k = (labels_k != -100).float()
                 combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
 
-                # 모델 dtype 일치
+                # Weighted CE (TD error 기반 가중치 적용)
                 weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
+                # Unweighted CE (baseline 비교용, 균등 가중치)
+                unweighted_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
 
                 mask_sum_k = combined_mask_k.sum()
                 if mask_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
+                    batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
 
             weighted_ce_loss = batch_weighted_ce_loss / n_future
+            unweighted_ce_loss = batch_unweighted_ce_loss / n_future
 
             # Value loss (TD target 기반 Continual Learning)
             td_targets = compute_td_targets(
@@ -575,6 +589,7 @@ def run_verifiable_training(
 
             # Period metrics 누적 (batch 단위)
             period_metrics_sum["weighted_ce_loss"] += weighted_ce_loss.item()
+            period_metrics_sum["unweighted_ce_loss"] += unweighted_ce_loss.item()
             period_metrics_sum["value_loss"] += value_loss.item()
             period_metrics_sum["total_loss"] += total_loss.item()
 
@@ -609,9 +624,8 @@ def run_verifiable_training(
                 # Response 토큰 마스크 (통계 계산용)
                 response_mask = valid_label_mask.squeeze(-1)
 
-                # TD error/weight stats (response 토큰만)
+                # TD error stats (response 토큰만)
                 td_stats = compute_td_stats(td_errors, response_mask)
-                weight_stats = compute_weight_stats(weights, response_mask)
                 gpu_metrics = gpu_monitor.get_metrics()
 
                 # Value function statistics (response 토큰만)
@@ -633,27 +647,27 @@ def run_verifiable_training(
                 # 모든 로컬 메트릭 배치 all_reduce (1회 통신)
                 reduced = all_reduce_scalars({
                     "weighted_ce": weighted_ce_loss.item(),
+                    "unweighted_ce": unweighted_ce_loss.item(),
                     "value_loss": value_loss.item(),
                     "total_loss": total_loss.item(),
                     "td_mean": td_stats["td_mean"],
                     "td_std": td_stats["td_std"],
                     "td_min": td_stats["td_min"],
                     "td_max": td_stats["td_max"],
-                    "weight_mean": weight_stats["weight_mean"],
                     "value_mse": value_func_stats["value_mse"],
                     "value_mean": value_func_stats["value_mean"],
                     "value_std": value_func_stats["value_std"],
-                    "weight_dist_mean": weight_dist_stats["weight_mean"],
-                    "weight_dist_std": weight_dist_stats["weight_std"],
-                    "weight_dist_min": weight_dist_stats["weight_min"],
-                    "weight_dist_max": weight_dist_stats["weight_max"],
-                    "weight_dist_entropy": weight_dist_stats["weight_entropy"],
+                    "weight_mean": weight_dist_stats["weight_mean"],
+                    "weight_std": weight_dist_stats["weight_std"],
+                    "weight_min": weight_dist_stats["weight_min"],
+                    "weight_max": weight_dist_stats["weight_max"],
+                    "weight_entropy": weight_dist_stats["weight_entropy"],
                 })
                 avg_weighted_ce = reduced["weighted_ce"]
+                avg_unweighted_ce = reduced["unweighted_ce"]
                 avg_value_loss = reduced["value_loss"]
                 avg_total_loss = reduced["total_loss"]
                 avg_td_mean = reduced["td_mean"]
-                avg_weight_mean = reduced["weight_mean"]
                 avg_value_mse = reduced["value_mse"]
                 avg_value_mean = reduced["value_mean"]
                 avg_value_std = reduced["value_std"]
@@ -663,6 +677,7 @@ def run_verifiable_training(
                         mlflow.log_metrics(
                             {
                                 "train/weighted_ce_loss": avg_weighted_ce,
+                                "train/unweighted_ce_loss": avg_unweighted_ce,
                                 "train/value_loss": avg_value_loss,
                                 "train/total_loss": avg_total_loss,
                                 "train/grad_norm": avg_grad_norm_post,
@@ -673,15 +688,14 @@ def run_verifiable_training(
                                 "td/std": reduced["td_std"],
                                 "td/min": reduced["td_min"],
                                 "td/max": reduced["td_max"],
-                                "train/weight_mean": avg_weight_mean,
                                 "value/mse": avg_value_mse,
                                 "value/mean_prediction": avg_value_mean,
                                 "value/std_prediction": avg_value_std,
-                                "weight/mean": reduced["weight_dist_mean"],
-                                "weight/std": reduced["weight_dist_std"],
-                                "weight/min": reduced["weight_dist_min"],
-                                "weight/max": reduced["weight_dist_max"],
-                                "weight/entropy": reduced["weight_dist_entropy"],
+                                "weight/mean": reduced["weight_mean"],
+                                "weight/std": reduced["weight_std"],
+                                "weight/min": reduced["weight_min"],
+                                "weight/max": reduced["weight_max"],
+                                "weight/entropy": reduced["weight_entropy"],
                                 "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
                                 "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
                             },
@@ -718,15 +732,18 @@ def run_verifiable_training(
 
         # Period-level metrics 계산 & aggregation (1회 통신)
         train_weighted_ce_avg = period_metrics_sum["weighted_ce_loss"] / period_batches
+        train_unweighted_ce_avg = period_metrics_sum["unweighted_ce_loss"] / period_batches
         train_value_avg = period_metrics_sum["value_loss"] / period_batches
         train_total_avg = period_metrics_sum["total_loss"] / period_batches
 
         reduced_period = all_reduce_scalars({
             "weighted_ce": train_weighted_ce_avg,
+            "unweighted_ce": train_unweighted_ce_avg,
             "value": train_value_avg,
             "total": train_total_avg,
         })
         train_weighted_ce_avg = reduced_period["weighted_ce"]
+        train_unweighted_ce_avg = reduced_period["unweighted_ce"]
         train_value_avg = reduced_period["value"]
         train_total_avg = reduced_period["total"]
 
@@ -754,10 +771,12 @@ def run_verifiable_training(
         reduced_val = all_reduce_scalars({
             "val_total": val_metrics["val_loss"],
             "val_weighted_ce": val_metrics["val_weighted_ce_loss"],
+            "val_unweighted_ce": val_metrics["val_unweighted_ce_loss"],
             "val_value": val_metrics["val_value_loss"],
         })
         avg_val_total = reduced_val["val_total"]
         avg_val_weighted_ce = reduced_val["val_weighted_ce"]
+        avg_val_unweighted_ce = reduced_val["val_unweighted_ce"]
         avg_val_value = reduced_val["val_value"]
 
         # Epoch-level 로깅
@@ -771,9 +790,11 @@ def run_verifiable_training(
                     {
                         "train/epoch_total_loss": train_total_avg,
                         "train/epoch_weighted_ce_loss": train_weighted_ce_avg,
+                        "train/epoch_unweighted_ce_loss": train_unweighted_ce_avg,
                         "train/epoch_value_loss": train_value_avg,
                         "val/total_loss": avg_val_total,
                         "val/weighted_ce_loss": avg_val_weighted_ce,
+                        "val/unweighted_ce_loss": avg_val_unweighted_ce,
                         "val/value_loss": avg_val_value,
                         "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
                         "perf/samples_per_sec": throughput_metrics["samples_per_sec"],

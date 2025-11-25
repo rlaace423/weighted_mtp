@@ -1,0 +1,14 @@
+artifact_uri: file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns/869427667672898361/250afac318e544b0803d5dc15479ddea/artifacts
+end_time: 1764055575830
+entry_point_name: ''
+experiment_id: '869427667672898361'
+lifecycle_stage: active
+run_id: 250afac318e544b0803d5dc15479ddea
+run_name: critic-pretrain-linear-overfitting
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1764051598747
+status: 3
+tags: []
+user_id: wmtp_admin
