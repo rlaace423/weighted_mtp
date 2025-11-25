@@ -301,6 +301,7 @@ uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
 
 # Verifiable Reward
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+  --master_port=29501 \
   -m weighted_mtp.pipelines.run_verifiable \
   --config configs/verifiable/verifiable.yaml
 
@@ -439,6 +440,71 @@ scripts/nipa/
 ├── verifiable.sh     # Verifiable Reward 실행
 └── rho1.sh          # Rho-1 실행
 ```
+
+---
+
+## MLflow 설정
+
+### EC2 MLflow 서버 사용 (기본)
+
+```bash
+# .env 설정
+MLFLOW_TRACKING_URI=http://13.50.240.176:5000
+```
+
+### 로컬 MLflow 사용 (EC2 장애 시)
+
+EC2 서버가 다운되거나 연결 불가 시, NIPA 서버에서 직접 MLflow 실행 가능.
+
+**방법 1: 파일 기반 (서버 없이, 가장 간단)**
+
+```bash
+# 학습 실행 시 override로 로컬 파일 저장
+uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+  --master_port=29501 \
+  -m weighted_mtp.pipelines.run_critic \
+  --config configs/critic/critic_linear.yaml \
+  --override mlflow.tracking_uri=file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns
+
+# 나중에 UI로 확인하고 싶으면
+mlflow ui --host 0.0.0.0 --port 5000 \
+  --backend-store-uri file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns
+```
+
+**방법 2: 로컬 MLflow 서버 실행**
+
+```bash
+# NIPA 서버에서 MLflow 서버 백그라운드 실행
+nohup mlflow server \
+  --host 0.0.0.0 \
+  --port 5000 \
+  --backend-store-uri sqlite:///storage/mlflow.db \
+  --default-artifact-root s3://wmtp/mlflow-artifacts \
+  > mlflow.log 2>&1 &
+
+# 학습 실행
+uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+  --master_port=29501 \
+  -m weighted_mtp.pipelines.run_critic \
+  --config configs/critic/critic_linear.yaml \
+  --override mlflow.tracking_uri=http://localhost:5000
+```
+
+**방법 3: MLflow 없이 실행**
+
+```bash
+# MLflow 로깅 완전 비활성화
+uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+  --master_port=29501 \
+  -m weighted_mtp.pipelines.run_critic \
+  --config configs/critic/critic_linear.yaml \
+  --override mlflow.experiment=""
+
+# 콘솔 출력을 파일로 저장
+uv run torchrun ... 2>&1 | tee storage/logs/critic_$(date +%Y%m%d_%H%M%S).log
+```
+
+> Checkpoint는 항상 `storage/checkpoints/`에 저장됨. MLflow는 메트릭 로깅용.
 
 ---
 

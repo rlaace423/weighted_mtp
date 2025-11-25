@@ -21,7 +21,7 @@ experiment:
 models:
   policy:
     name: meta-llama-mtp
-    path: storage/checkpoints/critic/critic-pretrain/checkpoint_final.pt
+    path: storage/checkpoints/critic/critic-pretrain-linear-overfitting/checkpoint_epoch_0.60.pt
     tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     params:
       dim: 4096
@@ -68,12 +68,12 @@ training:
 
   # TD error weighting
   beta: 0.2  # TD error temperature
-  value_coef: 0.5  # Value loss coefficient
+  value_coef: 0.1  # Value loss coefficient
   weight_clip_min: 0.1  # 최소 가중치
   weight_clip_max: 3.0  # 최대 가중치
   loss_type: mse
   gamma: 1.0
-  lam: 0.95  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
+  lam: 1.0  # MC (Critic Stage 1과 동일)
 
   log_interval: 1
 
