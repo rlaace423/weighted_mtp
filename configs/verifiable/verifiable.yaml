@@ -49,7 +49,7 @@ data_sampling:
   difficulty:
     n_samples: 200000
     auto_data_balancing: true
-    correct_ratio: 1.0  # Correct/Incorrect 균형
+    correct_ratio: 0.9  # Correct/Incorrect 균형
     bins:
       diff_7: [7, 7]    # 데이터 많음 (약 90만 -> 비중 축소 필요)
       else: [8, 25]     # 데이터 적당 (약 60만)
@@ -68,7 +68,7 @@ training:
 
   # TD error weighting
   beta: 0.9  # TD error temperature
-  value_coef: 0.1  # Value loss coefficient
+  value_coef: 0.11  # Value loss coefficient
   weight_clip_min: 0  # 최소 가중치
   weight_clip_max: 2  # 최대 가중치
   loss_type: mse

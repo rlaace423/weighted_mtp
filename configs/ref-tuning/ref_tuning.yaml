@@ -35,11 +35,11 @@ dataset:
 # 데이터 샘플링 (Rho-1과 동일: 정답만 학습)
 data_sampling:
   sampling_method: "difficulty"
-  seed: 42
+  seed: 82
   val_n_samples: 1000
 
   difficulty:
-    n_samples: 100000
+    n_samples: 50000
     auto_data_balancing: false
     correct_ratio: 1.0
     bins:
