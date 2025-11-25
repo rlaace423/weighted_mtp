@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import boto3
-import mlflow
+from mlflow import MlflowClient
 
 logger = logging.getLogger(__name__)
 
@@ -18,22 +18,26 @@ logger = logging.getLogger(__name__)
 s3_upload_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="s3-upload")
 
 
-def upload_to_s3_async(checkpoint_path: Path, enabled: bool) -> None:
+def upload_to_s3_async(checkpoint_path: Path, run_id: str) -> None:
     """임시 복사본을 생성하여 S3에 안전하게 업로드
 
     원본 파일을 임시 디렉터리에 복사한 후 업로드하여
     업로드 중 원본 파일 삭제로 인한 race condition 방지
 
+    MlflowClient를 사용하여 별도 스레드에서도 artifact 업로드 가능
+    (mlflow.log_artifact()는 메인 스레드의 active_run 컨텍스트 필요)
+
     Args:
         checkpoint_path: 업로드할 checkpoint 경로
-        enabled: S3 업로드 활성화 여부
+        run_id: MLflow run ID (스레드에서 사용하기 위해 명시적 전달)
 
     Note:
         임시 복사본은 업로드 완료 후 자동 삭제
         원본 파일과 완전히 독립적으로 동작
         S3에는 원본 파일명으로 저장됨
     """
-    if not enabled:
+    if not run_id:
+        logger.warning(f"S3 upload skipped (no run_id): {checkpoint_path.name}")
         return
 
     tmp_dir = None
@@ -47,10 +51,11 @@ def upload_to_s3_async(checkpoint_path: Path, enabled: bool) -> None:
         shutil.copy2(checkpoint_path, tmp_checkpoint)
         logger.debug(f"Created temp copy for upload: {tmp_checkpoint}")
 
-        # 임시 복사본을 S3로 업로드
-        mlflow.log_artifact(str(tmp_checkpoint), artifact_path="checkpoints")
+        # MlflowClient로 명시적 run_id 사용 (스레드 안전)
+        client = MlflowClient()
+        client.log_artifact(run_id, str(tmp_checkpoint), artifact_path="checkpoints")
 
-        logger.info(f"S3 upload complete: {checkpoint_path.name}")
+        logger.info(f"S3 upload complete: {checkpoint_path.name} -> run_id={run_id}")
 
     except Exception as e:
         logger.error(f"S3 upload failed: {checkpoint_path.name} - {e}")

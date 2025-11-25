@@ -36,7 +36,6 @@ from weighted_mtp.utils import (
     s3_upload_executor,
     save_checkpoint,
     shutdown_s3_executor,
-    upload_to_s3_async,
 )
 from weighted_mtp.runtime import (
     init_distributed,
@@ -81,6 +80,7 @@ def validate_critic(
     gamma: float = 1.0,
     lam: float = 0.0,
     value_head_type: str = "mlp",
+    return_raw_counts: bool = False,
 ) -> dict[str, float]:
     """Validation 수행
 
@@ -91,9 +91,10 @@ def validate_critic(
         gamma: TD discount factor
         lam: GAE lambda
         value_head_type: "linear" (BCE) 또는 "mlp" (MSE)
+        return_raw_counts: True이면 raw counts 반환 (분산학습용 aggregation)
 
     Returns:
-        Validation metrics
+        Validation metrics (또는 return_raw_counts=True이면 raw counts 포함)
     """
     adapter.eval()
 
@@ -197,6 +198,20 @@ def validate_critic(
         "val_f1": cls_metrics["f1"],
     }
 
+    # 분산학습용: raw counts 포함 반환
+    if return_raw_counts:
+        metrics["_raw_counts"] = {
+            "loss_sum": total_loss,
+            "n_batches": n_batches,
+            "tp": total_tp,
+            "fp": total_fp,
+            "fn": total_fn,
+            "correct_sum": total_correct_sum,
+            "correct_count": total_correct_count,
+            "incorrect_sum": total_incorrect_sum,
+            "incorrect_count": total_incorrect_count,
+        }
+
     return metrics
 
 
@@ -237,6 +252,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # 5. MLflow 초기화 (Rank 0만, experiment 이름이 있는 경우만)
     use_mlflow = bool(config.mlflow.experiment)
     use_s3_upload = config.checkpoint.get("s3_upload", True) and use_mlflow
+    mlflow_run_id = None  # S3 업로드 시 스레드 안전을 위해 명시적 run_id 저장
     if is_main_process() and use_mlflow:
         mlflow.set_tracking_uri(config.mlflow.tracking_uri)
         mlflow.set_experiment(config.mlflow.experiment)
@@ -246,7 +262,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         )
         # Config 로깅
         mlflow.log_params(OmegaConf.to_container(config, resolve=True))
-        logger.info(f"MLflow Run ID: {mlflow.active_run().info.run_id}")
+        mlflow_run_id = mlflow.active_run().info.run_id
+        logger.info(f"MLflow Run ID: {mlflow_run_id}")
 
     # 6. Resource 로딩
     adapter = load_adapter(config, device)
@@ -757,25 +774,40 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             gamma=config.training.gamma,
             lam=getattr(config.training, "lam", 0.0),
             value_head_type=config.training.value_head_type,
+            return_raw_counts=True,
         )
 
-        # Validation metrics aggregation (1회 통신)
-        reduced_val = all_reduce_scalars({
-            "val_loss": val_metrics["val_loss"],
-            "val_pred_gap": val_metrics["val_pred_gap"],
-            "val_mean_correct": val_metrics["val_mean_correct"],
-            "val_mean_incorrect": val_metrics["val_mean_incorrect"],
-            "val_precision": val_metrics["val_precision"],
-            "val_recall": val_metrics["val_recall"],
-            "val_f1": val_metrics["val_f1"],
-        })
-        avg_val_loss = reduced_val["val_loss"]
-        avg_val_pred_gap = reduced_val["val_pred_gap"]
-        avg_val_mean_correct = reduced_val["val_mean_correct"]
-        avg_val_mean_incorrect = reduced_val["val_mean_incorrect"]
-        avg_val_precision = reduced_val["val_precision"]
-        avg_val_recall = reduced_val["val_recall"]
-        avg_val_f1 = reduced_val["val_f1"]
+        # Validation raw counts를 all_reduce(sum)으로 집계 (Training과 동일 방식)
+        raw_counts = val_metrics["_raw_counts"]
+        reduced_val_counts = all_reduce_scalars({
+            "loss_sum": raw_counts["loss_sum"],
+            "n_batches": raw_counts["n_batches"],
+            "tp": raw_counts["tp"],
+            "fp": raw_counts["fp"],
+            "fn": raw_counts["fn"],
+            "correct_sum": raw_counts["correct_sum"],
+            "correct_count": raw_counts["correct_count"],
+            "incorrect_sum": raw_counts["incorrect_sum"],
+            "incorrect_count": raw_counts["incorrect_count"],
+        }, op="sum")
+
+        # 집계된 counts로 최종 메트릭 계산
+        avg_val_loss = reduced_val_counts["loss_sum"] / max(1, reduced_val_counts["n_batches"])
+        val_cls_metrics = compute_classification_metrics_from_counts(
+            tp=reduced_val_counts["tp"],
+            fp=reduced_val_counts["fp"],
+            fn=reduced_val_counts["fn"],
+            correct_sum=reduced_val_counts["correct_sum"],
+            correct_count=reduced_val_counts["correct_count"],
+            incorrect_sum=reduced_val_counts["incorrect_sum"],
+            incorrect_count=reduced_val_counts["incorrect_count"],
+        )
+        avg_val_pred_gap = val_cls_metrics["pred_gap"]
+        avg_val_mean_correct = val_cls_metrics["mean_correct"]
+        avg_val_mean_incorrect = val_cls_metrics["mean_incorrect"]
+        avg_val_precision = val_cls_metrics["precision"]
+        avg_val_recall = val_cls_metrics["recall"]
+        avg_val_f1 = val_cls_metrics["f1"]
 
         # GPU metrics (epoch-level)
         gpu_metrics_epoch = gpu_monitor.get_metrics()
@@ -809,10 +841,21 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 )
 
         logger.info(
-            f"Validation - Loss: {val_metrics['val_loss']:.4f}, "
-            f"Pred Gap: {val_metrics['val_pred_gap']:.4f}, "
-            f"F1: {val_metrics['val_f1']:.3f}"
+            f"Validation - Loss: {avg_val_loss:.4f}, "
+            f"Pred Gap: {avg_val_pred_gap:.4f}, "
+            f"F1: {avg_val_f1:.3f}"
         )
+
+        # Aggregated validation metrics (checkpoint 저장용)
+        aggregated_val_metrics = {
+            "val_loss": avg_val_loss,
+            "val_pred_gap": avg_val_pred_gap,
+            "val_mean_correct": avg_val_mean_correct,
+            "val_mean_incorrect": avg_val_mean_incorrect,
+            "val_precision": avg_val_precision,
+            "val_recall": avg_val_recall,
+            "val_f1": avg_val_f1,
+        }
 
         # Checkpoint 저장 (validation loss 개선 시만)
         if avg_val_loss < best_val_loss:
@@ -824,9 +867,11 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 optimizer=optimizer,
                 epoch=current_epoch,
                 train_metrics={"train_loss": train_loss_avg},
-                val_metrics=val_metrics,
+                val_metrics=aggregated_val_metrics,
                 checkpoint_path=checkpoint_path,
                 config={"model": {"path": config.models.policy.path}},
+                s3_upload=use_s3_upload,
+                mlflow_run_id=mlflow_run_id,
             )
 
             # 모든 GPU가 checkpoint 저장 완료까지 대기
@@ -834,10 +879,6 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             if is_main_process():
                 logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
-
-                # S3 업로드 (비동기)
-                if use_s3_upload:
-                    s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_s3_upload)
 
                 # 오래된 checkpoint 정리
                 if config.checkpoint.save_total_limit:
@@ -866,13 +907,50 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         # 최종 validation 실행
         logger.info("--- Final Validation ---")
-        final_val_metrics = validate_critic(
+        final_val_raw = validate_critic(
             adapter=adapter,
             dataloader=val_loader,
             device=device,
             gamma=config.training.gamma,
             lam=getattr(config.training, "lam", 0.0),
+            value_head_type=config.training.value_head_type,
+            return_raw_counts=True,
         )
+
+        # Final validation counts도 all_reduce(sum)으로 집계
+        final_raw_counts = final_val_raw["_raw_counts"]
+        reduced_final_counts = all_reduce_scalars({
+            "loss_sum": final_raw_counts["loss_sum"],
+            "n_batches": final_raw_counts["n_batches"],
+            "tp": final_raw_counts["tp"],
+            "fp": final_raw_counts["fp"],
+            "fn": final_raw_counts["fn"],
+            "correct_sum": final_raw_counts["correct_sum"],
+            "correct_count": final_raw_counts["correct_count"],
+            "incorrect_sum": final_raw_counts["incorrect_sum"],
+            "incorrect_count": final_raw_counts["incorrect_count"],
+        }, op="sum")
+
+        final_avg_loss = reduced_final_counts["loss_sum"] / max(1, reduced_final_counts["n_batches"])
+        final_cls_metrics = compute_classification_metrics_from_counts(
+            tp=reduced_final_counts["tp"],
+            fp=reduced_final_counts["fp"],
+            fn=reduced_final_counts["fn"],
+            correct_sum=reduced_final_counts["correct_sum"],
+            correct_count=reduced_final_counts["correct_count"],
+            incorrect_sum=reduced_final_counts["incorrect_sum"],
+            incorrect_count=reduced_final_counts["incorrect_count"],
+        )
+
+        final_val_metrics = {
+            "val_loss": final_avg_loss,
+            "val_pred_gap": final_cls_metrics["pred_gap"],
+            "val_mean_correct": final_cls_metrics["mean_correct"],
+            "val_mean_incorrect": final_cls_metrics["mean_incorrect"],
+            "val_precision": final_cls_metrics["precision"],
+            "val_recall": final_cls_metrics["recall"],
+            "val_f1": final_cls_metrics["f1"],
+        }
 
         save_checkpoint(
             adapter=adapter,
@@ -882,6 +960,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             val_metrics=final_val_metrics,
             checkpoint_path=final_path,
             config={"model": {"path": config.models.policy.path}},
+            s3_upload=use_s3_upload,
+            mlflow_run_id=mlflow_run_id,
         )
 
         # 모든 GPU가 final checkpoint 저장 완료까지 대기
@@ -901,8 +981,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
     logger.info(f"Critic pre-training 완료! Latest checkpoint: {latest_checkpoint_path}")
 
-    # final_val_metrics가 정의되지 않은 경우 마지막 val_metrics 사용
-    final_metrics = final_val_metrics if config.checkpoint.save_final else val_metrics
+    # final_val_metrics가 정의되지 않은 경우 마지막 aggregated_val_metrics 사용
+    final_metrics = final_val_metrics if config.checkpoint.save_final else aggregated_val_metrics
     return final_metrics, latest_checkpoint_path
 
 

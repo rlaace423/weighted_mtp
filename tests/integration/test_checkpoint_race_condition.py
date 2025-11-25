@@ -6,7 +6,7 @@ race condition이 발생하지 않는지 검증
 
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 import torch
@@ -52,7 +52,7 @@ def test_race_condition_prevented(tmp_path):
     upload_completed = False
     upload_error = None
 
-    def slow_upload_mock(path, artifact_path):
+    def slow_upload_mock(run_id, path, artifact_path):
         """느린 업로드 시뮬레이션 (파일 읽기)"""
         nonlocal upload_completed, upload_error
         try:
@@ -64,12 +64,15 @@ def test_race_condition_prevented(tmp_path):
         except Exception as e:
             upload_error = e
 
-    # mlflow mock
-    with patch("weighted_mtp.utils.s3_utils.mlflow.log_artifact", side_effect=slow_upload_mock):
+    # MlflowClient mock
+    with patch("weighted_mtp.utils.s3_utils.MlflowClient") as mock_client_class:
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_client.log_artifact.side_effect = slow_upload_mock
 
-        # S3 업로드 시작 (비동기)
+        # S3 업로드 시작 (비동기, run_id 사용)
         upload_future = s3_utils.s3_upload_executor.submit(
-            upload_to_s3_async, checkpoint1, enabled=True
+            upload_to_s3_async, checkpoint1, "test-run-id"
         )
 
         # 짧은 대기 (업로드 시작 확인)
@@ -118,13 +121,16 @@ def test_multiple_checkpoints_race_condition(tmp_path):
     upload_futures = []
 
     # 간단한 mock (실제 업로드 시뮬레이션)
-    def simple_upload_mock(path, artifact_path):
+    def simple_upload_mock(run_id, path, artifact_path):
         time.sleep(0.05)
         with open(path, 'rb') as f:
             f.read()
 
-    # mlflow mock
-    with patch("weighted_mtp.utils.s3_utils.mlflow.log_artifact", side_effect=simple_upload_mock):
+    # MlflowClient mock
+    with patch("weighted_mtp.utils.s3_utils.MlflowClient") as mock_client_class:
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_client.log_artifact.side_effect = simple_upload_mock
 
         # 5개 checkpoint 빠르게 생성
         for i in range(5):
@@ -139,9 +145,9 @@ def test_multiple_checkpoints_race_condition(tmp_path):
             )
             checkpoints.append(checkpoint_path)
 
-            # S3 업로드 시작 (비동기)
+            # S3 업로드 시작 (비동기, run_id 사용)
             future = s3_utils.s3_upload_executor.submit(
-                upload_to_s3_async, checkpoint_path, enabled=True
+                upload_to_s3_async, checkpoint_path, "test-run-id"
             )
             upload_futures.append(future)
 

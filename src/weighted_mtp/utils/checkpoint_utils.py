@@ -21,11 +21,13 @@ def save_checkpoint(
     val_metrics: dict[str, float],
     checkpoint_path: Path | str,
     config: dict | None = None,
+    s3_upload: bool = False,
+    mlflow_run_id: str | None = None,
 ) -> None:
-    """Checkpoint 저장 (FSDP 지원)
+    """Checkpoint 저장 (FSDP 지원, S3 업로드 옵션)
 
     FSDP 환경에서는 모든 rank가 state_dict gathering에 참여해야 하며,
-    실제 파일 저장은 rank 0만 수행합니다.
+    실제 파일 저장 및 S3 업로드는 rank 0만 수행합니다.
 
     Args:
         adapter: MetaLlamaMTPAdapter (FSDP-wrapped 또는 일반 모델)
@@ -35,6 +37,8 @@ def save_checkpoint(
         val_metrics: Validation metrics
         checkpoint_path: 저장 경로
         config: 학습 설정 정보 (모델 경로 등, 평가 시 필요)
+        s3_upload: S3 업로드 여부 (MLflow artifact로 업로드)
+        mlflow_run_id: MLflow run ID (S3 업로드 시 스레드 안전을 위해 필요)
 
     Saved checkpoint format:
         {
@@ -87,6 +91,14 @@ def save_checkpoint(
     logger.info(f"Checkpoint 저장 완료: {checkpoint_path}")
     logger.info(f"  Epoch: {epoch}")
     logger.info(f"  Val loss: {val_metrics.get('val_loss', 'N/A')}")
+
+    # S3 업로드 (비동기, MlflowClient 사용)
+    if s3_upload and mlflow_run_id:
+        from weighted_mtp.utils.s3_utils import s3_upload_executor, upload_to_s3_async
+        s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, mlflow_run_id)
+        logger.info(f"S3 업로드 예약: {checkpoint_path.name} -> run_id={mlflow_run_id}")
+    elif s3_upload and not mlflow_run_id:
+        logger.warning(f"S3 업로드 건너뜀 (run_id 없음): {checkpoint_path.name}")
 
 
 def load_checkpoint_for_evaluation(

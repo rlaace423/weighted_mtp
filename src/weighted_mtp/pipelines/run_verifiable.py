@@ -36,7 +36,6 @@ from weighted_mtp.utils import (
     s3_upload_executor,
     save_checkpoint,
     shutdown_s3_executor,
-    upload_to_s3_async,
 )
 from weighted_mtp.runtime import (
     init_distributed,
@@ -246,6 +245,7 @@ def run_verifiable_training(
     # 6. MLflow 초기화 (Rank 0만, experiment 이름이 있는 경우만)
     use_mlflow = bool(config.mlflow.experiment)
     use_s3_upload = config.checkpoint.get("s3_upload", True) and use_mlflow
+    mlflow_run_id = None  # S3 업로드 시 스레드 안전을 위해 명시적 run_id 저장
     if is_main_process() and use_mlflow:
         mlflow.set_tracking_uri(config.mlflow.tracking_uri)
         mlflow.set_experiment(config.mlflow.experiment)
@@ -255,7 +255,8 @@ def run_verifiable_training(
         )
         # Config 로깅
         mlflow.log_params(OmegaConf.to_container(config, resolve=True))
-        logger.info(f"MLflow Run ID: {mlflow.active_run().info.run_id}")
+        mlflow_run_id = mlflow.active_run().info.run_id
+        logger.info(f"MLflow Run ID: {mlflow_run_id}")
 
     # 5. 모델 로드 (pretrained 또는 checkpoint)
     logger.info(f"Loading model: {config.models.policy.path}")
@@ -805,6 +806,8 @@ def run_verifiable_training(
                 val_metrics=val_metrics,
                 checkpoint_path=checkpoint_path,
                 config={"model": {"path": config.models.policy.path}},
+                s3_upload=use_s3_upload,
+                mlflow_run_id=mlflow_run_id,
             )
 
             # 모든 GPU가 checkpoint 저장 완료까지 대기
@@ -812,10 +815,6 @@ def run_verifiable_training(
 
             if is_main_process():
                 logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
-
-                # S3 업로드 (비동기)
-                if use_s3_upload:
-                    s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_s3_upload)
 
                 # 오래된 checkpoint 정리
                 if config.checkpoint.get("save_total_limit"):
@@ -868,6 +867,8 @@ def run_verifiable_training(
             val_metrics=final_val_metrics,
             checkpoint_path=final_path,
             config={"model": {"path": config.models.policy.path}},
+            s3_upload=use_s3_upload,
+            mlflow_run_id=mlflow_run_id,
         )
 
         # 모든 GPU가 final checkpoint 저장 완료까지 대기

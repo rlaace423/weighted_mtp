@@ -36,7 +36,6 @@ from weighted_mtp.utils import (
     s3_upload_executor,
     save_checkpoint,
     shutdown_s3_executor,
-    upload_to_s3_async,
 )
 from weighted_mtp.runtime import (
     init_distributed,
@@ -275,6 +274,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # 5. MLflow 초기화 (Rank 0만)
     use_mlflow = bool(config.mlflow.experiment)
     use_s3_upload = config.checkpoint.get("s3_upload", True) and use_mlflow
+    mlflow_run_id = None  # S3 업로드 시 스레드 안전을 위해 명시적 run_id 저장
     if is_main_process() and use_mlflow:
         mlflow.set_tracking_uri(config.mlflow.tracking_uri)
         mlflow.set_experiment(config.mlflow.experiment)
@@ -283,7 +283,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             tags={tag: "true" for tag in config.experiment.tags},
         )
         mlflow.log_params(OmegaConf.to_container(config, resolve=True))
-        logger.info(f"MLflow Run ID: {mlflow.active_run().info.run_id}")
+        mlflow_run_id = mlflow.active_run().info.run_id
+        logger.info(f"MLflow Run ID: {mlflow_run_id}")
 
     # 6. Resource 로딩
     logger.info(f"Loading reference model: {config.models.reference.name}")
@@ -729,6 +730,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 val_metrics=val_metrics,
                 checkpoint_path=checkpoint_path,
                 config={"model": {"path": config.models.policy.path}},
+                s3_upload=use_s3_upload,
+                mlflow_run_id=mlflow_run_id,
             )
 
             # 모든 GPU가 checkpoint 저장 완료까지 대기
@@ -736,10 +739,6 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             if is_main_process():
                 logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
-
-                # S3 업로드 (비동기)
-                if use_s3_upload:
-                    s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, use_s3_upload)
 
                 # 오래된 checkpoint 정리
                 if config.checkpoint.get("save_total_limit"):
@@ -749,11 +748,11 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     )
 
                     # S3 정리 (비동기)
-                    if use_s3_upload:
+                    if use_s3_upload and mlflow_run_id:
                         s3_upload_executor.submit(
                             cleanup_s3_checkpoints,
-                            experiment_id=mlflow.active_run().info.experiment_id,
-                            run_id=mlflow.active_run().info.run_id,
+                            experiment_id="",  # 미사용
+                            run_id=mlflow_run_id,
                             save_total_limit=config.checkpoint.save_total_limit,
                         )
         else:
@@ -788,6 +787,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             val_metrics=final_val_metrics,
             checkpoint_path=final_path,
             config={"model": {"path": config.models.policy.path}},
+            s3_upload=use_s3_upload,
+            mlflow_run_id=mlflow_run_id,
         )
 
         # 모든 GPU가 final checkpoint 저장 완료까지 대기

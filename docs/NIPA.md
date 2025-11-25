@@ -295,8 +295,9 @@ uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
 
 # Critic 사전학습
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+  --master_port=29501 \
   -m weighted_mtp.pipelines.run_critic \
-  --config configs/critic/critic.yaml
+  --config configs/critic/critic_linear.yaml
 
 # Verifiable Reward
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \

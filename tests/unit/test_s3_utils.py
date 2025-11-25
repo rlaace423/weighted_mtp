@@ -22,11 +22,18 @@ def temp_checkpoint(tmp_path):
     return checkpoint_path
 
 
-def test_upload_to_s3_async_disabled(temp_checkpoint):
-    """S3 업로드 비활성화 시 스킵"""
-    # S3 업로드 비활성화
-    upload_to_s3_async(temp_checkpoint, enabled=False)
-    # 에러 없이 완료되면 성공
+def test_upload_to_s3_async_no_run_id(temp_checkpoint, caplog):
+    """run_id가 없으면 업로드 스킵"""
+    # run_id 없이 호출
+    upload_to_s3_async(temp_checkpoint, run_id=None)
+    # 경고 로그 확인
+    assert "S3 upload skipped" in caplog.text
+
+
+def test_upload_to_s3_async_empty_run_id(temp_checkpoint, caplog):
+    """빈 run_id로 호출 시 업로드 스킵"""
+    upload_to_s3_async(temp_checkpoint, run_id="")
+    assert "S3 upload skipped" in caplog.text
 
 
 def test_upload_to_s3_async_success(temp_checkpoint):
@@ -38,15 +45,20 @@ def test_upload_to_s3_async_success(temp_checkpoint):
 
     with patch("tempfile.TemporaryDirectory", return_value=mock_tmp_instance):
         with patch("shutil.copy2") as mock_copy:
-            with patch("weighted_mtp.utils.s3_utils.mlflow") as mock_mlflow:
+            with patch("weighted_mtp.utils.s3_utils.MlflowClient") as mock_client_class:
+                mock_client = MagicMock()
+                mock_client_class.return_value = mock_client
+
                 # 업로드 실행
-                upload_to_s3_async(temp_checkpoint, enabled=True)
+                upload_to_s3_async(temp_checkpoint, run_id="test-run-id-123")
 
                 # 복사 호출 확인
                 mock_copy.assert_called_once()
 
-                # MLflow artifact 로깅 호출 확인
-                mock_mlflow.log_artifact.assert_called_once()
+                # MlflowClient.log_artifact 호출 확인 (run_id 포함)
+                mock_client.log_artifact.assert_called_once()
+                call_args = mock_client.log_artifact.call_args
+                assert call_args[0][0] == "test-run-id-123"  # run_id가 첫 번째 인자
 
                 # cleanup 호출 확인
                 mock_tmp_instance.cleanup.assert_called_once()
@@ -54,11 +66,13 @@ def test_upload_to_s3_async_success(temp_checkpoint):
 
 def test_upload_to_s3_async_failure(temp_checkpoint, caplog):
     """S3 업로드 실패 케이스"""
-    with patch("weighted_mtp.utils.s3_utils.mlflow") as mock_mlflow:
-        mock_mlflow.log_artifact.side_effect = Exception("S3 connection error")
+    with patch("weighted_mtp.utils.s3_utils.MlflowClient") as mock_client_class:
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_client.log_artifact.side_effect = Exception("S3 connection error")
 
         # 업로드 실행 (예외는 캐치되어야 함)
-        upload_to_s3_async(temp_checkpoint, enabled=True)
+        upload_to_s3_async(temp_checkpoint, run_id="test-run-id")
 
         # 에러 로그 확인
         assert "S3 upload failed" in caplog.text
@@ -174,11 +188,13 @@ def test_upload_cleans_temp_on_error(temp_checkpoint):
     mock_tmp_instance.cleanup = MagicMock()
 
     with patch("tempfile.TemporaryDirectory", return_value=mock_tmp_instance):
-        with patch("weighted_mtp.utils.s3_utils.mlflow") as mock_mlflow:
-            mock_mlflow.log_artifact.side_effect = Exception("S3 error")
+        with patch("weighted_mtp.utils.s3_utils.MlflowClient") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+            mock_client.log_artifact.side_effect = Exception("S3 error")
 
             # 업로드 실행 (예외는 캐치되어야 함)
-            upload_to_s3_async(temp_checkpoint, enabled=True)
+            upload_to_s3_async(temp_checkpoint, run_id="test-run-id")
 
             # cleanup 호출 확인 (에러 발생 시에도)
             mock_tmp_instance.cleanup.assert_called_once()
@@ -196,7 +212,7 @@ def test_original_file_deletable_during_upload(tmp_path):
     upload_completed = False
     upload_error = None
 
-    def slow_upload_mock(path, artifact_path):
+    def slow_upload_mock(run_id, path, artifact_path):
         """업로드를 시뮬레이션하는 느린 함수"""
         nonlocal upload_completed, upload_error
         try:
@@ -208,13 +224,15 @@ def test_original_file_deletable_during_upload(tmp_path):
         except Exception as e:
             upload_error = e
 
-    # mlflow.log_artifact를 slow mock으로 교체
-    with patch("weighted_mtp.utils.s3_utils.mlflow") as mock_mlflow:
-        mock_mlflow.log_artifact.side_effect = slow_upload_mock
+    # MlflowClient.log_artifact를 slow mock으로 교체
+    with patch("weighted_mtp.utils.s3_utils.MlflowClient") as mock_client_class:
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_client.log_artifact.side_effect = slow_upload_mock
 
         # 백그라운드에서 업로드 시작
         executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(upload_to_s3_async, checkpoint_path, True)
+        future = executor.submit(upload_to_s3_async, checkpoint_path, "test-run-id")
 
         # 짧은 대기 (업로드 시작 확인)
         time.sleep(0.05)

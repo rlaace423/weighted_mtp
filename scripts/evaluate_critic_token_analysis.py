@@ -198,15 +198,19 @@ def main():
     # 5. 분석 실행
     results = []
     for i, sample in enumerate(dataset):
-        # 코드 텍스트 추출 (instruction + input + output 형식)
-        code_text = sample.get("output", "")
+        # Alpaca 템플릿 구성 요소 추출
+        instruction = sample.get("instruction", "")
+        input_text = sample.get("input", "")
+        output_text = sample.get("output", "")
         is_correct = sample.get("is_correct", False)
 
-        # 분석 수행
+        # 분석 수행 (학습 시와 동일한 Alpaca 템플릿 적용)
         result = analyzer.analyze_sample_full(
-            code_text=code_text,
+            code_text=output_text,
             is_correct=is_correct,
             max_length=args.max_length,
+            instruction=instruction,
+            input_text=input_text,
         )
 
         # 메타데이터 추가
