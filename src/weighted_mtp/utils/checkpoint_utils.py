@@ -293,9 +293,13 @@ def save_hf_checkpoint(
     # 저장 디렉터리 생성
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # HuggingFace 모델 저장 (state_dict 적용 후)
-    unwrapped_model.load_state_dict(state_dict)
-    unwrapped_model.save_pretrained(save_dir)
+    # HuggingFace 형식으로 저장 (FSDP 안전: state_dict를 직접 저장)
+    # 모델 config 저장
+    unwrapped_model.config.save_pretrained(save_dir)
+
+    # state_dict를 safetensors로 저장
+    from safetensors.torch import save_file
+    save_file(state_dict, save_dir / "model.safetensors")
 
     # 토크나이저 저장
     tokenizer.save_pretrained(save_dir)

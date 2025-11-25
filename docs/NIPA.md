@@ -305,6 +305,15 @@ uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   -m weighted_mtp.pipelines.run_critic \
   --config configs/critic/critic_linear.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
+  
+MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
+
+# ref-tuning
+uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+  --master_port=29501 \
+  -m weighted_mtp.pipelines.run_ref_tuning \
+  --config configs/ref-tuning/ref_tuning.yaml \
+  --override mlflow.tracking_uri=$MLFLOW_URI
 
 MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
 
