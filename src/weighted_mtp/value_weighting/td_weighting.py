@@ -2,12 +2,11 @@
 
 Temporal Difference Learning 기반 토큰별 가중치 계산
 - TD error 계산: Bootstrapping value estimation
-- Exponential weighting: IQL/AWR 방식 (Kostrikov et al. 2021)
+- 절댓값 기반 weighting: TD error 크기 기반 중요도 계산
 - 통계 추적: 학습 모니터링 및 디버깅
 
 References:
 - Sutton & Barto "Reinforcement Learning: An Introduction"
-- Kostrikov et al. "Offline RL with Implicit Q-Learning" (2021)
 """
 
 import torch
@@ -175,39 +174,39 @@ def build_weights(
     min_weight: float = 0.1,
     max_weight: float = 3.0,
 ) -> torch.Tensor:
-    """TD error 기반 exponential weighting
+    """TD error 절댓값 기반 weighting
 
-    IQL/AWR 방식: weight = exp(advantage / β)
-    WMTP 적용: weight = exp(td_error / β)
+    TD error의 크기(magnitude)로 토큰 중요도 결정.
+    오차가 작으면 탈락 (min_weight), 오차가 크면 중요 토큰으로 강화.
+
+    수식: weight = |td_error| / β
 
     직관:
-    - Positive TD error (td > 0): weight > 1 → 중요 토큰 강화
-    - Negative TD error (td < 0): weight < 1 → 비중요 토큰 down-weight
-    - Incorrect 샘플: reward=0, value>0 → td<0 → weight<1 (자동 필터링)
+    - TD error ≈ 0: weight → min_weight (탈락, 예측 정확한 토큰)
+    - |TD error| 큼: weight 증가 (Value head 오차 큰 토큰 → 집중 학습)
 
     Args:
         td_errors: [batch, seq] TD error (compute_td_errors 출력)
-        beta: Temperature parameter (낮을수록 집중도 높음, 기본 0.9)
-        min_weight: 최소 가중치 (보수적 안정화, 기본 0.1)
+        beta: 스케일링 파라미터 (낮을수록 가중치 증가폭 큼, 기본 0.9)
+        min_weight: 최소 가중치 (탈락 기준, 기본 0.1)
         max_weight: 최대 가중치 (극단 방지, 기본 3.0)
 
     Returns:
         weights: [batch, seq] Token-level weights (clipped)
 
     Examples:
-        >>> td_errors = torch.tensor([[0.2, -0.5, 0.1]])
-        >>> weights = build_weights(td_errors, beta=0.9)
-        >>> # exp(0.2 / 0.9) ≈ 1.25
-        >>> # exp(-0.5 / 0.9) ≈ 0.57
-        >>> # exp(0.1 / 0.9) ≈ 1.12
+        >>> td_errors = torch.tensor([[0.0, 0.5, -0.9]])
+        >>> weights = build_weights(td_errors, beta=0.9, min_weight=0.1)
+        >>> # |0.0| / 0.9 = 0 → clamp → 0.1 (탈락)
+        >>> # |0.5| / 0.9 ≈ 0.56
+        >>> # |-0.9| / 0.9 = 1.0
         >>> weights
-        tensor([[1.25, 0.57, 1.12]])
+        tensor([[0.1, 0.56, 1.0]])
     """
-    # Exponential transformation: exp(td_error / beta)
-    weights = torch.exp(td_errors / beta)
+    # 절댓값 기반 weighting: |td_error| / beta
+    weights = torch.abs(td_errors) / beta
 
-    # Conservative clipping: [min_weight, max_weight]
-    # 극단적인 가중치를 방지하여 학습 안정성 확보
+    # Clipping: [min_weight, max_weight]
     weights = torch.clamp(weights, min=min_weight, max=max_weight)
 
     return weights

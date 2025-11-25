@@ -1,1 +1,0 @@
-{'sampling_method': 'difficulty', 'seed': 42, 'val_n_samples': 1000, 'difficulty': {'n_samples': 80000, 'auto_data_balancing': True, 'correct_ratio': 0.5, 'bins': {'diff_7': [7, 7], 'else': [8, 25]}, 'weights': {'diff_7': 0.35, 'else': 0.65}}}

@@ -44,6 +44,7 @@ mlflow/
 # Storage assets (keep README only)
 storage/checkpoints/
 storage/models/
+storage/mlruns_nipa
 storage/models/
 storage/datasets/
 storage/datasets/

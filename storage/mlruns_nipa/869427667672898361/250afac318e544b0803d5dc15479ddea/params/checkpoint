@@ -1,1 +1,0 @@
-{'save_dir': 'storage/checkpoints/critic/critic-pretrain-linear-overfitting', 'save_checkpoint_every': 0.2, 'save_best': True, 'save_final': True, 'save_total_limit': 2, 's3_upload': False}

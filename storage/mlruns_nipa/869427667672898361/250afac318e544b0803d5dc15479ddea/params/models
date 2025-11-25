@@ -1,1 +1,0 @@
-{'policy': {'name': 'meta-llama-mtp', 'path': 'storage/models/meta-llama-mtp', 'tokenizer_path': 'storage/models/meta-llama-mtp/tokenizer', 'params': {'dim': 4096, 'n_layers': 32, 'n_heads': 32, 'n_future_tokens': 4, 'intermediate_size': 11008, 'rope_theta': 10000.0, 'vocab_size': 32000}, 'dtype': 'bfloat16'}}

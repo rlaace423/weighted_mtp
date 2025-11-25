@@ -1,1 +1,0 @@
-{'name': 'critic-pretrain-linear-overfitting', 'description': 'Value head pretraining for TD error calculation', 'stage': 'critic', 'tags': ['critic', 'linear-value-head', 'unfrozen-trunk:2']}

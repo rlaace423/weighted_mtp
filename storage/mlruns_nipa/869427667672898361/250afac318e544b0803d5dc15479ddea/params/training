@@ -1,1 +1,0 @@
-{'n_epochs': 1.0, 'batch_size': 32, 'gradient_accumulation_steps': 1, 'trunk_learning_rate': 5e-06, 'value_head_learning_rate': 0.0003, 'max_grad_norm': 1.0, 'gamma': 1.0, 'lam': 1.0, 'num_unfrozen_layers': 2, 'value_head_type': 'linear', 'log_interval': 1, 'lr_scheduler': {'type': 'cosine', 'warmup_ratio': 0.03, 'min_lr_ratio': 0.005}}

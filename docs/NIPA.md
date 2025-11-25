@@ -382,6 +382,29 @@ tail -f logs/baseline_*.log
 
 ### 6.1 결과물 로컬로 가져오기
 
+> **주의**: 아래 명령어는 **로컬 터미널**에서 실행. NIPA 서버에 접속한 상태라면 먼저 `exit`로 나온 후 실행.
+
+**rsync로 다운로드 (권장)**
+
+```bash
+# 특정 디렉토리 다운로드
+rsync -avz --progress -e "ssh -p 10507" \
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/checkpoints/baseline/ \
+  ./storage/checkpoints_nipa/baseline/
+
+# mlruns 전체 다운로드
+rsync -avz --progress -e "ssh -p 10507" \
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/mlruns/ \
+  ./mlruns_nipa/
+```
+
+옵션 설명:
+- `-a`: 아카이브 모드 (권한, 심볼릭 링크 등 보존)
+- `-v`: 상세 출력
+- `-z`: 압축 전송
+- `--progress`: 진행률 표시
+- `-e "ssh -p 10507"`: SSH 포트 지정
+
 > **주의**: rsync/scp가 "channel 0: rcvd too much data" 또는 "Received message too long" 오류로 실패할 경우, 아래 근본 원인 해결 또는 대안 방법을 사용.
 
 **근본 원인 해결 (권장)**

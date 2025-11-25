@@ -1,1 +1,0 @@
-{'root': 'storage', 'models_dir': 'storage/models', 'datasets_dir': 'storage/datasets', 'checkpoints_dir': 'storage/checkpoints'}

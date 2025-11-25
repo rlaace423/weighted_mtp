@@ -1,5 +1,5 @@
 artifact_uri: file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns/869427667672898361/4eeb155d0a244757a04f87a3bb1fe40c/artifacts
-end_time: null
+end_time: 1764060101864
 entry_point_name: ''
 experiment_id: '869427667672898361'
 lifecycle_stage: active
@@ -9,6 +9,6 @@ source_name: ''
 source_type: 4
 source_version: ''
 start_time: 1764055696375
-status: 1
+status: 3
 tags: []
 user_id: wmtp_admin
