@@ -42,6 +42,7 @@ mlflow/
 *.safetensors
 
 # Storage assets (keep README only)
+storage/checkpoints/
 storage/models/
 storage/models/
 storage/datasets/

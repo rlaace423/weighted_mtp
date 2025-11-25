@@ -291,12 +291,13 @@ class MetaLlamaMTPAdapter(nn.Module):
         head_dim = dim // 32  # 기본 head_dim 추정
         n_heads = wq_shape[0] // head_dim
 
-        # n_future_tokens 추론 (output.weight shape에서)
-        output_shape = state_dict["transformer.output.weight"].shape
-        if len(output_shape) == 3:
-            n_future_tokens = output_shape[0]
-        else:
-            n_future_tokens = 1
+        # n_future_tokens 추론 (extra_heads 개수에서)
+        extra_heads_indices = set()
+        for k in state_dict.keys():
+            if "transformer.extra_heads." in k:
+                idx = int(k.split("extra_heads.")[1].split(".")[0])
+                extra_heads_indices.add(idx)
+        n_future_tokens = len(extra_heads_indices) + 1  # extra_heads 개수 + 1 (최소 1)
 
         # 3. ModelArgs 생성
         model_args = ModelArgs(
@@ -310,12 +311,23 @@ class MetaLlamaMTPAdapter(nn.Module):
         # 4. Transformer 생성
         transformer = Transformer(model_args)
 
-        # 5. ValueHead 생성 (checkpoint에 있는 경우)
+        # 5. ValueHead 생성 (checkpoint에 있는 경우, 타입 자동 감지)
         value_head = None
-        if any(k.startswith("value_head.") for k in state_dict.keys()):
+        value_head_keys = [k for k in state_dict.keys() if k.startswith("value_head.")]
+        if value_head_keys:
+            # state_dict 키 구조로 value_head_type 자동 감지
+            if any("value_head.mlp." in k for k in value_head_keys):
+                detected_type = "mlp"
+            elif any("value_head.linear." in k for k in value_head_keys):
+                # linear와 sigmoid는 구조가 동일, sigmoid는 forward에서만 차이
+                # checkpoint만으로 구분 불가하므로 linear로 기본 설정
+                detected_type = "linear"
+            else:
+                detected_type = value_head_type  # fallback
+
             value_head = create_value_head(
                 hidden_size=dim,
-                head_type=value_head_type,
+                head_type=detected_type,
             )
 
         # 6. Adapter 생성 및 state_dict 로드

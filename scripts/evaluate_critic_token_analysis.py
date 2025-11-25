@@ -5,10 +5,16 @@
 
 사용법:
     PYTHONPATH=src python scripts/evaluate_critic_token_analysis.py \
-        --checkpoint storage/checkpoints/critic/critic-pretrain-local/checkpoint_epoch_0.50.pt \
+        --checkpoint storage/checkpoints/critic/s3-downloaded/checkpoint_epoch_0.20.pt \
+        --tokenizer_path storage/models/meta-llama-mtp/tokenizer \
         --n_samples 100 \
         --incorrect_only \
         --output_dir results/token_analysis
+
+메모리 최적화:
+    - .pt 파일을 직접 로드하여 메모리 1회만 사용
+    - tokenizer_path를 별도 인자로 받아 checkpoint 재로드 방지
+    - MPS 환경에서는 자동으로 float32로 변환
 """
 
 import argparse
@@ -29,7 +35,7 @@ from weighted_mtp.analysis import (
     generate_report,
 )
 from weighted_mtp.data.datasets import load_dataset
-from weighted_mtp.utils.checkpoint_utils import load_checkpoint_for_evaluation
+from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,6 +105,12 @@ def main():
         help="모델 dtype (bfloat16, float16)",
     )
     parser.add_argument(
+        "--tokenizer_path",
+        type=str,
+        default="storage/models/meta-llama-mtp/tokenizer",
+        help="Tokenizer 경로 (기본값: meta-llama-mtp tokenizer)",
+    )
+    parser.add_argument(
         "--plot",
         action="store_true",
         help="시각화 생성",
@@ -135,27 +147,22 @@ def main():
 
     logger.info(f"Device: {device}, dtype: {dtype}")
 
-    # 1. Checkpoint에서 전체 모델 로딩
-    logger.info(f"Checkpoint 로딩: {args.checkpoint}")
-    adapter, metadata = load_checkpoint_for_evaluation(
-        checkpoint_path=Path(args.checkpoint),
-        device=device,
-        initialize_value_head=True,
+    # 1. Checkpoint에서 전체 모델 로딩 (메모리 효율적 직접 로드)
+    checkpoint_path = Path(args.checkpoint)
+    logger.info(f"Checkpoint 로딩: {checkpoint_path}")
+
+    # .pt 파일인 경우 직접 로드 (메모리 1회 사용)
+    # 디렉토리인 경우 safetensors 로드
+    adapter = MetaLlamaMTPAdapter.from_pretrained(
+        model_path=str(checkpoint_path),
+        device=str(device),
+        dtype=dtype,
     )
+    adapter.eval()
+    logger.info("모델 로드 완료")
 
-    model_path = metadata["config"]["model"]["path"]
-    logger.info(f"모델 경로: {model_path}")
-    logger.info(f"Checkpoint epoch: {metadata['epoch']}")
-
-    # 2. Tokenizer 로딩
-    # micro-mtp는 tokenizer가 없으므로 meta-llama-mtp tokenizer 사용
-    if "micro-mtp" in model_path:
-        tokenizer_path = "storage/models/meta-llama-mtp/tokenizer"
-    else:
-        tokenizer_path = Path(model_path) / "tokenizer"
-        if not tokenizer_path.exists():
-            tokenizer_path = model_path
-
+    # 2. Tokenizer 로딩 (CLI 인자로 직접 지정, checkpoint 재로드 불필요)
+    tokenizer_path = args.tokenizer_path
     logger.info(f"Tokenizer 로딩: {tokenizer_path}")
     tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path), use_fast=True)
     if tokenizer.pad_token is None:
