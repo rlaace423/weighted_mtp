@@ -157,8 +157,8 @@ def validate_ref_tuning(
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            # Forward
-            outputs = model(input_ids, attention_mask=attention_mask)
+            # Forward (use_cache=False: 학습 시 KV 캐시 불필요, activation checkpointing 호환)
+            outputs = model(input_ids, attention_mask=attention_mask, use_cache=False)
             logits = outputs.logits
 
             # NTP loss 계산
@@ -394,8 +394,8 @@ def run_ref_tuning_training(config: DictConfig) -> tuple[dict[str, float], str]:
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            # Forward
-            outputs = model(input_ids, attention_mask=attention_mask)
+            # Forward (use_cache=False: 학습 시 KV 캐시 불필요, activation checkpointing 호환)
+            outputs = model(input_ids, attention_mask=attention_mask, use_cache=False)
             logits = outputs.logits
 
             # NTP loss 계산
