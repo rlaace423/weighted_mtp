@@ -28,6 +28,7 @@ def compute_mtp_selective_weights(
     labels: torch.Tensor,
     attention_mask: torch.Tensor,
     k_percent: float = 0.6,
+    mode: str = "signed",
 ) -> tuple[torch.Tensor, dict]:
     """MTP-specific Rho-1 weighting: t+1 always, t+2~4 selective
 
@@ -40,6 +41,7 @@ def compute_mtp_selective_weights(
         labels: [batch, seq] - Target tokens
         attention_mask: [batch, seq] - Attention mask
         k_percent: Top k% selection ratio (0~1, default 0.6)
+        mode: "signed" (Policy > Ref만 선택) / "absolute" (차이 큰 모든 토큰 선택) / "difficult" (Ref가 어려워하는 토큰 선택)
 
     Returns:
         weights: [batch, seq, n_future] - Binary selection mask (0 or 1)
@@ -54,14 +56,9 @@ def compute_mtp_selective_weights(
     # Statistics
     stats = {}
 
-    # HEAD 0 (t+1): 무조건 선택
-    weights[:, :, 0] = attention_mask.float()
-    stats['head_0_count'] = attention_mask.sum().item()
-    stats['head_0_ratio'] = 1.0
-
-    # HEAD 1,2,3 (t+2~t+4): Rho-1 selection
-    for k in range(2, n_future + 1):  # k = 2, 3, 4
-        head_idx = k - 1  # 1, 2, 3
+    # HEAD 0,1,2,3 (t+1~t+4): 모두 Rho-1 selection
+    for k in range(1, n_future + 1):  # k = 1, 2, 3, 4
+        head_idx = k - 1  # 0, 1, 2, 3
         valid_len = seq_len - k
 
         if valid_len <= 0:
@@ -91,8 +88,16 @@ def compute_mtp_selective_weights(
             ignore_index=-100,
         ).view(batch_size, valid_len).float()
 
-        # Signed excess loss (NOT abs)
-        excess_loss = policy_ce - ref_ce  # [batch, valid_len], float32
+        # Excess loss 계산 (mode에 따라)
+        if mode == "absolute":
+            excess_loss = torch.abs(policy_ce - ref_ce)
+        elif mode == "signed":
+            excess_loss = policy_ce - ref_ce
+        elif mode == "difficult":
+            excess_loss = ref_ce
+        else:
+            raise ValueError(f"Invalid rho1_mode: {mode}. Must be 'signed', 'absolute', or 'difficult'")
+        excess_loss = excess_loss.float()  # [batch, valid_len], float32
 
         # Batch-wise top-k selection
         # labels=-100인 토큰도 제외 (instruction tokens)
@@ -116,7 +121,7 @@ def compute_mtp_selective_weights(
         # Statistics
         stats[f'head_{head_idx}_count'] = selected.sum().item()
         total_valid = valid_mask.sum().item()
-        stats[f'head_{head_idx}_ratio'] = selected.sum().item() / (total_valid + 1e-8)
+        stats[f'head_{head_idx}_ce_mean'] = policy_ce[valid_mask].mean().item()
         stats[f'head_{head_idx}_excess_mean'] = valid_excess.mean().item()
         stats[f'head_{head_idx}_threshold'] = threshold.item()
 

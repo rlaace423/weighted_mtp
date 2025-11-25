@@ -47,10 +47,7 @@ from weighted_mtp.runtime import (
     all_reduce_scalars,
     barrier,
 )
-from weighted_mtp.value_weighting.rho1_weighting import (
-    compute_mtp_selective_weights,
-    compute_rho1_stats,
-)
+from weighted_mtp.value_weighting.rho1_weighting import compute_mtp_selective_weights
 
 
 def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
@@ -114,6 +111,7 @@ def validate_rho1(
     dataloader: DataLoader,
     device: torch.device,
     k_percent: float,
+    rho1_mode: str = "signed",
 ) -> dict[str, float]:
     """Validation 수행 (Rho-1)
 
@@ -123,6 +121,7 @@ def validate_rho1(
         dataloader: Validation DataLoader
         device: 디바이스
         k_percent: Top-k selection ratio (0~1)
+        rho1_mode: "signed" (Policy > Ref만) or "absolute" (차이 큰 모든 토큰)
 
     Returns:
         Validation metrics (FSDP 환경에서는 all-reduce 적용됨)
@@ -131,6 +130,7 @@ def validate_rho1(
     ref_model.eval()
 
     total_weighted_ce_loss = 0.0
+    total_head0_ce_loss = 0.0
     total_excess_loss = 0.0
     n_batches = 0
 
@@ -160,10 +160,12 @@ def validate_rho1(
                 labels=labels,
                 attention_mask=attention_mask,
                 k_percent=k_percent,
+                mode=rho1_mode,
             )
 
-            # 5. Weighted CE loss (per-head)
+            # 5. Weighted CE loss (per-head) 및 Head0 CE loss
             batch_weighted_ce_loss = 0.0
+            batch_head0_ce_loss = 0.0
             valid_heads = 0
 
             for k in range(1, n_future + 1):
@@ -188,6 +190,12 @@ def validate_rho1(
                 valid_label_mask_k = (labels_k != -100).float()
                 combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
 
+                # Head0 (k=1): 순수 CE loss 평균 (weight 없이)
+                if k == 1:
+                    valid_count = combined_mask_k.sum()
+                    if valid_count > 0:
+                        batch_head0_ce_loss = (ce_loss_k * combined_mask_k.reshape(-1)).sum() / valid_count
+
                 # 모델 dtype 일치
                 weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
 
@@ -201,25 +209,30 @@ def validate_rho1(
 
             # 6. Metrics 수집
             total_weighted_ce_loss += weighted_ce_loss.item()
+            total_head0_ce_loss += batch_head0_ce_loss.item() if isinstance(batch_head0_ce_loss, torch.Tensor) else batch_head0_ce_loss
             total_excess_loss += selection_stats.get('head_1_excess_mean', 0.0)
             n_batches += 1
 
     # 평균 metrics 계산
     avg_weighted_ce_loss = total_weighted_ce_loss / n_batches
+    avg_head0_ce_loss = total_head0_ce_loss / n_batches
     avg_excess_loss = total_excess_loss / n_batches
 
     # Validation metrics aggregation (DDP) - 1회 통신
     reduced_val = all_reduce_scalars({
         "weighted_ce_loss": avg_weighted_ce_loss,
+        "head0_ce_loss": avg_head0_ce_loss,
         "excess_loss": avg_excess_loss,
     })
     avg_weighted_ce_loss = reduced_val["weighted_ce_loss"]
+    avg_head0_ce_loss = reduced_val["head0_ce_loss"]
     avg_excess_loss = reduced_val["excess_loss"]
 
     metrics = {
         "val_weighted_ce_loss": avg_weighted_ce_loss,
+        "val_head0_ce_loss": avg_head0_ce_loss,
         "val_excess_loss": avg_excess_loss,
-        "val_loss": avg_weighted_ce_loss,  # Best tracking용
+        "val_loss": avg_head0_ce_loss,  # Best tracking용 (Head0 CE loss)
     }
 
     return metrics
@@ -476,6 +489,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 labels=labels,
                 attention_mask=attention_mask,
                 k_percent=config.training.k_percent,
+                mode=config.training.rho1_mode,
             )
 
             # Weighted CE loss (per-head)
@@ -576,10 +590,10 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 reduced = all_reduce_scalars({
                     "weighted_ce": weighted_ce_loss.item(),
                     "selection_ratio": selection_stats['selection_ratio'],
-                    "head_0_ratio": selection_stats['head_0_ratio'],
-                    "head_1_ratio": selection_stats.get('head_1_ratio', 0.0),
-                    "head_2_ratio": selection_stats.get('head_2_ratio', 0.0),
-                    "head_3_ratio": selection_stats.get('head_3_ratio', 0.0),
+                    "head_0_ce_mean": selection_stats.get('head_0_ce_mean', 0.0),
+                    "head_1_ce_mean": selection_stats.get('head_1_ce_mean', 0.0),
+                    "head_2_ce_mean": selection_stats.get('head_2_ce_mean', 0.0),
+                    "head_3_ce_mean": selection_stats.get('head_3_ce_mean', 0.0),
                     "head_1_excess_mean": selection_stats.get('head_1_excess_mean', 0.0),
                     "head_2_excess_mean": selection_stats.get('head_2_excess_mean', 0.0),
                     "head_3_excess_mean": selection_stats.get('head_3_excess_mean', 0.0),
@@ -600,10 +614,10 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                                 "train/weighted_ce_loss": avg_weighted_ce,
                                 "train/selection_ratio": avg_selection_ratio,
                                 "train/avg_heads_per_pos": reduced["avg_heads_per_pos"],
-                                "train/head_0_ratio": reduced["head_0_ratio"],
-                                "train/head_1_ratio": reduced["head_1_ratio"],
-                                "train/head_2_ratio": reduced["head_2_ratio"],
-                                "train/head_3_ratio": reduced["head_3_ratio"],
+                                "train/head_0_ce": reduced["head_0_ce_mean"],
+                                "train/head_1_ce": reduced["head_1_ce_mean"],
+                                "train/head_2_ce": reduced["head_2_ce_mean"],
+                                "train/head_3_ce": reduced["head_3_ce_mean"],
                                 "train/head_1_excess": reduced["head_1_excess_mean"],
                                 "train/head_2_excess": reduced["head_2_excess_mean"],
                                 "train/head_3_excess": reduced["head_3_excess_mean"],
@@ -669,6 +683,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             dataloader=val_loader,
             device=device,
             k_percent=config.training.k_percent,
+            rho1_mode=config.training.rho1_mode,
         )
 
         # Epoch-level 로깅 (Rank 0만)
@@ -683,6 +698,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         "train/epoch_weighted_ce_loss": train_weighted_ce_avg,
                         "train/epoch_excess_loss": train_excess_avg,
                         "val/weighted_ce_loss": val_metrics["val_weighted_ce_loss"],
+                        "val/head0_ce_loss": val_metrics["val_head0_ce_loss"],
                         "val/excess_loss": val_metrics["val_excess_loss"],
                         "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
                         "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
@@ -693,8 +709,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 )
 
             logger.info(
-                f"Validation - Weighted CE: {val_metrics['val_weighted_ce_loss']:.4f}, "
-                f"Excess Loss: {val_metrics['val_excess_loss']:.4f}"
+                f"Validation - Head0 CE: {val_metrics['val_head0_ce_loss']:.4f}, "
+                f"Weighted CE: {val_metrics['val_weighted_ce_loss']:.4f}"
             )
 
         # Checkpoint 저장 (validation loss 개선 시만)
@@ -758,6 +774,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             dataloader=val_loader,
             device=device,
             k_percent=config.training.k_percent,
+            rho1_mode=config.training.rho1_mode,
         )
 
         save_checkpoint(
