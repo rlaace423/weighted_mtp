@@ -278,10 +278,23 @@ class MetaLlamaMTPAdapter(nn.Module):
         state_dict = checkpoint["adapter_state_dict"]
 
         # 2. State dict에서 모델 구조 추론
-        n_layers = max(
+        # trunk layers 개수
+        n_trunk = max(
             int(k.split(".")[2]) for k in state_dict.keys()
             if k.startswith("transformer.layers.")
         ) + 1
+
+        # extra_heads 개수 (n_future_tokens - 1)
+        extra_heads_indices = set()
+        for k in state_dict.keys():
+            if "transformer.extra_heads." in k:
+                idx = int(k.split("extra_heads.")[1].split(".")[0])
+                extra_heads_indices.add(idx)
+        n_extra = len(extra_heads_indices)
+        n_future_tokens = n_extra + 1  # extra_heads 개수 + 1 (최소 1)
+
+        # n_layers = trunk + extra (Transformer 구조에서 역산)
+        n_layers = n_trunk + n_extra
 
         dim = state_dict["transformer.tok_embeddings.weight"].shape[1]
         vocab_size = state_dict["transformer.tok_embeddings.weight"].shape[0]
@@ -290,14 +303,6 @@ class MetaLlamaMTPAdapter(nn.Module):
         wq_shape = state_dict["transformer.layers.0.attention.wq.weight"].shape
         head_dim = dim // 32  # 기본 head_dim 추정
         n_heads = wq_shape[0] // head_dim
-
-        # n_future_tokens 추론 (extra_heads 개수에서)
-        extra_heads_indices = set()
-        for k in state_dict.keys():
-            if "transformer.extra_heads." in k:
-                idx = int(k.split("extra_heads.")[1].split(".")[0])
-                extra_heads_indices.add(idx)
-        n_future_tokens = len(extra_heads_indices) + 1  # extra_heads 개수 + 1 (최소 1)
 
         # 3. ModelArgs 생성
         model_args = ModelArgs(

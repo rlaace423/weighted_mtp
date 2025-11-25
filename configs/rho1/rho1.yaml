@@ -51,7 +51,7 @@ dataset:
 data_sampling:
   sampling_method: "difficulty"
   seed: 42
-  val_n_samples: 5000
+  val_n_samples: 1000
 
   difficulty:
     n_samples: 200000

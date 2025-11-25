@@ -1,8 +1,10 @@
 """Code Evaluation 유틸리티
 
 생성된 코드의 execution-based 평가 및 Pass@K 메트릭 계산
+GSM8K 등 Math 벤치마크의 exact match 평가 지원
 """
 
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -70,6 +72,106 @@ def execute_code_with_tests(
         Path(temp_path).unlink(missing_ok=True)
 
     return passed
+
+
+def execute_mbpp_tests(
+    code: str,
+    test_list: list[str],
+    test_setup_code: str = "",
+    timeout: int = 5,
+) -> bool:
+    """MBPP 형식의 테스트 실행
+
+    Args:
+        code: 생성된 함수 코드
+        test_list: assert 문 리스트 (예: ["assert func(x) == y", ...])
+        test_setup_code: 테스트 실행 전 설정 코드
+        timeout: 실행 제한 시간 (초)
+
+    Returns:
+        정답 여부 (True=pass, False=fail)
+    """
+    # 테스트 코드 조합
+    test_code = "\n".join(test_list)
+    full_code = f"{test_setup_code}\n{code}\n\n{test_code}\n"
+
+    # 임시 파일로 저장
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        f.write(full_code)
+        temp_path = f.name
+
+    try:
+        result = subprocess.run(
+            ['python', temp_path],
+            capture_output=True,
+            timeout=timeout,
+            text=True,
+        )
+        passed = (result.returncode == 0)
+
+    except subprocess.TimeoutExpired:
+        passed = False
+    except Exception:
+        passed = False
+    finally:
+        Path(temp_path).unlink(missing_ok=True)
+
+    return passed
+
+
+def extract_gsm8k_answer(text: str) -> str | None:
+    """GSM8K 형식의 텍스트에서 최종 답 추출
+
+    Args:
+        text: 생성된 텍스트 (풀이 과정 포함)
+
+    Returns:
+        추출된 숫자 문자열 또는 None
+    """
+    # 1순위: #### 뒤의 숫자
+    match = re.search(r'####\s*(-?\d+(?:,\d+)*(?:\.\d+)?)', text)
+    if match:
+        return match.group(1).replace(',', '')
+
+    # 2순위: "answer is" 뒤의 숫자
+    match = re.search(r'answer\s+is\s*:?\s*(-?\d+(?:,\d+)*(?:\.\d+)?)', text, re.IGNORECASE)
+    if match:
+        return match.group(1).replace(',', '')
+
+    # 3순위: 마지막 숫자
+    numbers = re.findall(r'-?\d+(?:,\d+)*(?:\.\d+)?', text)
+    if numbers:
+        return numbers[-1].replace(',', '')
+
+    return None
+
+
+def evaluate_gsm8k_answer(
+    generated_text: str,
+    ground_truth: str,
+) -> bool:
+    """GSM8K 답변 평가 (exact match)
+
+    Args:
+        generated_text: 모델이 생성한 텍스트
+        ground_truth: 정답 숫자 문자열
+
+    Returns:
+        정답 여부 (True=correct, False=incorrect)
+    """
+    extracted = extract_gsm8k_answer(generated_text)
+    if extracted is None:
+        return False
+
+    # 숫자 비교 (정수/실수 모두 처리)
+    try:
+        extracted_num = float(extracted)
+        ground_truth_num = float(ground_truth)
+        # 부동소수점 비교 허용 오차
+        return abs(extracted_num - ground_truth_num) < 1e-6
+    except ValueError:
+        # 숫자 변환 실패 시 문자열 비교
+        return extracted.strip() == ground_truth.strip()
 
 
 def compute_pass_at_k(

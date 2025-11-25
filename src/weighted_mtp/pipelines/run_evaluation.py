@@ -16,8 +16,10 @@ from weighted_mtp.core.logging import setup_logging
 from weighted_mtp.data import load_evaluation_dataset
 from weighted_mtp.models.tokenizer_utils import load_tokenizer, resolve_tokenizer_path
 from weighted_mtp.utils import (
+    evaluate_gsm8k_answer,
     evaluate_pass_at_k,
     execute_code_with_tests,
+    execute_mbpp_tests,
     generate_with_mtp,
     load_checkpoint_for_evaluation,
 )
@@ -37,7 +39,7 @@ def run_evaluation(
 
     Args:
         checkpoint_path: Checkpoint 경로
-        dataset_name: "humaneval", "mbpp", "codecontests"
+        dataset_name: "humaneval", "mbpp", "gsm8k"
         num_samples_per_task: 각 문제당 생성 개수 (Pass@K 계산용)
         temperature: Sampling temperature
         max_new_tokens: 최대 생성 토큰 수
@@ -124,8 +126,6 @@ def run_evaluation(
     for idx, sample in enumerate(tqdm(eval_dataset, desc="Evaluating")):
         task_id = sample["task_id"]
         prompt = sample["instruction"]
-        test_code = sample["metadata"]["test"]
-        entry_point = sample["metadata"]["entry_point"]
 
         # Generate N samples
         generated_codes = generate_with_mtp(
@@ -138,15 +138,38 @@ def run_evaluation(
             device=device_obj,
         )
 
-        # Execute and check
+        # Execute and check (데이터셋별 분기)
         task_results = []
         for code in generated_codes:
-            passed = execute_code_with_tests(
-                code=code,
-                test_code=test_code,
-                entry_point=entry_point,
-                timeout=5,
-            )
+            if dataset_name == "humaneval":
+                # HumanEval: check(candidate) 형식
+                test_code = sample["metadata"]["test"]
+                entry_point = sample["metadata"]["entry_point"]
+                passed = execute_code_with_tests(
+                    code=code,
+                    test_code=test_code,
+                    entry_point=entry_point,
+                    timeout=5,
+                )
+            elif dataset_name == "mbpp":
+                # MBPP: assert 리스트 형식
+                test_list = sample["metadata"]["test_list"]
+                test_setup_code = sample["metadata"].get("test_setup_code", "")
+                passed = execute_mbpp_tests(
+                    code=code,
+                    test_list=test_list,
+                    test_setup_code=test_setup_code,
+                    timeout=5,
+                )
+            elif dataset_name == "gsm8k":
+                # GSM8K: exact match 형식
+                ground_truth = sample["metadata"]["final_answer"]
+                passed = evaluate_gsm8k_answer(
+                    generated_text=code,
+                    ground_truth=ground_truth,
+                )
+            else:
+                raise ValueError(f"지원하지 않는 데이터셋: {dataset_name}")
             task_results.append(passed)
 
         # Record
@@ -166,30 +189,30 @@ def run_evaluation(
                 "results": task_results,
             })
 
-    # 7. Compute Pass@K
+    # 7. Compute Pass@K (Chen et al. 2021 방식: 문제별 Pass@K 평균)
     logger.info("Computing Pass@K metrics...")
 
-    # Flatten all results
-    flat_results = []
-    for task in all_results:
-        flat_results.extend(task["results"])
+    k_values = [1, 5, 10, 20] if num_samples_per_task >= 20 else [1, 5, 10]
 
-    pass_at_k_metrics = evaluate_pass_at_k(
-        flat_results,
-        k_values=[1, 5, 10, 20] if num_samples_per_task >= 20 else [1, 5, 10],
-    )
-
-    # Per-task Pass@K
+    # Per-task Pass@K 계산
     per_task_pass_at_k = []
     for task in all_results:
         task_metrics = evaluate_pass_at_k(
             task["results"],
-            k_values=[1, 5, 10],
+            k_values=k_values,
         )
         per_task_pass_at_k.append({
             "task_id": task["task_id"],
             **task_metrics,
         })
+
+    # 전체 Pass@K: 문제별 Pass@K의 평균 (Chen et al. 2021)
+    pass_at_k_metrics = {}
+    for k in k_values:
+        key = f"pass@{k}"
+        values = [t[key] for t in per_task_pass_at_k if key in t]
+        if values:
+            pass_at_k_metrics[key] = sum(values) / len(values)
 
     # 8. Log results
     logger.info("=== Evaluation Results ===")

@@ -10,8 +10,11 @@ from weighted_mtp.utils.checkpoint_utils import (
 )
 from weighted_mtp.utils.evaluation_utils import (
     compute_pass_at_k,
+    evaluate_gsm8k_answer,
     evaluate_pass_at_k,
     execute_code_with_tests,
+    execute_mbpp_tests,
+    extract_gsm8k_answer,
 )
 from weighted_mtp.utils.generation_utils import (
     generate_with_mtp,
@@ -51,8 +54,11 @@ __all__ = [
     "save_checkpoint",
     # Evaluation utils
     "compute_pass_at_k",
+    "evaluate_gsm8k_answer",
     "evaluate_pass_at_k",
     "execute_code_with_tests",
+    "execute_mbpp_tests",
+    "extract_gsm8k_answer",
     # Generation utils
     "generate_with_mtp",
     # Metrics utils

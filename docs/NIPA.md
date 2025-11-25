@@ -287,32 +287,62 @@ uv run python -m weighted_mtp.pipelines.run_baseline \
 ```bash
 cd ~/grad_school/wooshikwon/weighted_mtp
 
+# MLflow 로컬 파일 저장 경로 (EC2 서버 대신 사용)
+MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
+
 # Baseline MTP
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_baseline \
-  --config configs/baseline/baseline.yaml
+  --config configs/baseline/baseline.yaml \
+  --override mlflow.tracking_uri=$MLFLOW_URI
+
+MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
 
 # Critic 사전학습
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_critic \
-  --config configs/critic/critic_linear.yaml
+  --config configs/critic/critic_linear.yaml \
+  --override mlflow.tracking_uri=$MLFLOW_URI
 
 # Verifiable Reward
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_verifiable \
-  --config configs/verifiable/verifiable.yaml
+  --config configs/verifiable/verifiable.yaml \
+  --override mlflow.tracking_uri=$MLFLOW_URI
 
 # Rho-1
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_rho1 \
-  --config configs/rho1/rho1.yaml
+  --config configs/rho1/rho1.yaml \
+  --override mlflow.tracking_uri=$MLFLOW_URI
 ```
 
-### 5.3 tmux 사용 (권장)
+### 5.3 MLflow UI로 실험 결과 확인
+
+학습 중 또는 완료 후 `mlruns/` 실험 데이터를 시각화.
+
+**1. NIPA 서버에서 MLflow UI 실행:**
+
+```bash
+cd ~/grad_school/wooshikwon/weighted_mtp
+
+# 백그라운드 실행 (터미널 닫아도 유지)
+nohup mlflow ui --backend-store-uri ./mlruns --host 0.0.0.0 --port 5000 > mlflow_ui.log 2>&1 &
+```
+
+**2. 로컬에서 SSH 포트포워딩:**
+
+```bash
+ssh -L 5000:localhost:5000 -p 10507 work@proxy1.nipa2025.ktcloud.com
+```
+
+**3. 브라우저 접속:** `http://localhost:5000`
+
+### 5.4 tmux 사용 (권장)
 
 ```bash
 # 세션 생성
@@ -331,7 +361,7 @@ uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
 # 세션 종료: tmux kill-session -t project
 ```
 
-### 5.4 백그라운드 실행 (nohup)
+### 5.5 백그라운드 실행 (nohup)
 
 ```bash
 mkdir -p logs
@@ -440,71 +470,6 @@ scripts/nipa/
 ├── verifiable.sh     # Verifiable Reward 실행
 └── rho1.sh          # Rho-1 실행
 ```
-
----
-
-## MLflow 설정
-
-### EC2 MLflow 서버 사용 (기본)
-
-```bash
-# .env 설정
-MLFLOW_TRACKING_URI=http://13.50.240.176:5000
-```
-
-### 로컬 MLflow 사용 (EC2 장애 시)
-
-EC2 서버가 다운되거나 연결 불가 시, NIPA 서버에서 직접 MLflow 실행 가능.
-
-**방법 1: 파일 기반 (서버 없이, 가장 간단)**
-
-```bash
-# 학습 실행 시 override로 로컬 파일 저장
-uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
-  --master_port=29501 \
-  -m weighted_mtp.pipelines.run_critic \
-  --config configs/critic/critic_linear.yaml \
-  --override mlflow.tracking_uri=file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns
-
-# 나중에 UI로 확인하고 싶으면
-mlflow ui --host 0.0.0.0 --port 5000 \
-  --backend-store-uri file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns
-```
-
-**방법 2: 로컬 MLflow 서버 실행**
-
-```bash
-# NIPA 서버에서 MLflow 서버 백그라운드 실행
-nohup mlflow server \
-  --host 0.0.0.0 \
-  --port 5000 \
-  --backend-store-uri sqlite:///storage/mlflow.db \
-  --default-artifact-root s3://wmtp/mlflow-artifacts \
-  > mlflow.log 2>&1 &
-
-# 학습 실행
-uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
-  --master_port=29501 \
-  -m weighted_mtp.pipelines.run_critic \
-  --config configs/critic/critic_linear.yaml \
-  --override mlflow.tracking_uri=http://localhost:5000
-```
-
-**방법 3: MLflow 없이 실행**
-
-```bash
-# MLflow 로깅 완전 비활성화
-uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
-  --master_port=29501 \
-  -m weighted_mtp.pipelines.run_critic \
-  --config configs/critic/critic_linear.yaml \
-  --override mlflow.experiment=""
-
-# 콘솔 출력을 파일로 저장
-uv run torchrun ... 2>&1 | tee storage/logs/critic_$(date +%Y%m%d_%H%M%S).log
-```
-
-> Checkpoint는 항상 `storage/checkpoints/`에 저장됨. MLflow는 메트릭 로깅용.
 
 ---
 

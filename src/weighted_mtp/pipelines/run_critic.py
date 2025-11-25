@@ -305,7 +305,6 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         mixed_precision=config.distributed.fsdp.mixed_precision,
         cpu_offload=config.distributed.fsdp.cpu_offload,
         activation_checkpointing=config.distributed.fsdp.get("activation_checkpointing", False),
-        ignored_modules=[adapter.value_head],
     )
     tokenizer = load_tokenizer_from_config(config)
 
@@ -336,9 +335,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     }
 
     if sharding_strategy == "FULL_SHARD" and world_size > 1:
-        # value_head는 ignored_modules로 FSDP에서 제외되어 sharding 안 됨
         trainable_breakdown = {
-            "value_head": trainable_breakdown_local["value_head"],  # 그대로
+            "value_head": trainable_breakdown_local["value_head"] * world_size,
             "trunk_blocks": trainable_breakdown_local["trunk_blocks"] * world_size,
             "norm": trainable_breakdown_local["norm"] * world_size,
         }
