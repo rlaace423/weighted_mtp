@@ -162,6 +162,7 @@ def create_dataloader(
     )
 
     # DataLoader 생성
+    # 분산 환경에서 drop_last=True로 모든 rank의 배치 수 동일하게 유지 (FSDP 데드락 방지)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -169,6 +170,7 @@ def create_dataloader(
         collate_fn=collator,
         num_workers=2,
         pin_memory=True,
+        drop_last=(world_size > 1),
     )
 
     return dataloader
