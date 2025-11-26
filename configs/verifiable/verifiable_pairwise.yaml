@@ -22,7 +22,7 @@ experiment:
 models:
   policy:
     name: meta-llama-mtp
-    path: storage/checkpoints/critic/critic-pretrain-linear-final/checkpoint_final.pt
+    path: storage/checkpoints/critic/critic-pretrain-pairwise-mlp/checkpoint_final.pt
     tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     params:
       dim: 4096
@@ -48,6 +48,7 @@ data_sampling:
   use_pairwise: true  # Pairwise 모드 활성화
 
   n_samples: 200000  # 최종 쌍 수 (pairwise 모드)
+  max_pairs_per_problem: 10  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
 
   difficulty_bins:
     diff_7: [7, 7]
@@ -59,10 +60,10 @@ data_sampling:
 # 학습 설정 (H200 4-GPU 최적화)
 training:
   n_epochs: 1.0
-  batch_size: 32  # Per GPU (각 배치에 pos+neg 쌍 포함)
+  batch_size: 64  # Per GPU (각 배치에 pos+neg 쌍 포함)
   gradient_accumulation_steps: 1
-  trunk_learning_rate: 1.0e-5
-  value_head_learning_rate: 1.0e-3
+  trunk_learning_rate: 0
+  value_head_learning_rate: 5.0e-4  
   max_grad_norm: 0.5
 
   # Normalized IQL weighting (Advantage Whitening)

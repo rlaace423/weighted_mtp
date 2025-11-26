@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: critic-pretrain-pairwise-mlp
+  name: critic-pretrain-pairwise
   description: "Pairwise ranking loss for relative comparison within same instruction"
   stage: critic
   tags:
@@ -41,13 +41,14 @@ dataset:
   validation: storage/datasets/codecontests/processed/valid.jsonl
   max_length: 2048
 
-# 데이터 샘플링 (Pairwise 모드)
+# 데이터 샘플링 (Pairwise)
 data_sampling:
   seed: 42
   val_n_samples: 1000
-  use_pairwise: true  # Pairwise Ranking Loss 활성화
+  use_pairwise: true
 
-  n_samples: 50000  # 최종 쌍 수 (pairwise 모드)
+  n_samples: 55000  # 학습용 (correct, incorrect) 쌍
+  max_pairs_per_problem: 15  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
 
   difficulty_bins:
     diff_7: [7, 7]
@@ -59,26 +60,26 @@ data_sampling:
 # 학습 설정 (H200 4-GPU 최적화)
 training:
   n_epochs: 1.0
-  batch_size: 16  # H200 80GB × 4 + concat 최적화
-  gradient_accumulation_steps: 2
+  batch_size: 64  # Pairwise는 메모리 2배 소모 (pos + neg)
+  gradient_accumulation_steps: 1
   trunk_learning_rate: 0
   value_head_learning_rate: 5.0e-4
   max_grad_norm: 1.0
   num_unfrozen_layers: 0
   value_head_type: mlp
-  dropout: 0.3  # Shortcut Learning 방지
-  log_interval: 1
+  dropout: 0.1  # Shortcut Learning 방지
+  log_interval: 10
 
   # Learning rate scheduler
   lr_scheduler:
     type: cosine
-    warmup_ratio: 0.05
+    warmup_ratio: 0.03
     min_lr_ratio: 0.01
 
 # 체크포인트
 checkpoint:
   save_dir: storage/checkpoints/critic/${experiment.name}
-  save_checkpoint_every: 0.1
+  save_checkpoint_every: 0.2
   save_best: true
   save_final: true
   save_total_limit: 3

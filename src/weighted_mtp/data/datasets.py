@@ -62,6 +62,7 @@ def load_dataset(
     n_samples = sampling_config.get("n_samples", 100000)
     difficulty_weights = sampling_config.get("difficulty_weights")
     difficulty_bins = sampling_config.get("difficulty_bins")
+    max_pairs_per_problem = sampling_config.get("max_pairs_per_problem")  # problem당 cap
 
     # JSONL 경로 확인
     data_files = _get_dataset_paths(dataset_name)
@@ -90,6 +91,7 @@ def load_dataset(
             difficulty_weights=difficulty_weights,
             difficulty_bins=difficulty_bins,
             seed=seed,
+            max_pairs_per_problem=max_pairs_per_problem,
         )
 
         # 분산 처리
@@ -702,6 +704,7 @@ def _sample_pairs_by_difficulty(
     difficulty_weights: dict,
     difficulty_bins: dict,
     seed: int,
+    max_pairs_per_problem: Optional[int] = None,
 ) -> list[dict]:
     """Problem-level 쌍을 difficulty 기반으로 샘플링
 
@@ -713,6 +716,7 @@ def _sample_pairs_by_difficulty(
         difficulty_weights: 난이도별 가중치
         difficulty_bins: 난이도 구간
         seed: 랜덤 시드
+        max_pairs_per_problem: problem당 최대 쌍 수 (None이면 무제한)
 
     Returns:
         [{"correct_idx": int, "incorrect_idx": int, "problem_id": str}, ...]
@@ -749,10 +753,16 @@ def _sample_pairs_by_difficulty(
 
     # 2. 가용 데이터 로깅
     logger.info("=== Problem-level 쌍 샘플링 ===")
+    if max_pairs_per_problem:
+        logger.info(f"max_pairs_per_problem: {max_pairs_per_problem} (다양성 확보)")
     for bin_name in difficulty_bins:
         problems = bin_problems.get(bin_name, [])
         total_pairs = sum(p["n_pairs"] for p in problems)
-        logger.info(f"{bin_name}: {len(problems):,} problems, {total_pairs:,} 가용 쌍")
+        if max_pairs_per_problem:
+            effective_pairs = sum(min(p["n_pairs"], max_pairs_per_problem) for p in problems)
+            logger.info(f"{bin_name}: {len(problems):,} problems, {effective_pairs:,} effective 쌍 (cap 적용)")
+        else:
+            logger.info(f"{bin_name}: {len(problems):,} problems, {total_pairs:,} 가용 쌍")
 
     # 3. Difficulty weight에 따라 bin별 샘플 수 할당
     selected_pairs = []
@@ -775,6 +785,7 @@ def _sample_pairs_by_difficulty(
             problems=problems,
             n_samples=bin_n_samples,
             seed=seed + hash(bin_name) % (2**31),
+            max_pairs_per_problem=max_pairs_per_problem,
         )
 
         selected_pairs.extend(bin_pairs)
@@ -810,17 +821,20 @@ def _reservoir_sample_pairs(
     problems: list[dict],
     n_samples: int,
     seed: int,
+    max_pairs_per_problem: Optional[int] = None,
 ) -> list[dict]:
-    """Problem 리스트에서 쌍을 가중치 기반 샘플링
+    """Problem 리스트에서 쌍을 가중치 기반 샘플링 (problem당 cap 지원)
 
     O(n_samples) 복잡도로 효율적 샘플링:
     1. Problem을 n_pairs 비례 가중치로 샘플링
     2. 선택된 problem에서 랜덤하게 (correct, incorrect) 쌍 생성
+    3. max_pairs_per_problem 설정 시 problem당 최대 쌍 수 제한
 
     Args:
         problems: [{problem_id, correct_indices, incorrect_indices, n_pairs}, ...]
         n_samples: 샘플링할 쌍 수
         seed: 랜덤 시드
+        max_pairs_per_problem: problem당 최대 쌍 수 (None이면 무제한)
 
     Returns:
         [{"correct_idx": int, "incorrect_idx": int, "problem_id": str}, ...]
@@ -828,45 +842,75 @@ def _reservoir_sample_pairs(
     random.seed(seed)
     np.random.seed(seed)
 
-    # 총 가용 쌍 수 계산
-    total_pairs = sum(p["n_pairs"] for p in problems)
+    # max_pairs_per_problem 적용 시 effective n_pairs 계산
+    if max_pairs_per_problem:
+        effective_n_pairs = [min(p["n_pairs"], max_pairs_per_problem) for p in problems]
+        total_effective_pairs = sum(effective_n_pairs)
+    else:
+        effective_n_pairs = [p["n_pairs"] for p in problems]
+        total_effective_pairs = sum(effective_n_pairs)
 
-    if total_pairs <= n_samples:
-        # 전체 쌍이 목표보다 적으면 모두 반환
+    # 전체 쌍이 목표보다 적으면 모두 반환 (cap 적용)
+    if total_effective_pairs <= n_samples:
         all_pairs = []
-        for p in problems:
+        for p_idx, p in enumerate(problems):
+            pairs_from_this = 0
+            max_from_this = effective_n_pairs[p_idx]
             for c_idx in p["correct_indices"]:
                 for i_idx in p["incorrect_indices"]:
+                    if pairs_from_this >= max_from_this:
+                        break
                     all_pairs.append({
                         "correct_idx": c_idx,
                         "incorrect_idx": i_idx,
                         "problem_id": p["problem_id"],
                     })
+                    pairs_from_this += 1
+                if pairs_from_this >= max_from_this:
+                    break
+        random.shuffle(all_pairs)
         return all_pairs
 
-    # 가중치 계산 (n_pairs 비례)
-    weights = np.array([p["n_pairs"] for p in problems], dtype=np.float64)
+    # 가중치 계산 (effective n_pairs 비례)
+    weights = np.array(effective_n_pairs, dtype=np.float64)
     weights /= weights.sum()
 
-    # Problem 인덱스를 가중치 기반으로 n_samples개 샘플링
-    problem_indices = np.random.choice(
-        len(problems),
-        size=n_samples,
-        replace=True,
-        p=weights,
-    )
+    # Problem별 카운터 (max_pairs_per_problem 적용 시)
+    problem_count = defaultdict(int) if max_pairs_per_problem else None
 
-    # 각 선택된 problem에서 랜덤하게 쌍 생성
     result = []
-    for p_idx in problem_indices:
+    max_attempts = n_samples * 10  # 무한루프 방지
+    attempts = 0
+
+    while len(result) < n_samples and attempts < max_attempts:
+        attempts += 1
+
+        # Problem 선택
+        p_idx = np.random.choice(len(problems), p=weights)
         p = problems[p_idx]
+
+        # max_pairs_per_problem 체크
+        if max_pairs_per_problem and problem_count[p["problem_id"]] >= max_pairs_per_problem:
+            continue
+
+        # 랜덤 쌍 생성
         c_idx = random.choice(p["correct_indices"])
         i_idx = random.choice(p["incorrect_indices"])
+
         result.append({
             "correct_idx": c_idx,
             "incorrect_idx": i_idx,
             "problem_id": p["problem_id"],
         })
+
+        if problem_count is not None:
+            problem_count[p["problem_id"]] += 1
+
+    if len(result) < n_samples:
+        logger.warning(
+            f"max_pairs_per_problem={max_pairs_per_problem} 제약으로 "
+            f"목표 {n_samples:,}개 중 {len(result):,}개만 샘플링됨"
+        )
 
     return result
 

@@ -169,6 +169,7 @@ class MetaLlamaMTPAdapter(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         return_value_logits: bool = False,
         return_hidden_states: bool = False,
+        trunk_frozen: bool = False,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
         """통일된 forward 인터페이스 (FSDP 호환)
 
@@ -180,6 +181,8 @@ class MetaLlamaMTPAdapter(nn.Module):
             attention_mask: [batch, seq] attention mask (현재 미사용, 향후 확장)
             return_value_logits: True면 value_logits 반환 (Critic/Verifiable용)
             return_hidden_states: True면 hidden_states 반환 (Verifiable용)
+            trunk_frozen: True면 trunk forward를 no_grad로 실행하여 메모리 절감
+                          (num_unfrozen_layers=0일 때 사용)
 
         Returns:
             return_value_logits=False:
@@ -209,12 +212,26 @@ class MetaLlamaMTPAdapter(nn.Module):
 
         # Critic Stage 1: Value head만 학습 (MTP heads 계산 생략)
         if return_value_logits and not return_hidden_states:
-            _, hidden_states = self.transformer(
-                input_ids,
-                start_pos=0,
-                return_all_heads=False,
-                return_hidden_states=True,
-            )
+            if trunk_frozen:
+                # trunk 완전 frozen → no_grad로 activation 저장 방지 (메모리 절감)
+                with torch.no_grad():
+                    _, hidden_states = self.transformer(
+                        input_ids,
+                        start_pos=0,
+                        return_all_heads=False,
+                        return_hidden_states=True,
+                    )
+                # value_head 학습을 위해 gradient 연결점 생성
+                hidden_states = hidden_states.detach().requires_grad_(True)
+            else:
+                # trunk 일부 학습 → 기존 방식 (activation 저장 필요)
+                _, hidden_states = self.transformer(
+                    input_ids,
+                    start_pos=0,
+                    return_all_heads=False,
+                    return_hidden_states=True,
+                )
+
             value_logits = self.value_head(hidden_states)
             return {
                 "value_logits": value_logits,

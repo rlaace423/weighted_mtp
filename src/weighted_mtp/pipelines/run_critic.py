@@ -260,6 +260,11 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         for param in adapter.transformer.parameters():
             param.requires_grad = False
 
+    # trunk 완전 frozen 여부 (메모리 최적화용)
+    trunk_frozen = (num_unfrozen == 0)
+    if trunk_frozen:
+        logger.info("Trunk frozen optimization enabled (no_grad for trunk forward)")
+
     # Value head는 항상 학습
     for param in adapter.value_head.parameters():
         param.requires_grad = True
@@ -510,7 +515,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             combined_input_ids = torch.cat([pos_input_ids, neg_input_ids], dim=0)
             combined_attention_mask = torch.cat([pos_attention_mask, neg_attention_mask], dim=0)
 
-            combined_outputs = adapter(combined_input_ids, combined_attention_mask, return_value_logits=True)
+            combined_outputs = adapter(combined_input_ids, combined_attention_mask, return_value_logits=True, trunk_frozen=trunk_frozen)
             combined_value_logits = combined_outputs["value_logits"]
 
             pos_value_logits = combined_value_logits[:batch_size]
