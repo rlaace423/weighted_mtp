@@ -2,16 +2,14 @@
 
 메타데이터 기반 효율적 로딩:
 - 전체 데이터 로드 없이 메타데이터만으로 샘플 선택
-- Config 파라미터 기반 자동 샘플링 전략 결정:
-  1. difficulty_weights 있음 → Difficulty-based sampling
-  2. auto_data_balancing=True → Balanced correct/incorrect sampling
-  3. correct_ratio=1.0 → Correct-only sampling
-  4. 기본값 → Random sampling
+- Difficulty 기반 샘플링 (bins, weights, correct_ratio 등)
+- use_pairwise 옵션으로 Pairwise 포맷 변환 지원
 - 메모리 사용량 99% 절감
 """
 
 from pathlib import Path
 from typing import Optional
+from collections import defaultdict
 import logging
 import random
 import json
@@ -42,17 +40,16 @@ def load_dataset(
     재현성을 위해 모든 rank가 동일한 시드로 전체 인덱스를 계산한 후,
     rank::world_size 패턴으로 서브셋을 선택합니다.
 
-    샘플링 전략은 sampling_config.sampling_method에 의해 결정됩니다:
-    - "problems": Problem ID 기반 샘플링 (n_problems + max_samples)
-    - "difficulty": 난이도 기반 샘플링 (n_samples, difficulty_weights 등)
-
     Args:
         dataset_name: 데이터셋 이름 (codecontests, mbpp, humaneval)
         split: 데이터 스플릿 (train, validation, test)
         sampling_config: 샘플링 설정 딕셔너리
-            - sampling_method: "problems" 또는 "difficulty"
-            - problems: {n_problems, max_samples, accuracy_range, sample_count_range}
-            - difficulty: {n_samples, auto_data_balancing, correct_ratio, difficulty_weights, difficulty_bins}
+            - use_pairwise: Pairwise 포맷 변환 여부 (기본: False)
+            - n_samples: 샘플링할 총 샘플 수
+            - auto_data_balancing: correct/incorrect 균형 샘플링
+            - correct_ratio: correct 샘플 비율
+            - difficulty_weights: 난이도별 가중치
+            - difficulty_bins: 난이도 구간 정의
         seed: 랜덤 시드
         rank: 현재 프로세스의 global rank (기본: 0)
         world_size: 전체 프로세스 수 (기본: 1)
@@ -72,39 +69,68 @@ def load_dataset(
 
     logger.info(f"메타데이터 기반 샘플링 시작: {dataset_name}/{split}")
 
-    # 1. 전체 샘플링 인덱스 계산 (모든 rank 동일, 재현성 보장)
-    all_indices = _compute_sampling_indices_from_metadata(
+    # use_pairwise 옵션 확인
+    use_pairwise = sampling_config.get("use_pairwise", False)
+
+    # 1. Difficulty 기반 인덱스 계산 (모든 rank 동일, 재현성 보장)
+    all_indices = _compute_sampling_indices(
         metadata=metadata,
         sampling_config=sampling_config,
         seed=seed,
     )
 
-    # 2. Rank 담당 서브셋 필터링 (분산 학습)
-    if world_size > 1:
-        rank_indices = all_indices[rank::world_size]
-        logger.info(
-            f"[Rank {rank}/{world_size}] 전체 {len(all_indices):,} 샘플 중 "
-            f"{len(rank_indices):,} 샘플 로드 (분산 학습)"
-        )
-    else:
-        rank_indices = all_indices
-        logger.info(f"메타데이터 기반 샘플링 완료: {len(rank_indices):,} 인덱스 (로컬 환경)")
-
-    # 3. 해당 인덱스의 라인만 JSONL에서 읽기
+    # 2. JSONL 경로 확인
     data_files = _get_dataset_paths(dataset_name)
     if split not in data_files:
         raise ValueError(
             f"스플릿 '{split}'이 존재하지 않습니다. "
             f"가능한 스플릿: {list(data_files.keys())}"
         )
-
     jsonl_path = Path(data_files[split])
-    samples = _read_jsonl_by_indices(jsonl_path, rank_indices)
+
+    # 3. use_pairwise에 따라 로딩 방식 결정
+    if use_pairwise:
+        # Pairwise 모드: 선택된 인덱스 내에서 (correct, incorrect) 쌍 생성
+        all_pairs = _create_pairs_from_indices(
+            indices=all_indices,
+            metadata=metadata,
+            seed=seed,
+        )
+
+        # Rank 담당 쌍 필터링
+        if world_size > 1:
+            rank_pairs = all_pairs[rank::world_size]
+            logger.info(
+                f"[Rank {rank}/{world_size}] 전체 {len(all_pairs):,} 쌍 중 "
+                f"{len(rank_pairs):,} 쌍 로드 (분산 학습)"
+            )
+        else:
+            rank_pairs = all_pairs
+            logger.info(f"Pairwise 샘플링 완료: {len(rank_pairs):,} 쌍 (로컬 환경)")
+
+        # JSONL에서 쌍 데이터 읽기
+        samples = _read_jsonl_pairwise(jsonl_path, rank_pairs)
+
+    else:
+        # Pointwise 모드: 기존 방식
+        if world_size > 1:
+            rank_indices = all_indices[rank::world_size]
+            logger.info(
+                f"[Rank {rank}/{world_size}] 전체 {len(all_indices):,} 샘플 중 "
+                f"{len(rank_indices):,} 샘플 로드 (분산 학습)"
+            )
+        else:
+            rank_indices = all_indices
+            logger.info(f"메타데이터 기반 샘플링 완료: {len(rank_indices):,} 인덱스 (로컬 환경)")
+
+        # JSONL에서 인덱스 기반 데이터 읽기
+        samples = _read_jsonl_by_indices(jsonl_path, rank_indices)
 
     # 4. HuggingFace Dataset으로 변환
     dataset = Dataset.from_list(samples)
 
-    logger.info(f"데이터셋 로드 완료: {len(dataset):,} 샘플")
+    mode_str = "Pairwise" if use_pairwise else "Pointwise"
+    logger.info(f"데이터셋 로드 완료 ({mode_str}): {len(dataset):,} 샘플")
 
     return dataset
 
@@ -214,15 +240,14 @@ def _load_metadata(
         return None
 
 
-def _compute_sampling_indices_from_metadata(
+def _compute_sampling_indices(
     metadata: list[dict],
     sampling_config: dict,
     seed: int,
 ) -> list[int]:
-    """메타데이터 기반으로 샘플링 인덱스 계산 (sampling_method 기반 분기)
+    """메타데이터 기반으로 샘플링 인덱스 계산
 
     전체 데이터를 로드하지 않고 메타데이터만으로 샘플 인덱스를 계산합니다.
-    sampling_config.sampling_method에 따라 샘플링 전략을 결정합니다.
 
     Args:
         metadata: 메타데이터 리스트
@@ -235,58 +260,41 @@ def _compute_sampling_indices_from_metadata(
     random.seed(seed)
     np.random.seed(seed)
 
-    sampling_method = sampling_config.get("sampling_method")
+    # 샘플링 설정 추출
+    n_samples = sampling_config.get("n_samples", len(metadata))
+    auto_data_balancing = sampling_config.get("auto_data_balancing", False)
+    correct_ratio = sampling_config.get("correct_ratio", 0.5)
+    difficulty_weights = sampling_config.get("difficulty_weights")
+    difficulty_bins = sampling_config.get("difficulty_bins")
 
-    # 1. Problems 방식: Problem ID 기반 샘플링
-    if sampling_method == "problems":
-        logger.info("샘플링 전략: Problem ID 기반 샘플링")
-        problems_config = sampling_config.get("problems", {})
-        return _sample_by_problem_id(
-            metadata=metadata,
-            problems_config=problems_config,
-            seed=seed,
+    # Difficulty-based sampling
+    if difficulty_weights is not None and difficulty_bins is not None:
+        logger.info("샘플링 전략: Difficulty-based curriculum learning")
+        return _sample_by_difficulty(
+            metadata, n_samples, difficulty_weights, difficulty_bins,
+            auto_data_balancing, correct_ratio, seed
         )
 
-    # 2. Difficulty 방식: 기존 로직
-    elif sampling_method == "difficulty":
-        difficulty_config = sampling_config.get("difficulty", {})
-        n_samples = difficulty_config.get("n_samples", len(metadata))
-        auto_data_balancing = difficulty_config.get("auto_data_balancing", False)
-        correct_ratio = difficulty_config.get("correct_ratio", 0.5)
-        difficulty_weights = difficulty_config.get("difficulty_weights")
-        difficulty_bins = difficulty_config.get("difficulty_bins")
+    # Balanced correct/incorrect sampling
+    if auto_data_balancing:
+        logger.info(f"샘플링 전략: Balanced sampling (correct_ratio={correct_ratio})")
+        return _sample_balanced(
+            metadata, n_samples, correct_ratio, seed
+        )
 
-        # Difficulty-based sampling
-        if difficulty_weights is not None and difficulty_bins is not None:
-            logger.info("샘플링 전략: Difficulty-based curriculum learning")
-            return _sample_by_difficulty(
-                metadata, n_samples, difficulty_weights, difficulty_bins,
-                auto_data_balancing, correct_ratio, seed
-            )
+    # Correct-only sampling
+    if correct_ratio == 1.0:
+        logger.info("샘플링 전략: Correct-only sampling")
+        return _sample_correct_only(
+            metadata, n_samples, seed
+        )
 
-        # Balanced correct/incorrect sampling
-        if auto_data_balancing:
-            logger.info(f"샘플링 전략: Balanced sampling (correct_ratio={correct_ratio})")
-            return _sample_balanced(
-                metadata, n_samples, correct_ratio, seed
-            )
-
-        # Correct-only sampling
-        if correct_ratio == 1.0:
-            logger.info("샘플링 전략: Correct-only sampling")
-            return _sample_correct_only(
-                metadata, n_samples, seed
-            )
-
-        # Random sampling (fallback)
-        logger.info("샘플링 전략: Random sampling")
-        total_samples = len(metadata)
-        indices = random.sample(range(total_samples), min(n_samples, total_samples))
-        logger.info(f"Random 샘플링 완료: {len(indices)} 인덱스")
-        return indices
-
-    else:
-        raise ValueError(f"잘못된 sampling_method: {sampling_method}")
+    # Random sampling (fallback)
+    logger.info("샘플링 전략: Random sampling")
+    total_samples = len(metadata)
+    indices = random.sample(range(total_samples), min(n_samples, total_samples))
+    logger.info(f"Random 샘플링 완료: {len(indices)} 인덱스")
+    return indices
 
 
 def _sample_by_difficulty(
@@ -661,118 +669,6 @@ def _sample_correct_only(
     return selected_indices
 
 
-def _sample_by_problem_id(
-    metadata: list[dict],
-    problems_config: dict,
-    seed: int,
-) -> list[int]:
-    """Problem ID 기반 샘플링
-
-    조건에 맞는 problem_id들의 샘플을 순차적으로 수집하여
-    max_samples에 도달하면 중단합니다.
-    마지막 문제를 제외하고는 각 문제의 모든 샘플(correct/incorrect)이 포함됩니다.
-
-    Args:
-        metadata: 메타데이터 리스트
-        problems_config: 설정
-            - max_samples: 최대 샘플 수 상한
-            - accuracy_range: [min, max] 정답률 범위 (0.0 ~ 1.0)
-            - sample_count_range: [min, max] 샘플수 범위
-        seed: 랜덤 시드
-
-    Returns:
-        선택된 인덱스 리스트
-    """
-    random.seed(seed)
-
-    # 설정 추출
-    max_samples = problems_config.get("max_samples")
-    accuracy_range = problems_config.get("accuracy_range", [0.0, 1.0])
-    sample_count_range = problems_config.get("sample_count_range", [1, float('inf')])
-
-    min_accuracy, max_accuracy = accuracy_range
-    min_count, max_count = sample_count_range
-
-    logger.info(f"=== Problem ID 기반 샘플링 ===")
-    logger.info(f"max_samples: {max_samples}")
-    logger.info(f"정답률 범위: {min_accuracy*100:.0f}%-{max_accuracy*100:.0f}%")
-    logger.info(f"샘플수 범위: {min_count}-{max_count}")
-
-    # problem_id 필드 확인
-    if "problem_id" not in metadata[0]:
-        raise ValueError(
-            "problem_id 필드가 메타데이터에 없습니다. "
-            "먼저 metadata에 problem_id를 추가하세요."
-        )
-
-    # problem_id별 통계 계산
-    from collections import defaultdict
-    problem_stats = defaultdict(lambda: {"correct": 0, "incorrect": 0, "indices": []})
-
-    for idx, meta in enumerate(metadata):
-        pid = meta.get("problem_id")
-        is_correct = meta.get("is_correct", True)
-
-        problem_stats[pid]["indices"].append(idx)
-        if is_correct:
-            problem_stats[pid]["correct"] += 1
-        else:
-            problem_stats[pid]["incorrect"] += 1
-
-    # 조건에 맞는 problem_id 필터링
-    valid_problems = []
-    for pid, stats in problem_stats.items():
-        total = stats["correct"] + stats["incorrect"]
-        accuracy = stats["correct"] / total if total > 0 else 0
-
-        if (min_accuracy <= accuracy <= max_accuracy and
-            min_count <= total <= max_count):
-            valid_problems.append(pid)
-
-    logger.info(f"전체 문제: {len(problem_stats)}개, 조건 충족: {len(valid_problems)}개")
-
-    if len(valid_problems) == 0:
-        raise ValueError(
-            f"조건을 충족하는 문제가 없습니다. "
-            f"정답률: {min_accuracy*100:.0f}%-{max_accuracy*100:.0f}%, "
-            f"샘플수: {min_count}-{max_count}"
-        )
-
-    # 문제 순서 랜덤화 후 순차적으로 추가 (problem 단위 보장)
-    random.shuffle(valid_problems)
-
-    selected_indices = []
-    included_problems = 0
-
-    for pid in valid_problems:
-        problem_indices = problem_stats[pid]["indices"]
-
-        # 현재 문제를 추가해도 max_samples 이하인 경우
-        if len(selected_indices) + len(problem_indices) <= max_samples:
-            selected_indices.extend(problem_indices)
-            included_problems += 1
-        else:
-            # max_samples 초과: 이 문제는 포함하지 않고 종료
-            remaining = max_samples - len(selected_indices)
-            if remaining > 0:
-                # 부분 포함 (마지막 문제만 잘림)
-                random.shuffle(problem_indices)
-                selected_indices.extend(problem_indices[:remaining])
-                included_problems += 1
-                logger.info(f"마지막 문제 부분 포함: {remaining}/{len(problem_indices)} 샘플")
-            break
-
-    total_collected = len(selected_indices)
-    logger.info(f"선택된 샘플: {total_collected:,}개 ({included_problems}개 문제)")
-
-    # 최종 섞기
-    random.shuffle(selected_indices)
-
-    logger.info(f"Problem ID 기반 샘플링 완료: {len(selected_indices):,} 인덱스")
-
-    return selected_indices
-
-
 def _read_jsonl_by_indices(
     jsonl_path: Path,
     indices: list[int],
@@ -875,3 +771,185 @@ def load_evaluation_dataset(
 
     # HuggingFace Dataset으로 변환
     return Dataset.from_list(samples)
+
+
+# ============================================================================
+# Pairwise 포맷 변환 함수들
+# ============================================================================
+
+
+def _create_pairs_from_indices(
+    indices: list[int],
+    metadata: list[dict],
+    seed: int,
+) -> list[dict]:
+    """Difficulty 샘플링된 인덱스를 (correct, incorrect) 쌍으로 변환
+
+    동일 problem_id 내에서만 쌍을 생성합니다.
+
+    Args:
+        indices: difficulty 샘플링으로 선택된 인덱스
+        metadata: 전체 메타데이터
+        seed: 랜덤 시드
+
+    Returns:
+        [{"correct_idx": int, "incorrect_idx": int}, ...] 리스트
+
+    Raises:
+        ValueError: 쌍 생성이 불가능한 경우
+    """
+    random.seed(seed)
+
+    # 필수 필드 확인
+    if len(metadata) == 0:
+        raise ValueError("메타데이터가 비어있습니다.")
+
+    if "problem_id" not in metadata[0]:
+        raise ValueError(
+            "problem_id 필드가 메타데이터에 없습니다. "
+            "Pairwise 모드에는 problem_id가 필수입니다."
+        )
+
+    if "is_correct" not in metadata[0]:
+        raise ValueError(
+            "is_correct 필드가 메타데이터에 없습니다. "
+            "Pairwise 모드에는 is_correct가 필수입니다."
+        )
+
+    # 선택된 인덱스를 problem_id별로 그룹핑
+    indices_set = set(indices)
+    problem_groups = defaultdict(lambda: {"correct": [], "incorrect": []})
+
+    for idx in indices:
+        meta = metadata[idx]
+        pid = meta.get("problem_id")
+        is_correct = meta.get("is_correct")
+
+        if pid is None:
+            continue
+
+        if is_correct:
+            problem_groups[pid]["correct"].append(idx)
+        else:
+            problem_groups[pid]["incorrect"].append(idx)
+
+    # correct와 incorrect가 모두 있는 problem에서 쌍 생성
+    pairs = []
+    valid_problems = 0
+
+    for pid, groups in problem_groups.items():
+        correct_list = groups["correct"]
+        incorrect_list = groups["incorrect"]
+
+        if len(correct_list) > 0 and len(incorrect_list) > 0:
+            valid_problems += 1
+            # 모든 조합 생성
+            for c_idx in correct_list:
+                for i_idx in incorrect_list:
+                    pairs.append({"correct_idx": c_idx, "incorrect_idx": i_idx})
+
+    logger.info(
+        f"Pairwise 쌍 생성: {len(indices):,}개 인덱스 → "
+        f"{valid_problems:,}개 문제에서 {len(pairs):,}개 쌍 생성"
+    )
+
+    # 쌍이 없으면 에러
+    if len(pairs) == 0:
+        # 디버깅 정보 수집
+        total_correct = sum(len(g["correct"]) for g in problem_groups.values())
+        total_incorrect = sum(len(g["incorrect"]) for g in problem_groups.values())
+
+        raise ValueError(
+            f"Pairwise 쌍 생성 실패: 동일 problem_id 내에 correct와 incorrect가 "
+            f"모두 있는 문제가 없습니다.\n"
+            f"선택된 인덱스 분포: correct={total_correct:,}, incorrect={total_incorrect:,}\n"
+            f"correct_ratio를 0.5에 가깝게 설정하거나 n_samples를 늘려보세요."
+        )
+
+    # 섞기
+    random.shuffle(pairs)
+
+    return pairs
+
+
+def _read_jsonl_pairwise(
+    jsonl_path: Path,
+    pairs: list[dict],
+) -> list[dict]:
+    """Pairwise 샘플 로딩
+
+    Args:
+        jsonl_path: JSONL 파일 경로
+        pairs: [{"correct_idx": int, "incorrect_idx": int}, ...] 리스트
+
+    Returns:
+        [{instruction, input, correct_output, incorrect_output}, ...] 리스트
+
+    Raises:
+        ValueError: 요청된 쌍 수와 로드된 쌍 수가 다른 경우
+    """
+    if not jsonl_path.exists():
+        raise FileNotFoundError(f"JSONL 파일이 존재하지 않습니다: {jsonl_path}")
+
+    # 필요한 모든 인덱스 수집
+    all_indices = set()
+    for pair in pairs:
+        all_indices.add(pair["correct_idx"])
+        all_indices.add(pair["incorrect_idx"])
+
+    logger.info(f"Pairwise 로딩: {len(pairs):,} 쌍, {len(all_indices):,} 유니크 인덱스")
+
+    # 인덱스별 샘플 로드
+    idx_to_sample = {}
+    target_set = set(all_indices)
+
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line_idx, line in enumerate(f):
+            if line_idx in target_set:
+                try:
+                    sample = json.loads(line.strip())
+                    idx_to_sample[line_idx] = sample
+                except json.JSONDecodeError as e:
+                    logger.warning(f"라인 {line_idx} 파싱 오류: {e}")
+                    continue
+
+                # 모든 목표 샘플을 찾았으면 종료
+                if len(idx_to_sample) >= len(all_indices):
+                    break
+
+    # 쌍 구성
+    result = []
+    skipped = 0
+    for pair in pairs:
+        correct_idx = pair["correct_idx"]
+        incorrect_idx = pair["incorrect_idx"]
+
+        if correct_idx not in idx_to_sample or incorrect_idx not in idx_to_sample:
+            skipped += 1
+            continue
+
+        correct_sample = idx_to_sample[correct_idx]
+        incorrect_sample = idx_to_sample[incorrect_idx]
+
+        result.append({
+            "instruction": correct_sample["instruction"],
+            "input": correct_sample.get("input", ""),
+            "correct_output": correct_sample["output"],
+            "incorrect_output": incorrect_sample["output"],
+        })
+
+    if skipped > 0:
+        logger.warning(f"Pairwise 로딩 중 {skipped:,}개 쌍 스킵 (인덱스 누락)")
+
+    # 요청된 쌍 수와 로드된 쌍 수 검증
+    if len(result) < len(pairs):
+        missing = len(pairs) - len(result)
+        raise ValueError(
+            f"Pairwise 로딩 실패: {missing:,}개 쌍 누락. "
+            f"요청: {len(pairs):,}, 로드: {len(result):,}. "
+            f"JSONL 파일에 누락된 인덱스가 있습니다."
+        )
+
+    logger.info(f"Pairwise JSONL 읽기 완료: {len(result):,} 쌍 로드")
+
+    return result

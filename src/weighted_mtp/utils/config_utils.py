@@ -225,11 +225,11 @@ def validate_config(config: DictConfig) -> None:
                 n_samples = ds.difficulty.n_samples
                 if batch_size > n_samples:
                     errors.append(f"batch_size({batch_size})가 n_samples({n_samples})보다 큼")
-            # problems 방식: max_samples 검증
-            elif hasattr(ds, "problems") and hasattr(ds.problems, "max_samples"):
-                max_samples = ds.problems.max_samples
-                if batch_size > max_samples:
-                    errors.append(f"batch_size({batch_size})가 max_samples({max_samples})보다 큼")
+            # pairwise 방식: n_pairs 검증
+            if hasattr(ds, "pairwise") and hasattr(ds.pairwise, "n_pairs"):
+                n_pairs = ds.pairwise.n_pairs
+                if batch_size > n_pairs:
+                    errors.append(f"batch_size({batch_size})가 n_pairs({n_pairs})보다 큼")
 
     # 에러 보고
     if errors:
@@ -329,8 +329,8 @@ def _validate_data_sampling(config: DictConfig, errors: List[str]) -> None:
     """data_sampling 섹션 검증
 
     sampling_method에 따라 필수 하위 구조를 검증한다.
-    - "problems": problems 하위 필드 필수
-    - "difficulty": difficulty 하위 필드 필수
+    - "difficulty": 난이도 기반 샘플링
+    - "pairwise": (correct, incorrect) 쌍 기반 샘플링
 
     Args:
         config: Config 객체
@@ -343,83 +343,31 @@ def _validate_data_sampling(config: DictConfig, errors: List[str]) -> None:
 
     # sampling_method 필수
     if not hasattr(ds, "sampling_method"):
-        errors.append("data_sampling.sampling_method 필드 필수 ('problems' 또는 'difficulty')")
+        errors.append("data_sampling.sampling_method 필드 필수 ('difficulty' 또는 'pairwise')")
         return
 
     method = ds.sampling_method
 
-    if method not in ["problems", "difficulty"]:
-        errors.append(
-            f"data_sampling.sampling_method는 'problems' 또는 'difficulty'여야 함: {method}"
-        )
-        return
-
-    # sampling_method별 필수 하위 구조 검증
-    if method == "problems":
-        if not hasattr(ds, "problems"):
-            errors.append(
-                "sampling_method='problems'일 때 data_sampling.problems 섹션 필수"
-            )
-        else:
-            _validate_problems_config(ds.problems, errors)
-
-        # difficulty 섹션이 있으면 충돌 경고
-        if hasattr(ds, "difficulty"):
-            errors.append(
-                "sampling_method='problems'일 때 difficulty 섹션 사용 불가. "
-                "problems와 difficulty는 동시 사용할 수 없음"
-            )
-
-    elif method == "difficulty":
+    if method == "difficulty":
+        # difficulty 섹션 필수 검증
         if not hasattr(ds, "difficulty"):
             errors.append(
                 "sampling_method='difficulty'일 때 data_sampling.difficulty 섹션 필수"
             )
         else:
             _validate_difficulty_config(ds.difficulty, errors)
-
-        # problems 섹션이 있으면 충돌 경고
-        if hasattr(ds, "problems"):
+    elif method == "pairwise":
+        # pairwise 섹션 필수 검증
+        if not hasattr(ds, "pairwise"):
             errors.append(
-                "sampling_method='difficulty'일 때 problems 섹션 사용 불가. "
-                "problems와 difficulty는 동시 사용할 수 없음"
+                "sampling_method='pairwise'일 때 data_sampling.pairwise 섹션 필수"
             )
-
-
-def _validate_problems_config(problems: DictConfig, errors: List[str]) -> None:
-    """problems 샘플링 설정 검증
-
-    Args:
-        problems: problems 설정 객체
-        errors: 에러 목록 (mutable)
-    """
-    # 필수 필드
-    if not hasattr(problems, "max_samples"):
-        errors.append("data_sampling.problems.max_samples 필드 필수")
-
-    # max_samples 검증
-    if hasattr(problems, "max_samples"):
-        max_samples = problems.max_samples
-        if not isinstance(max_samples, int) or max_samples <= 0:
-            errors.append(f"max_samples는 양의 정수여야 함: {max_samples}")
-
-    # accuracy_range 검증 (선택)
-    if hasattr(problems, "accuracy_range"):
-        acc_range = problems.accuracy_range
-        if len(acc_range) != 2:
-            errors.append(f"accuracy_range는 [min, max] 형태여야 함: {acc_range}")
-        elif acc_range[0] > acc_range[1]:
-            errors.append(f"accuracy_range[0]이 accuracy_range[1]보다 큼: {acc_range}")
-        elif acc_range[0] < 0 or acc_range[1] > 1:
-            errors.append(f"accuracy_range는 0~1 범위여야 함: {acc_range}")
-
-    # sample_count_range 검증 (선택)
-    if hasattr(problems, "sample_count_range"):
-        sc_range = problems.sample_count_range
-        if len(sc_range) != 2:
-            errors.append(f"sample_count_range는 [min, max] 형태여야 함: {sc_range}")
-        elif sc_range[0] > sc_range[1]:
-            errors.append(f"sample_count_range[0]이 sample_count_range[1]보다 큼: {sc_range}")
+        else:
+            _validate_pairwise_config(ds.pairwise, errors)
+    else:
+        errors.append(
+            f"data_sampling.sampling_method는 'difficulty' 또는 'pairwise'여야 함: {method}"
+        )
 
 
 def _validate_difficulty_config(difficulty: DictConfig, errors: List[str]) -> None:
@@ -448,6 +396,20 @@ def _validate_difficulty_config(difficulty: DictConfig, errors: List[str]) -> No
         errors.append("difficulty_weights 사용 시 difficulty_bins도 필수")
     if has_bins and not has_weights:
         errors.append("difficulty_bins 사용 시 difficulty_weights도 필수")
+
+
+def _validate_pairwise_config(pairwise: DictConfig, errors: List[str]) -> None:
+    """pairwise 샘플링 설정 검증
+
+    Args:
+        pairwise: pairwise 설정 객체
+        errors: 에러 목록 (mutable)
+    """
+    # 필수 필드: n_pairs
+    if not hasattr(pairwise, "n_pairs"):
+        errors.append("data_sampling.pairwise.n_pairs 필드 필수")
+    elif pairwise.n_pairs <= 0:
+        errors.append(f"n_pairs는 양수여야 함: {pairwise.n_pairs}")
 
 
 def _has_nested_field(config: DictConfig, field_path: str) -> bool:

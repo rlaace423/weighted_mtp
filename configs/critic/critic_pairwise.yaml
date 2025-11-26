@@ -1,5 +1,5 @@
-# Critic Pre-training (Stage 1)
-# Value head pretraining for TD error calculation
+# Critic Pre-training (Stage 1) - Pairwise Ranking Loss
+# Shortcut Learning 방지를 위한 동일 instruction 내 상대 비교 학습
 # 프로덕션 설정 (VESSL H200 4-GPU)
 
 # 프로젝트 정보
@@ -9,13 +9,14 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: critic-pretrain-mlp-final
-  description: "Value head pretraining for TD error calculation"
+  name: critic-pretrain-pairwise
+  description: "Pairwise ranking loss for relative comparison within same instruction"
   stage: critic
   tags:
     - critic
-    - linear-value-head
-    - unfrozen-trunk:2
+    - pairwise-ranking
+    - mlp-value-head
+    - dropout-0.3
 
 # 모델 설정
 models:
@@ -40,50 +41,53 @@ dataset:
   validation: storage/datasets/codecontests/processed/valid.jsonl
   max_length: 2048
 
-# 데이터 샘플링
+# 데이터 샘플링 (Pairwise 모드)
 data_sampling:
   seed: 42
-  val_n_samples: 1000
-  use_pairwise: false
+  val_n_samples: 2000
+  use_pairwise: true  # Pairwise Ranking Loss 활성화
 
-  n_samples: 100000
+  n_samples: 100000  # Difficulty 기반 총 샘플 수
   auto_data_balancing: true
-  correct_ratio: 0.5  # Correct/Incorrect 균형
+  correct_ratio: 0.5  # Pairwise 쌍 생성을 위해 균형 필수
 
   difficulty_bins:
-    diff_7: [7, 7]    # 데이터 많음 (약 90만 -> 비중 축소 필요)
-    else: [8, 25]     # 데이터 적당 (약 60만)
+    diff_7: [7, 7]
+    else: [8, 25]
   difficulty_weights:
-    diff_7: 0.35  # 90만개 중 일부만 샘플링 (약 35% 할당)
-    else: 0.65    # 어려운 문제 집중 (약 60% 할당)
+    diff_7: 0.35
+    else: 0.65
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
-  n_epochs: 1.0
-  batch_size: 64
-  gradient_accumulation_steps: 1
+  n_epochs: 3.0
+  batch_size: 16  # Pairwise는 메모리 2배 소모 (pos + neg)
+  gradient_accumulation_steps: 2
   trunk_learning_rate: 5e-6
-  value_head_learning_rate: 1.0e-3
+  value_head_learning_rate: 5.0e-4
   max_grad_norm: 1.0
-  gamma: 1.0
-  lam: 1.0  # MC (sigmoid value_head_type 필수 조건)
   num_unfrozen_layers: 0
   value_head_type: mlp
-  log_interval: 1
+  dropout: 0.3  # Shortcut Learning 방지
+  log_interval: 10
+
+  # Pairwise 모드에서는 gamma, lam 미사용 (TD learning 없음)
+  gamma: 1.0
+  lam: 1.0
 
   # Learning rate scheduler
   lr_scheduler:
-    type: cosine  # "cosine", "linear", "constant"
-    warmup_ratio: 0.03  # Total steps의 5%
-    min_lr_ratio: 0.005  # Peak LR의 0% (완전 decay)
+    type: cosine
+    warmup_ratio: 0.05
+    min_lr_ratio: 0.01
 
 # 체크포인트
 checkpoint:
   save_dir: storage/checkpoints/critic/${experiment.name}
-  save_checkpoint_every: 0.2
+  save_checkpoint_every: 0.5
   save_best: true
   save_final: true
-  save_total_limit: 2
+  save_total_limit: 3
   s3_upload: true
 
 # 런타임 설정
@@ -107,9 +111,9 @@ storage:
   datasets_dir: storage/datasets
   checkpoints_dir: storage/checkpoints
 
-# MLflow 추적 (로컬 파일 기반)
+# MLflow 추적
 mlflow:
-  tracking_uri: ""  # 빈 문자열 = ./mlruns 디렉터리 사용
+  tracking_uri: ""
   experiment: "weighted-mtp/production"
 
 # 로깅

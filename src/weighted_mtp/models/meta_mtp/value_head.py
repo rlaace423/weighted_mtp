@@ -89,13 +89,15 @@ class MLPValueHead(nn.Module):
 
     DIAL 논문 기반: bottleneck MLP로 표현력 증가 + 과적합 방지
     구조: hidden_size → hidden_size//8 → hidden_size//16 → 1
+    Dropout으로 instruction ID 암기 방지
 
     Args:
         hidden_size: Transformer hidden dimension
         bias: Linear layer bias (기본값 False, RLHF 표준)
+        dropout: Dropout 확률 (기본값 0.0, Pairwise 학습 시 0.3 권장)
     """
 
-    def __init__(self, hidden_size: int, bias: bool = False):
+    def __init__(self, hidden_size: int, bias: bool = False, dropout: float = 0.0):
         super().__init__()
         self.hidden_size = hidden_size
         self.head_type = "mlp"
@@ -107,8 +109,10 @@ class MLPValueHead(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(hidden_size, hidden1, bias=bias),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden1, hidden2, bias=bias),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden2, 1, bias=bias),
         )
 
@@ -136,12 +140,17 @@ class MLPValueHead(nn.Module):
 ValueHeadType = Union[LinearValueHead, SigmoidValueHead, MLPValueHead]
 
 
-def create_value_head(hidden_size: int, head_type: str = "mlp") -> ValueHeadType:
+def create_value_head(
+    hidden_size: int,
+    head_type: str = "mlp",
+    dropout: float = 0.0,
+) -> ValueHeadType:
     """Value head factory function
 
     Args:
         hidden_size: Transformer hidden dimension
         head_type: "linear", "sigmoid", 또는 "mlp"
+        dropout: Dropout 확률 (mlp 타입에만 적용)
 
     Returns:
         ValueHead 인스턴스
@@ -151,7 +160,7 @@ def create_value_head(hidden_size: int, head_type: str = "mlp") -> ValueHeadType
     elif head_type == "sigmoid":
         return SigmoidValueHead(hidden_size)
     elif head_type == "mlp":
-        return MLPValueHead(hidden_size)
+        return MLPValueHead(hidden_size, dropout=dropout)
     else:
         raise ValueError(f"Unknown value head type: {head_type}. Use 'linear', 'sigmoid', or 'mlp'.")
 

@@ -44,6 +44,7 @@ class MetaLlamaMTPAdapter(nn.Module):
         dtype: Optional[str] = None,
         initialize_value_head: bool = True,
         value_head_type: str = "mlp",
+        dropout: float = 0.0,
     ) -> "MetaLlamaMTPAdapter":
         """Pretrained 모델에서 Adapter 로드
 
@@ -57,6 +58,7 @@ class MetaLlamaMTPAdapter(nn.Module):
                 - True: Critic/Verifiable Stage용 (기본값)
                 - False: Rho-1 Stage용 (Value head 불필요)
             value_head_type: Value head 타입 ("linear" 또는 "mlp")
+            dropout: Value head dropout 확률 (mlp 타입에만 적용)
 
         Returns:
             MetaLlamaMTPAdapter 인스턴스
@@ -79,6 +81,7 @@ class MetaLlamaMTPAdapter(nn.Module):
                 device=device,
                 dtype=dtype,
                 value_head_type=value_head_type,
+                dropout=dropout,
             )
 
         # Dtype 변환 (문자열 -> torch.dtype)
@@ -130,6 +133,7 @@ class MetaLlamaMTPAdapter(nn.Module):
             value_head = create_value_head(
                 hidden_size=model_args.dim,
                 head_type=value_head_type,
+                dropout=dropout,
             )
 
             # Device 이동 (Transformer와 동일 device)
@@ -247,6 +251,7 @@ class MetaLlamaMTPAdapter(nn.Module):
         device: str = "auto",
         dtype: Optional[str] = None,
         value_head_type: str = "mlp",
+        dropout: float = 0.0,
     ) -> "MetaLlamaMTPAdapter":
         """Checkpoint 파일에서 전체 adapter 로드
 
@@ -254,6 +259,7 @@ class MetaLlamaMTPAdapter(nn.Module):
             checkpoint_path: .pt checkpoint 파일 경로
             device: 디바이스
             dtype: 데이터 타입
+            dropout: Value head dropout 확률
 
         Returns:
             MetaLlamaMTPAdapter (전체 state_dict 로드됨)
@@ -333,6 +339,7 @@ class MetaLlamaMTPAdapter(nn.Module):
             value_head = create_value_head(
                 hidden_size=dim,
                 head_type=detected_type,
+                dropout=dropout,
             )
 
         # 6. Adapter 생성 및 state_dict 로드

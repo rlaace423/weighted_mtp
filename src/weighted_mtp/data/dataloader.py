@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 from weighted_mtp.data.datasets import load_dataset
-from weighted_mtp.data.collators import AlpacaDataCollator
+from weighted_mtp.data.collators import AlpacaDataCollator, PairwiseDataCollator
 from weighted_mtp.runtime.distributed import get_rank, get_world_size
 
 
@@ -105,9 +105,12 @@ def create_dataloader(
         batch_size: 배치 크기 (per GPU)
         max_length: 최대 시퀀스 길이
         sampling_config: 샘플링 설정 딕셔너리
-            - sampling_method: "problems" 또는 "difficulty"
-            - problems: {n_problems, max_samples, accuracy_range, sample_count_range}
-            - difficulty: {n_samples, auto_data_balancing, correct_ratio, difficulty_weights, difficulty_bins}
+            - use_pairwise: Pairwise 포맷 사용 여부 (기본: False)
+            - n_samples: 샘플링할 총 샘플 수
+            - auto_data_balancing: correct/incorrect 균형 샘플링
+            - correct_ratio: correct 샘플 비율
+            - difficulty_weights: 난이도별 가중치
+            - difficulty_bins: 난이도 구간 정의
         seed: 랜덤 시드
         shuffle: 셔플 여부
 
@@ -115,19 +118,21 @@ def create_dataloader(
         DataLoader
 
     Examples:
-        >>> # Problems 방식
+        >>> # Pointwise 방식
         >>> sampling_config = {
-        ...     "sampling_method": "problems",
-        ...     "problems": {"n_problems": 500, "max_samples": 100000}
+        ...     "use_pairwise": False,
+        ...     "n_samples": 100000,
+        ...     "correct_ratio": 0.5
         ... }
         >>> loader = create_dataloader(path, tokenizer, 4, 2048, sampling_config)
         >>>
-        >>> # Difficulty 방식
+        >>> # Pairwise 방식
         >>> sampling_config = {
-        ...     "sampling_method": "difficulty",
-        ...     "difficulty": {"n_samples": 100000, "correct_ratio": 0.5}
+        ...     "use_pairwise": True,
+        ...     "n_samples": 100000,
+        ...     "correct_ratio": 0.5
         ... }
-        >>> loader = create_dataloader(path, tokenizer, 4, 2048, sampling_config)
+        >>> loader = create_dataloader(path, tokenizer, 16, 2048, sampling_config)
     """
     # 데이터셋 이름 및 스플릿 추출
     dataset_path_obj = Path(dataset_path)
@@ -155,11 +160,18 @@ def create_dataloader(
         world_size=world_size,
     )
 
-    # Collator 생성
-    collator = AlpacaDataCollator(
-        tokenizer=tokenizer,
-        max_length=max_length,
-    )
+    # Collator 선택 (use_pairwise에 따라 분기)
+    use_pairwise = sampling_config.get("use_pairwise", False)
+    if use_pairwise:
+        collator = PairwiseDataCollator(
+            tokenizer=tokenizer,
+            max_length=max_length,
+        )
+    else:
+        collator = AlpacaDataCollator(
+            tokenizer=tokenizer,
+            max_length=max_length,
+        )
 
     # DataLoader 생성
     # 분산 환경에서 drop_last=True로 모든 rank의 배치 수 동일하게 유지 (FSDP 데드락 방지)
