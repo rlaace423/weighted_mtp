@@ -38,9 +38,24 @@ training:
   n_epochs: 1.0
   batch_size: 2
   gradient_accumulation_steps: 2
-  learning_rate: 1.0e-5
+  learning_rate: 1.0e-4  # LoRA LR
   max_grad_norm: 1.0
   log_interval: 5
+
+  # LoRA 설정 (All-Linear LoRA)
+  use_lora: true
+  lora:
+    rank: 16           # 로컬 테스트용
+    alpha: 32.0
+    dropout: 0.05
+    target_modules:
+      - wq
+      - wk
+      - wv
+      - wo
+      - w1
+      - w2
+      - w3
 
   # Learning rate scheduler
   lr_scheduler:
@@ -54,6 +69,7 @@ checkpoint:
   save_best: true
   save_final: true
   save_total_limit: 2
+  save_lora_only: true
 
 runtime:
   device: mps

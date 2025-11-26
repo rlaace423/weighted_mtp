@@ -6,8 +6,10 @@ Checkpoint 관리, 성능 모니터링, S3 백업, Generation, Evaluation 기능
 from weighted_mtp.utils.checkpoint_utils import (
     cleanup_old_checkpoints,
     load_checkpoint_for_evaluation,
+    load_lora_checkpoint,
     save_checkpoint,
     save_hf_checkpoint,
+    save_lora_checkpoint,
 )
 from weighted_mtp.utils.evaluation_utils import (
     compute_pass_at_k,
@@ -31,6 +33,7 @@ from weighted_mtp.utils.logging_utils import (
     compute_classification_metrics_from_counts,
     compute_critic_classification_counts,
     compute_gradient_clip_stats,
+    compute_gradient_clip_stats_by_component,
     compute_gradient_norm_by_component,
     compute_value_function_stats,
     compute_weight_statistics,
@@ -62,8 +65,10 @@ __all__ = [
     # Checkpoint utils
     "cleanup_old_checkpoints",
     "load_checkpoint_for_evaluation",
+    "load_lora_checkpoint",
     "save_checkpoint",
     "save_hf_checkpoint",
+    "save_lora_checkpoint",
     # Evaluation utils
     "compute_pass_at_k",
     "evaluate_gsm8k_answer",
@@ -89,6 +94,7 @@ __all__ = [
     "compute_classification_metrics_from_counts",
     "compute_critic_classification_counts",
     "compute_gradient_clip_stats",
+    "compute_gradient_clip_stats_by_component",
     "compute_gradient_norm_by_component",
     "compute_value_function_stats",
     "compute_weight_statistics",

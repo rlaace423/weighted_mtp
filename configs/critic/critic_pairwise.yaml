@@ -66,11 +66,41 @@ training:
   gradient_accumulation_steps: 1
   trunk_learning_rate: 0
   value_head_learning_rate: 5.0e-4
-  max_grad_norm: 1.0
+
+  # 컴포넌트별 gradient clipping (trunk과 value_head 독립 적용)
+  # Critic은 trunk frozen이므로 value_head만 clipping 적용됨
+  trunk_max_grad_norm: 1.0       # Trunk gradient clipping (frozen 시 무의미)
+  value_head_max_grad_norm: 5.0  # Value head gradient clipping
+  max_grad_norm: 1.0             # fallback (컴포넌트별 설정 없을 때)
+
   num_unfrozen_layers: 0
   value_head_type: mlp
   dropout: 0.1  # Shortcut Learning 방지
+  trunk_frozen: true  # true면 value loss gradient가 trunk로 흐르지 않음
   log_interval: 1
+
+  # Value loss 모드 선택 (pairwise와 mc_mse 독립적 또는 동시 사용 가능)
+  value_loss:
+    use_pairwise: true   # Pairwise ranking loss
+    use_mc_mse: false    # MC tokenwise MSE loss
+    pairwise_coef: 1.0   # Pairwise loss 계수
+    mc_mse_coef: 1.0     # MC MSE loss 계수
+
+  # LoRA 설정 (선택적)
+  # LoRA 설정 (Critic은 trunk frozen으로 기본 비활성화)
+  use_lora: false
+  lora:
+    rank: 64           # 활성화 시 사용할 설정
+    alpha: 128.0
+    dropout: 0.05
+    target_modules:
+      - wq
+      - wk
+      - wv
+      - wo
+      - w1
+      - w2
+      - w3
 
   # Learning rate scheduler
   lr_scheduler:
@@ -86,6 +116,7 @@ checkpoint:
   save_final: true
   save_total_limit: 3
   s3_upload: true
+  save_lora_only: false
 
 # 런타임 설정
 runtime:

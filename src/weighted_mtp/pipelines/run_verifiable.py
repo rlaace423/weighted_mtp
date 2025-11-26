@@ -24,7 +24,7 @@ from weighted_mtp.utils import (
     cleanup_old_checkpoints,
     cleanup_s3_checkpoints,
     compute_gradient_clip_stats,
-    compute_gradient_norm_by_component,
+    compute_gradient_clip_stats_by_component,
     compute_mc_value_loss,
     compute_mtp_ce_loss,
     compute_pairwise_accuracy,
@@ -37,6 +37,7 @@ from weighted_mtp.utils import (
     pairwise_ranking_loss,
     s3_upload_executor,
     save_checkpoint,
+    save_lora_checkpoint,
     shutdown_s3_executor,
 )
 from weighted_mtp.runtime import (
@@ -275,7 +276,22 @@ def run_verifiable_training(
         mlflow_run_id = mlflow.active_run().info.run_id
         logger.info(f"MLflow Run ID: {mlflow_run_id}")
 
-    # 5. 모델 로드 (pretrained 또는 checkpoint)
+    # 5. LoRA 설정 파싱
+    use_lora = getattr(config.training, "use_lora", False)
+    lora_config = None
+    if use_lora:
+        lora_section = config.training.get("lora", {})
+        lora_config = {
+            "rank": lora_section.get("rank", 8),
+            "alpha": lora_section.get("alpha", 16.0),
+            "dropout": lora_section.get("dropout", 0.0),
+            "target_modules": lora_section.get(
+                "target_modules", ["wq", "wk", "wv", "wo"]
+            ),
+        }
+        logger.info(f"LoRA enabled: rank={lora_config['rank']}, alpha={lora_config['alpha']}")
+
+    # 6. 모델 로드 (pretrained 또는 checkpoint)
     logger.info(f"Loading model: {config.models.policy.path}")
 
     # value_head_type 설정 (기본값: mlp)
@@ -289,6 +305,8 @@ def run_verifiable_training(
         dtype=config.models.policy.dtype,
         value_head_type=value_head_type,
         dropout=dropout,
+        use_lora=use_lora,
+        lora_config=lora_config,
     )
     tokenizer = load_tokenizer_from_config(config)
 
@@ -454,6 +472,19 @@ def run_verifiable_training(
     pairwise_coef = value_loss_config.get("pairwise_coef", 1.0)
     mc_mse_coef = value_loss_config.get("mc_mse_coef", 1.0)
     logger.info(f"Value loss: use_pairwise={use_pairwise}, use_mc_mse={use_mc_mse}")
+
+    # 컴포넌트별 gradient clipping 설정
+    # trunk과 value_head에 각각 다른 max_grad_norm 적용하여 gradient scale 불균형 해소
+    fallback_max_grad_norm = config.training.get("max_grad_norm", 1.0)
+    trunk_max_grad_norm = config.training.get("trunk_max_grad_norm", fallback_max_grad_norm)
+    value_head_max_grad_norm = config.training.get("value_head_max_grad_norm", fallback_max_grad_norm)
+    use_component_clipping = (
+        "trunk_max_grad_norm" in config.training or "value_head_max_grad_norm" in config.training
+    )
+    logger.info(
+        f"Gradient clipping: trunk={trunk_max_grad_norm}, value_head={value_head_max_grad_norm} "
+        f"(component_clipping={use_component_clipping})"
+    )
 
     # FSDP 워밍업: 첫 forward에서 all-gather 동기화 문제 방지
     logger.info("FSDP warmup forward pass 시작...")
@@ -649,12 +680,36 @@ def run_verifiable_training(
 
             # Optimizer step (accumulation 완료 시에만)
             if accumulation_counter >= gradient_accumulation_steps:
-                # Gradient clipping (누적된 gradient에 적용)
-                if config.training.max_grad_norm > 0:
+                # 컴포넌트별 gradient clipping (trunk과 value_head 분리)
+                if use_component_clipping:
+                    # trunk과 value_head에 각각 다른 max_grad_norm 적용
+                    component_clip_stats = compute_gradient_clip_stats_by_component(
+                        adapter,
+                        trunk_max_grad_norm=trunk_max_grad_norm,
+                        value_head_max_grad_norm=value_head_max_grad_norm,
+                    )
+                    # 하위 호환성: 기존 grad_clip_stats 형식으로 변환 (전체 norm 근사)
+                    grad_clip_stats = {
+                        "grad_norm_pre_clip": (
+                            component_clip_stats["trunk_grad_norm_pre"] ** 2
+                            + component_clip_stats["value_head_grad_norm_pre"] ** 2
+                        ) ** 0.5,
+                        "grad_norm_post_clip": (
+                            component_clip_stats["trunk_grad_norm_post"] ** 2
+                            + component_clip_stats["value_head_grad_norm_post"] ** 2
+                        ) ** 0.5,
+                        "grad_clip_ratio": min(
+                            component_clip_stats["trunk_clip_ratio"],
+                            component_clip_stats["value_head_clip_ratio"],
+                        ),
+                    }
+                elif fallback_max_grad_norm > 0:
+                    # 기존 방식: 전체 모델에 단일 max_grad_norm 적용
                     grad_clip_stats = compute_gradient_clip_stats(
                         adapter,
-                        config.training.max_grad_norm,
+                        fallback_max_grad_norm,
                     )
+                    component_clip_stats = None
                 else:
                     from weighted_mtp.utils.metrics_utils import compute_gradient_norm
 
@@ -664,9 +719,7 @@ def run_verifiable_training(
                         "grad_norm_post_clip": grad_norm_dict["grad_norm"],
                         "grad_clip_ratio": 1.0,
                     }
-
-                # 컴포넌트별 gradient norm (trunk vs value_head 분리)
-                component_grad_stats = compute_gradient_norm_by_component(adapter)
+                    component_clip_stats = None
 
                 optimizer.step()
                 if scheduler is not None:
@@ -731,35 +784,41 @@ def run_verifiable_training(
 
                 if is_main_process():
                     if use_mlflow:
-                        mlflow.log_metrics(
-                            {
-                                "train/weighted_ce_loss": avg_weighted_ce,
-                                "train/unweighted_ce_loss": avg_unweighted_ce,
-                                "train/value_loss": avg_value_loss,
-                                "train/total_loss": avg_total_loss,
-                                "train/grad_norm": avg_grad_norm_post,
-                                "train/grad_norm_pre_clip": avg_grad_norm_pre,
-                                "train/grad_clip_ratio": avg_grad_clip_ratio,
-                                "train/trunk_grad_norm": component_grad_stats["trunk_grad_norm"],
-                                "train/value_head_grad_norm": component_grad_stats["value_head_grad_norm"],
-                                "train/learning_rate": optimizer.param_groups[0]["lr"],
-                                "td/mean": avg_td_mean,
-                                "td/std": reduced["td_std"],
-                                "td/min": reduced["td_min"],
-                                "td/max": reduced["td_max"],
-                                "value/mse": avg_value_mse,
-                                "value/mean_prediction": avg_value_mean,
-                                "value/std_prediction": avg_value_std,
-                                "weight/mean": reduced["weight_mean"],
-                                "weight/std": reduced["weight_std"],
-                                "weight/min": reduced["weight_min"],
-                                "weight/max": reduced["weight_max"],
-                                "weight/entropy": reduced["weight_entropy"],
-                                "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
-                                "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
-                            },
-                            step=global_step,
-                        )
+                        metrics_to_log = {
+                            "train/weighted_ce_loss": avg_weighted_ce,
+                            "train/unweighted_ce_loss": avg_unweighted_ce,
+                            "train/value_loss": avg_value_loss,
+                            "train/total_loss": avg_total_loss,
+                            "train/grad_norm": avg_grad_norm_post,
+                            "train/grad_norm_pre_clip": avg_grad_norm_pre,
+                            "train/grad_clip_ratio": avg_grad_clip_ratio,
+                            "train/learning_rate": optimizer.param_groups[0]["lr"],
+                            "td/mean": avg_td_mean,
+                            "td/std": reduced["td_std"],
+                            "td/min": reduced["td_min"],
+                            "td/max": reduced["td_max"],
+                            "value/mse": avg_value_mse,
+                            "value/mean_prediction": avg_value_mean,
+                            "value/std_prediction": avg_value_std,
+                            "weight/mean": reduced["weight_mean"],
+                            "weight/std": reduced["weight_std"],
+                            "weight/min": reduced["weight_min"],
+                            "weight/max": reduced["weight_max"],
+                            "weight/entropy": reduced["weight_entropy"],
+                            "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
+                            "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
+                        }
+                        # 컴포넌트별 gradient clipping 사용 시 개별 norm 로깅
+                        if component_clip_stats is not None:
+                            metrics_to_log.update({
+                                "train/trunk_grad_norm_pre": component_clip_stats["trunk_grad_norm_pre"],
+                                "train/trunk_grad_norm_post": component_clip_stats["trunk_grad_norm_post"],
+                                "train/trunk_clip_ratio": component_clip_stats["trunk_clip_ratio"],
+                                "train/value_head_grad_norm_pre": component_clip_stats["value_head_grad_norm_pre"],
+                                "train/value_head_grad_norm_post": component_clip_stats["value_head_grad_norm_post"],
+                                "train/value_head_clip_ratio": component_clip_stats["value_head_clip_ratio"],
+                            })
+                        mlflow.log_metrics(metrics_to_log, step=global_step)
                     logger.info(
                         f"Step {global_step}/{total_optimization_steps}, "
                         f"Loss: {avg_total_loss:.4f}, "
@@ -772,12 +831,15 @@ def run_verifiable_training(
         if accumulation_counter > 0:
             logger.info(f"Processing incomplete accumulation ({accumulation_counter} batches before validation)")
 
-            # Gradient clipping
-            if config.training.max_grad_norm > 0:
-                grad_clip_stats = compute_gradient_clip_stats(
+            # Gradient clipping (컴포넌트별 또는 전체)
+            if use_component_clipping:
+                compute_gradient_clip_stats_by_component(
                     adapter,
-                    config.training.max_grad_norm,
+                    trunk_max_grad_norm=trunk_max_grad_norm,
+                    value_head_max_grad_norm=value_head_max_grad_norm,
                 )
+            elif fallback_max_grad_norm > 0:
+                compute_gradient_clip_stats(adapter, fallback_max_grad_norm)
 
             optimizer.step()
             if scheduler is not None:
@@ -879,21 +941,42 @@ def run_verifiable_training(
             best_val_loss = avg_val_total
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}.pt"
 
-            save_checkpoint(
-                adapter=adapter,
-                optimizer=optimizer,
-                epoch=current_epoch,
-                train_metrics={
-                    "train_total_loss": train_total_avg,
-                    "train_weighted_ce_loss": train_weighted_ce_avg,
-                    "train_value_loss": train_value_avg,
-                },
-                val_metrics=val_metrics,
-                checkpoint_path=checkpoint_path,
-                config={"model": {"path": config.models.policy.path}},
-                s3_upload=use_s3_upload,
-                mlflow_run_id=mlflow_run_id,
-            )
+            # LoRA 사용 시 LoRA 전용 checkpoint 저장 옵션
+            save_lora_only = use_lora and config.checkpoint.get("save_lora_only", False)
+
+            if save_lora_only:
+                save_lora_checkpoint(
+                    adapter=adapter,
+                    optimizer=optimizer,
+                    epoch=current_epoch,
+                    train_metrics={
+                        "train_total_loss": train_total_avg,
+                        "train_weighted_ce_loss": train_weighted_ce_avg,
+                        "train_value_loss": train_value_avg,
+                    },
+                    val_metrics=val_metrics,
+                    checkpoint_path=checkpoint_path,
+                    config={"model": {"path": config.models.policy.path}},
+                    s3_upload=use_s3_upload,
+                    mlflow_run_id=mlflow_run_id,
+                    save_value_head=True,
+                )
+            else:
+                save_checkpoint(
+                    adapter=adapter,
+                    optimizer=optimizer,
+                    epoch=current_epoch,
+                    train_metrics={
+                        "train_total_loss": train_total_avg,
+                        "train_weighted_ce_loss": train_weighted_ce_avg,
+                        "train_value_loss": train_value_avg,
+                    },
+                    val_metrics=val_metrics,
+                    checkpoint_path=checkpoint_path,
+                    config={"model": {"path": config.models.policy.path}},
+                    s3_upload=use_s3_upload,
+                    mlflow_run_id=mlflow_run_id,
+                )
 
             # 모든 GPU가 checkpoint 저장 완료까지 대기
             barrier()
@@ -942,21 +1025,42 @@ def run_verifiable_training(
             mc_mse_coef=mc_mse_coef,
         )
 
-        save_checkpoint(
-            adapter=adapter,
-            optimizer=optimizer,
-            epoch=current_epoch,
-            train_metrics={
-                "train_total_loss": train_total_avg,
-                "train_weighted_ce_loss": train_weighted_ce_avg,
-                "train_value_loss": train_value_avg,
-            },
-            val_metrics=final_val_metrics,
-            checkpoint_path=final_path,
-            config={"model": {"path": config.models.policy.path}},
-            s3_upload=use_s3_upload,
-            mlflow_run_id=mlflow_run_id,
-        )
+        # LoRA 사용 시 LoRA 전용 checkpoint 저장 옵션
+        save_lora_only_final = use_lora and config.checkpoint.get("save_lora_only", False)
+
+        if save_lora_only_final:
+            save_lora_checkpoint(
+                adapter=adapter,
+                optimizer=optimizer,
+                epoch=current_epoch,
+                train_metrics={
+                    "train_total_loss": train_total_avg,
+                    "train_weighted_ce_loss": train_weighted_ce_avg,
+                    "train_value_loss": train_value_avg,
+                },
+                val_metrics=final_val_metrics,
+                checkpoint_path=final_path,
+                config={"model": {"path": config.models.policy.path}},
+                s3_upload=use_s3_upload,
+                mlflow_run_id=mlflow_run_id,
+                save_value_head=True,
+            )
+        else:
+            save_checkpoint(
+                adapter=adapter,
+                optimizer=optimizer,
+                epoch=current_epoch,
+                train_metrics={
+                    "train_total_loss": train_total_avg,
+                    "train_weighted_ce_loss": train_weighted_ce_avg,
+                    "train_value_loss": train_value_avg,
+                },
+                val_metrics=final_val_metrics,
+                checkpoint_path=final_path,
+                config={"model": {"path": config.models.policy.path}},
+                s3_upload=use_s3_upload,
+                mlflow_run_id=mlflow_run_id,
+            )
 
         # 모든 GPU가 final checkpoint 저장 완료까지 대기
         barrier()

@@ -28,40 +28,64 @@ def create_param_groups(
 ) -> list[dict]:
     """Optimizer용 parameter groups 생성 (trunk/value_head 분리)
 
+    LoRA 사용 시 trunk_params는 LoRA 파라미터만 포함 (원본 파라미터는 requires_grad=False).
+    LoRA 미사용 시 모든 trainable transformer 파라미터 포함.
+
     Args:
         adapter: MetaLlamaMTPAdapter 인스턴스
-        trunk_lr: Trunk (transformer) peak learning rate
+        trunk_lr: Trunk (transformer 또는 LoRA) peak learning rate
         value_head_lr: Value head peak learning rate
 
     Returns:
         Parameter groups list for optimizer
 
     Note:
-        - Trunk params: requires_grad=True인 transformer parameters
-        - Value head params: value_head parameters
+        - LoRA 사용 시: trunk_params = LoRA 파라미터만
+        - LoRA 미사용 시: trunk_params = requires_grad=True인 모든 transformer params
+        - Value head params: value_head parameters (항상 학습)
         - Scheduler는 각 group의 lr을 기준으로 동일 비율 적용
     """
     # Value head parameters
     value_head_params = list(adapter.value_head.parameters())
 
     # Trunk parameters (requires_grad=True인 transformer params만)
+    # LoRA 사용 시 원본 파라미터는 requires_grad=False이므로 자동으로 LoRA만 수집됨
     trunk_params = [
         p for p in adapter.transformer.parameters()
         if p.requires_grad
     ]
 
-    # Logging
+    # extra_heads가 있으면 추가
+    extra_head_params = []
+    if hasattr(adapter, "extra_heads") and adapter.extra_heads is not None:
+        extra_head_params = list(adapter.extra_heads.parameters())
+
+    # 통계 계산
     n_trunk = sum(p.numel() for p in trunk_params)
     n_head = sum(p.numel() for p in value_head_params)
+    n_extra = sum(p.numel() for p in extra_head_params)
 
-    logger.info(f"Parameter groups:")
-    logger.info(f"  Trunk: {n_trunk:,} params, lr={trunk_lr:.2e}")
+    # LoRA 사용 여부에 따른 로깅
+    lora_enabled = getattr(adapter, "lora_enabled", False)
+    if lora_enabled:
+        logger.info(f"Parameter groups (LoRA enabled):")
+        logger.info(f"  LoRA: {n_trunk:,} params, lr={trunk_lr:.2e}")
+    else:
+        logger.info(f"Parameter groups:")
+        logger.info(f"  Trunk: {n_trunk:,} params, lr={trunk_lr:.2e}")
     logger.info(f"  Value head: {n_head:,} params, lr={value_head_lr:.2e}")
+    if n_extra > 0:
+        logger.info(f"  Extra heads: {n_extra:,} params, lr={trunk_lr:.2e}")
 
+    # param_groups 구성
     param_groups = [
         {"params": trunk_params, "lr": trunk_lr},
         {"params": value_head_params, "lr": value_head_lr},
     ]
+
+    # extra_heads는 trunk_lr 사용
+    if extra_head_params:
+        param_groups.append({"params": extra_head_params, "lr": trunk_lr})
 
     return param_groups
 

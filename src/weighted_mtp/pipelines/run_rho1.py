@@ -49,12 +49,19 @@ from weighted_mtp.runtime import (
 from weighted_mtp.value_weighting.rho1_weighting import compute_mtp_selective_weights
 
 
-def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
+def load_adapter(
+    config: dict,
+    device: torch.device,
+    use_lora: bool = False,
+    lora_config: dict | None = None,
+) -> MetaLlamaMTPAdapter:
     """Adapter 로드
 
     Args:
         config: 모델 설정
         device: 디바이스
+        use_lora: LoRA 사용 여부
+        lora_config: LoRA 설정 (rank, alpha, dropout, target_modules)
 
     Returns:
         MetaLlamaMTPAdapter 인스턴스
@@ -64,6 +71,8 @@ def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
         device=device,
         dtype=config.models.policy.dtype,
         initialize_value_head=False,  # Rho-1은 Value Head 불필요
+        use_lora=use_lora,
+        lora_config=lora_config,
     )
     return adapter
 
@@ -303,12 +312,27 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
         mlflow_run_id = mlflow.active_run().info.run_id
         logger.info(f"MLflow Run ID: {mlflow_run_id}")
 
-    # 6. Resource 로딩
+    # 6. LoRA 설정 파싱
+    use_lora = getattr(config.training, "use_lora", False)
+    lora_config = None
+    if use_lora:
+        lora_section = config.training.get("lora", {})
+        lora_config = {
+            "rank": lora_section.get("rank", 8),
+            "alpha": lora_section.get("alpha", 16.0),
+            "dropout": lora_section.get("dropout", 0.0),
+            "target_modules": lora_section.get(
+                "target_modules", ["wq", "wk", "wv", "wo"]
+            ),
+        }
+        logger.info(f"LoRA enabled: rank={lora_config['rank']}, alpha={lora_config['alpha']}")
+
+    # 7. Resource 로딩
     logger.info(f"Loading reference model: {config.models.reference.name}")
-    adapter = load_adapter(config, device)
+    adapter = load_adapter(config, device, use_lora=use_lora, lora_config=lora_config)
     ref_model = load_reference_model(config, device)
     tokenizer = load_tokenizer_from_config(config)
-    logger.info("✓ Reference model loaded successfully")
+    logger.info("Reference model loaded successfully")
 
     # 7. DDP wrapping (adapter만 - reference는 frozen inference용)
     adapter = wrap_model_fsdp(
@@ -398,9 +422,17 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             }
         )
 
-    # 6. Optimizer (MTP heads만 - Value head 없음) - Meta MTP 논문 설정
+    # Optimizer 설정
+    # LoRA 사용 시 trainable parameters만, 아니면 전체 파라미터
+    unwrapped_adapter = unwrap_model(adapter)
+    if use_lora:
+        trainable_params = unwrapped_adapter.get_trainable_parameters()
+        logger.info(f"LoRA optimizer: {sum(p.numel() for p in trainable_params):,} trainable params")
+    else:
+        trainable_params = adapter.parameters()
+
     optimizer = torch.optim.AdamW(
-        adapter.parameters(),
+        trainable_params,
         lr=config.training.learning_rate,
         betas=(0.9, 0.95),
         weight_decay=0.01,

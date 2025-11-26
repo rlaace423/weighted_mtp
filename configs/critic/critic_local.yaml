@@ -51,6 +51,21 @@ training:
   num_unfrozen_layers: 4  # 마지막 N개 TransformerBlock unfreeze (0=value head만)
   log_interval: 5
 
+  # LoRA 설정 (Critic은 trunk frozen으로 기본 비활성화)
+  use_lora: false
+  lora:
+    rank: 16
+    alpha: 32.0
+    dropout: 0.05
+    target_modules:
+      - wq
+      - wk
+      - wv
+      - wo
+      - w1
+      - w2
+      - w3
+
   # Learning rate scheduler
   lr_scheduler:
     type: cosine
@@ -63,6 +78,7 @@ checkpoint:
   save_best: true
   save_final: true
   save_total_limit: 2
+  save_lora_only: false
 
 runtime:
   device: mps

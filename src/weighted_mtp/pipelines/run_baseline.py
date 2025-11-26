@@ -45,12 +45,19 @@ from weighted_mtp.runtime import (
 )
 
 
-def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
+def load_adapter(
+    config: dict,
+    device: torch.device,
+    use_lora: bool = False,
+    lora_config: dict | None = None,
+) -> MetaLlamaMTPAdapter:
     """Adapter 로드 (Value head 없이)
 
     Args:
         config: 모델 설정
         device: 디바이스
+        use_lora: LoRA 사용 여부
+        lora_config: LoRA 설정 (rank, alpha, dropout, target_modules)
 
     Returns:
         MetaLlamaMTPAdapter 인스턴스 (Value head 없음)
@@ -61,6 +68,8 @@ def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
         device=device,
         dtype=config.models.policy.dtype,
         initialize_value_head=False,
+        use_lora=use_lora,
+        lora_config=lora_config,
     )
     return adapter
 
@@ -168,7 +177,22 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
         logger.info(f"MLflow Run ID: {mlflow_run_id}")
 
     # 6. Resource 로딩
-    adapter = load_adapter(config, device)
+    # LoRA 설정 파싱
+    use_lora = getattr(config.training, "use_lora", False)
+    lora_config = None
+    if use_lora:
+        lora_section = config.training.get("lora", {})
+        lora_config = {
+            "rank": lora_section.get("rank", 8),
+            "alpha": lora_section.get("alpha", 16.0),
+            "dropout": lora_section.get("dropout", 0.0),
+            "target_modules": lora_section.get(
+                "target_modules", ["wq", "wk", "wv", "wo"]
+            ),
+        }
+        logger.info(f"LoRA enabled: rank={lora_config['rank']}, alpha={lora_config['alpha']}")
+
+    adapter = load_adapter(config, device, use_lora=use_lora, lora_config=lora_config)
     adapter = wrap_model_fsdp(
         adapter,
         device,
@@ -266,9 +290,17 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             }
         )
 
-    # 6. Optimizer (전체 파라미터) - Meta MTP 논문 설정
+    # 6. Optimizer 설정
+    # LoRA 사용 시 trainable parameters만, 아니면 전체 파라미터
+    unwrapped_adapter = unwrap_model(adapter)
+    if use_lora:
+        trainable_params = unwrapped_adapter.get_trainable_parameters()
+        logger.info(f"LoRA optimizer: {sum(p.numel() for p in trainable_params):,} trainable params")
+    else:
+        trainable_params = adapter.parameters()
+
     optimizer = torch.optim.AdamW(
-        adapter.parameters(),
+        trainable_params,
         lr=config.training.learning_rate,
         betas=(0.9, 0.95),
         weight_decay=0.01,

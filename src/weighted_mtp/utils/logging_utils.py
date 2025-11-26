@@ -173,6 +173,85 @@ def compute_gradient_norm_by_component(
     }
 
 
+def compute_gradient_clip_stats_by_component(
+    model: torch.nn.Module,
+    trunk_max_grad_norm: float,
+    value_head_max_grad_norm: float,
+) -> dict[str, float]:
+    """컴포넌트별 독립 gradient clipping (trunk vs value_head 분리)
+
+    trunk과 value_head에 각각 다른 max_grad_norm을 적용하여 clipping.
+    두 컴포넌트의 gradient scale이 크게 다를 때 유용.
+
+    Args:
+        model: 모델 (FSDP wrapped 또는 일반 모델)
+        trunk_max_grad_norm: Trunk 파라미터용 gradient clipping threshold
+        value_head_max_grad_norm: Value head 파라미터용 gradient clipping threshold
+
+    Returns:
+        통계 딕셔너리:
+            - trunk_grad_norm_pre: Trunk clipping 전 gradient norm
+            - trunk_grad_norm_post: Trunk clipping 후 gradient norm
+            - trunk_clip_ratio: Trunk clipping 비율
+            - value_head_grad_norm_pre: Value head clipping 전 gradient norm
+            - value_head_grad_norm_post: Value head clipping 후 gradient norm
+            - value_head_clip_ratio: Value head clipping 비율
+    """
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+    # FSDP인 경우 내부 모듈 접근
+    if isinstance(model, FSDP):
+        model_to_inspect = model.module
+    else:
+        model_to_inspect = model
+
+    # 파라미터 분리 (gradient 있는 것만)
+    trunk_params = []
+    value_head_params = []
+
+    for name, param in model_to_inspect.named_parameters():
+        if param.grad is not None:
+            if "value_head" in name:
+                value_head_params.append(param)
+            else:
+                trunk_params.append(param)
+
+    # Trunk gradient clipping
+    if trunk_params and trunk_max_grad_norm > 0:
+        trunk_norm_pre = torch.nn.utils.clip_grad_norm_(
+            trunk_params, trunk_max_grad_norm
+        ).item()
+        trunk_norm_post = min(trunk_norm_pre, trunk_max_grad_norm)
+        trunk_clip_ratio = trunk_norm_post / trunk_norm_pre if trunk_norm_pre > 0 else 1.0
+    else:
+        trunk_norm_pre = 0.0
+        trunk_norm_post = 0.0
+        trunk_clip_ratio = 1.0
+
+    # Value head gradient clipping
+    if value_head_params and value_head_max_grad_norm > 0:
+        value_head_norm_pre = torch.nn.utils.clip_grad_norm_(
+            value_head_params, value_head_max_grad_norm
+        ).item()
+        value_head_norm_post = min(value_head_norm_pre, value_head_max_grad_norm)
+        value_head_clip_ratio = (
+            value_head_norm_post / value_head_norm_pre if value_head_norm_pre > 0 else 1.0
+        )
+    else:
+        value_head_norm_pre = 0.0
+        value_head_norm_post = 0.0
+        value_head_clip_ratio = 1.0
+
+    return {
+        "trunk_grad_norm_pre": trunk_norm_pre,
+        "trunk_grad_norm_post": trunk_norm_post,
+        "trunk_clip_ratio": trunk_clip_ratio,
+        "value_head_grad_norm_pre": value_head_norm_pre,
+        "value_head_grad_norm_post": value_head_norm_post,
+        "value_head_clip_ratio": value_head_clip_ratio,
+    }
+
+
 def compute_value_function_stats(
     values: torch.Tensor,
     returns: torch.Tensor,

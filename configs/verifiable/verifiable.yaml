@@ -60,8 +60,8 @@ training:
   n_epochs: 1.0
   batch_size: 36  # Per GPU
   gradient_accumulation_steps: 1  # Effective batch size = 144
-  trunk_learning_rate: 1.0e-5  # Trunk peak LR
-  value_head_learning_rate: 1.0e-3  # Value head peak LR
+  trunk_learning_rate: 1.0e-4  # LoRA Trunk LR (Full FT 대비 10배)
+  value_head_learning_rate: 1.0e-4  # Head와 Trunk 보폭 맞춤
   max_grad_norm: 0.5
 
   # Normalized IQL weighting (Advantage Whitening)
@@ -70,6 +70,22 @@ training:
   weight_clip_max: 5.0  # 최대 가중치
 
   log_interval: 1
+
+  # LoRA 설정 (All-Linear LoRA for CodeContests)
+  # Verifiable은 Critic checkpoint에서 시작하여 LoRA로 trunk 학습
+  use_lora: true
+  lora:
+    rank: 64           # 코드/논리 태스크는 64 권장
+    alpha: 128.0       # rank의 2배
+    dropout: 0.05      # 과적합 방지
+    target_modules:    # 모든 Linear Layer에 적용
+      - wq
+      - wk
+      - wv
+      - wo
+      - w1
+      - w2
+      - w3
 
   # Learning rate scheduler
   lr_scheduler:
@@ -85,6 +101,7 @@ checkpoint:
   save_final: true
   save_total_limit: 3
   s3_upload: false
+  save_lora_only: true  # LoRA 사용 시 LoRA + value head만 저장 (메모리 효율)
 
 # 런타임 설정
 runtime:

@@ -59,9 +59,24 @@ training:
   n_epochs: 2.0
   batch_size: 32  # Per GPU
   gradient_accumulation_steps: 1  # Effective batch size = 128
-  learning_rate: 5.0e-5
+  learning_rate: 1.0e-4  # LoRA 사용 시 Full FT 대비 LR 높여야 함
   max_grad_norm: 0.1
   log_interval: 1
+
+  # LoRA 설정 (All-Linear LoRA for CodeContests)
+  use_lora: true
+  lora:
+    rank: 64           # 코드/논리 태스크는 64 권장
+    alpha: 128.0       # rank의 2배
+    dropout: 0.05      # 과적합 방지
+    target_modules:    # 모든 Linear Layer에 적용
+      - wq
+      - wk
+      - wv
+      - wo
+      - w1
+      - w2
+      - w3
 
   # Learning rate scheduler
   lr_scheduler:
@@ -77,6 +92,7 @@ checkpoint:
   save_final: true
   save_total_limit: 3
   s3_upload: false
+  save_lora_only: true
 
 # 런타임 설정
 runtime:

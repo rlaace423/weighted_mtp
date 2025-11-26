@@ -26,7 +26,9 @@ from weighted_mtp.utils import (
     cleanup_old_checkpoints,
     cleanup_s3_checkpoints,
     compute_gradient_clip_stats,
+    compute_gradient_clip_stats_by_component,
     compute_gradient_norm,
+    compute_mc_value_loss,
     compute_pairwise_accuracy,
     create_param_groups,
     create_scheduler,
@@ -48,12 +50,19 @@ from weighted_mtp.runtime import (
 )
 
 
-def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
+def load_adapter(
+    config: dict,
+    device: torch.device,
+    use_lora: bool = False,
+    lora_config: dict | None = None,
+) -> MetaLlamaMTPAdapter:
     """Adapter 로드
 
     Args:
         config: 모델 설정
         device: 디바이스
+        use_lora: LoRA 사용 여부
+        lora_config: LoRA 설정 (rank, alpha, dropout, target_modules)
 
     Returns:
         MetaLlamaMTPAdapter 인스턴스
@@ -69,6 +78,8 @@ def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
         dtype=config.models.policy.dtype,
         value_head_type=value_head_type,
         dropout=dropout,
+        use_lora=use_lora,
+        lora_config=lora_config,
     )
     return adapter
 
@@ -79,6 +90,11 @@ def validate_critic(
     adapter: MetaLlamaMTPAdapter,
     dataloader: DataLoader,
     device: torch.device,
+    trunk_frozen: bool = True,
+    use_pairwise: bool = True,
+    use_mc_mse: bool = False,
+    pairwise_coef: float = 1.0,
+    mc_mse_coef: float = 1.0,
     return_raw_counts: bool = False,
 ) -> dict[str, float]:
     """Pairwise Validation 수행
@@ -87,6 +103,11 @@ def validate_critic(
         adapter: Adapter
         dataloader: Validation DataLoader (pairwise format)
         device: 디바이스
+        trunk_frozen: True면 value loss gradient가 trunk로 흐르지 않음
+        use_pairwise: Pairwise ranking loss 사용 여부
+        use_mc_mse: MC tokenwise MSE loss 사용 여부
+        pairwise_coef: Pairwise loss 계수
+        mc_mse_coef: MC MSE loss 계수
         return_raw_counts: True이면 raw counts 반환 (분산학습용 aggregation)
 
     Returns:
@@ -119,7 +140,12 @@ def validate_critic(
             combined_input_ids = torch.cat([pos_input_ids, neg_input_ids], dim=0)
             combined_attention_mask = torch.cat([pos_attention_mask, neg_attention_mask], dim=0)
 
-            combined_outputs = adapter(combined_input_ids, combined_attention_mask, return_value_logits=True)
+            combined_outputs = adapter(
+                combined_input_ids,
+                combined_attention_mask,
+                return_value_logits=True,
+                trunk_frozen=trunk_frozen,
+            )
             combined_value_logits = combined_outputs["value_logits"]
 
             pos_value_logits = combined_value_logits[:batch_size]
@@ -129,15 +155,31 @@ def validate_critic(
             pos_mask = (pos_labels != -100).to(model_dtype)
             neg_mask = (neg_labels != -100).to(model_dtype)
 
-            # Loss 계산
-            loss = pairwise_ranking_loss(
-                v_pos=pos_value_logits,
-                v_neg=neg_value_logits,
-                mask_pos=pos_mask,
-                mask_neg=neg_mask,
-            )
+            # Value Loss 계산 (조건부)
+            value_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
 
-            # Pairwise accuracy 계산
+            if use_pairwise:
+                pairwise_loss_val = pairwise_ranking_loss(
+                    v_pos=pos_value_logits,
+                    v_neg=neg_value_logits,
+                    mask_pos=pos_mask,
+                    mask_neg=neg_mask,
+                )
+                value_loss = value_loss + pairwise_coef * pairwise_loss_val
+
+            if use_mc_mse:
+                pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
+                pos_mc_loss = compute_mc_value_loss(
+                    pos_value_logits, pos_rewards, pos_attention_mask, pos_mask
+                )
+                neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
+                neg_mc_loss = compute_mc_value_loss(
+                    neg_value_logits, neg_rewards, neg_attention_mask, neg_mask
+                )
+                mc_mse_loss_val = (pos_mc_loss + neg_mc_loss) / 2
+                value_loss = value_loss + mc_mse_coef * mc_mse_loss_val
+
+            # Pairwise accuracy 계산 (항상 계산 - 메트릭용)
             pairwise_metrics = compute_pairwise_accuracy(
                 v_pos=pos_value_logits,
                 v_neg=neg_value_logits,
@@ -145,7 +187,7 @@ def validate_critic(
                 mask_neg=neg_mask,
             )
 
-            total_loss += loss.item()
+            total_loss += value_loss.item()
             total_correct_pairs += pairwise_metrics["correct_pairs"]
             total_pairs += pairwise_metrics["total_pairs"]
             total_mean_pos += pairwise_metrics["mean_pos"]
@@ -231,14 +273,34 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         mlflow_run_id = mlflow.active_run().info.run_id
         logger.info(f"MLflow Run ID: {mlflow_run_id}")
 
-    # 6. Resource 로딩
-    adapter = load_adapter(config, device)
+    # 6. LoRA 설정 파싱
+    use_lora = getattr(config.training, "use_lora", False)
+    lora_config = None
+    if use_lora:
+        lora_section = config.training.get("lora", {})
+        lora_config = {
+            "rank": lora_section.get("rank", 8),
+            "alpha": lora_section.get("alpha", 16.0),
+            "dropout": lora_section.get("dropout", 0.0),
+            "target_modules": lora_section.get(
+                "target_modules", ["wq", "wk", "wv", "wo"]
+            ),
+        }
+        logger.info(f"LoRA enabled: rank={lora_config['rank']}, alpha={lora_config['alpha']}")
+
+    # 7. Resource 로딩
+    adapter = load_adapter(config, device, use_lora=use_lora, lora_config=lora_config)
 
     # Transformer trunk freeze 설정
+    # LoRA 사용 시: 원본 파라미터는 이미 frozen, LoRA 파라미터만 학습
+    # LoRA 미사용 시: num_unfrozen_layers에 따라 freeze/unfreeze
     num_unfrozen = config.training.get("num_unfrozen_layers", 0)
     n_layers = len(adapter.transformer.layers)
 
-    if num_unfrozen > 0:
+    if use_lora:
+        # LoRA 사용 시 원본 trunk는 이미 frozen됨 (adapter._apply_lora에서 처리)
+        logger.info("LoRA enabled: training LoRA parameters + value head")
+    elif num_unfrozen > 0:
         # 마지막 N개 블록만 학습
         logger.info(f"Unfreezing last {num_unfrozen} transformer blocks (out of {n_layers})")
 
@@ -260,41 +322,15 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         for param in adapter.transformer.parameters():
             param.requires_grad = False
 
-    # trunk 완전 frozen 여부 (메모리 최적화용)
-    trunk_frozen = (num_unfrozen == 0)
-    if trunk_frozen:
-        logger.info("Trunk frozen optimization enabled (no_grad for trunk forward)")
-
     # Value head는 항상 학습
     for param in adapter.value_head.parameters():
         param.requires_grad = True
 
-    adapter = wrap_model_fsdp(
-        adapter,
-        device,
-        sharding_strategy=config.distributed.fsdp.sharding_strategy,
-        mixed_precision=config.distributed.fsdp.mixed_precision,
-        cpu_offload=config.distributed.fsdp.cpu_offload,
-        activation_checkpointing=config.distributed.fsdp.get("activation_checkpointing", False),
-    )
-    tokenizer = load_tokenizer_from_config(config)
+    # Model size 로깅 (FSDP wrapping 전에 계산해야 정확함)
+    model_size = get_model_size(adapter)
 
-    # Model size 로깅
-    model_size_local = get_model_size(unwrap_model(adapter))
-
-    # FSDP FULL_SHARD 시 world_size를 곱해 실제 전체 파라미터 수 계산
-    sharding_strategy = config.distributed.fsdp.sharding_strategy
-    if sharding_strategy == "FULL_SHARD" and world_size > 1:
-        model_size = {
-            "total_params": model_size_local["total_params"] * world_size,
-            "trainable_params": model_size_local["trainable_params"] * world_size,
-            "non_trainable_params": model_size_local["non_trainable_params"] * world_size,
-        }
-    else:
-        model_size = model_size_local
-
-    # Trainable params breakdown 계산 (FSDP sharding 고려)
-    trainable_breakdown_local = {
+    # Trainable params breakdown 계산 (FSDP wrapping 전에 계산)
+    trainable_breakdown = {
         "value_head": sum(p.numel() for p in adapter.value_head.parameters() if p.requires_grad),
         "trunk_blocks": sum(
             p.numel() for layer in adapter.transformer.layers[-num_unfrozen:]
@@ -305,14 +341,16 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         ) if num_unfrozen > 0 else 0,
     }
 
-    if sharding_strategy == "FULL_SHARD" and world_size > 1:
-        trainable_breakdown = {
-            "value_head": trainable_breakdown_local["value_head"] * world_size,
-            "trunk_blocks": trainable_breakdown_local["trunk_blocks"] * world_size,
-            "norm": trainable_breakdown_local["norm"] * world_size,
-        }
-    else:
-        trainable_breakdown = trainable_breakdown_local
+    # FSDP wrapping
+    adapter = wrap_model_fsdp(
+        adapter,
+        device,
+        sharding_strategy=config.distributed.fsdp.sharding_strategy,
+        mixed_precision=config.distributed.fsdp.mixed_precision,
+        cpu_offload=config.distributed.fsdp.cpu_offload,
+        activation_checkpointing=config.distributed.fsdp.get("activation_checkpointing", False),
+    )
+    tokenizer = load_tokenizer_from_config(config)
 
     if is_main_process():
         if use_mlflow:
@@ -465,6 +503,31 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # 모델 dtype 감지
     model_dtype = next(adapter.parameters()).dtype
 
+    # trunk_frozen 설정 (config에서 직접 설정 가능, 기본값은 num_unfrozen_layers 기반)
+    trunk_frozen = getattr(config.training, "trunk_frozen", num_unfrozen == 0)
+    logger.info(f"Trunk frozen: {trunk_frozen}")
+
+    # value_loss 설정 (기본값: pairwise만 사용)
+    value_loss_config = config.training.get("value_loss", {})
+    use_pairwise = value_loss_config.get("use_pairwise", True)
+    use_mc_mse = value_loss_config.get("use_mc_mse", False)
+    pairwise_coef = value_loss_config.get("pairwise_coef", 1.0)
+    mc_mse_coef = value_loss_config.get("mc_mse_coef", 1.0)
+    logger.info(f"Value loss: use_pairwise={use_pairwise}, use_mc_mse={use_mc_mse}")
+
+    # 컴포넌트별 gradient clipping 설정
+    # trunk과 value_head에 각각 다른 max_grad_norm 적용하여 gradient scale 불균형 해소
+    fallback_max_grad_norm = config.training.get("max_grad_norm", 1.0)
+    trunk_max_grad_norm = config.training.get("trunk_max_grad_norm", fallback_max_grad_norm)
+    value_head_max_grad_norm = config.training.get("value_head_max_grad_norm", fallback_max_grad_norm)
+    use_component_clipping = (
+        "trunk_max_grad_norm" in config.training or "value_head_max_grad_norm" in config.training
+    )
+    logger.info(
+        f"Gradient clipping: trunk={trunk_max_grad_norm}, value_head={value_head_max_grad_norm} "
+        f"(component_clipping={use_component_clipping})"
+    )
+
     # Optimizer 초기화 (gradient accumulation을 위해 while loop 시작 전)
     optimizer.zero_grad()
 
@@ -525,15 +588,33 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             pos_mask = (pos_labels != -100).to(model_dtype)
             neg_mask = (neg_labels != -100).to(model_dtype)
 
-            # Pairwise ranking loss
-            value_loss = pairwise_ranking_loss(
-                v_pos=pos_value_logits,
-                v_neg=neg_value_logits,
-                mask_pos=pos_mask,
-                mask_neg=neg_mask,
-            )
+            # Value Loss 계산 (조건부)
+            value_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
 
-            # Pairwise 메트릭 누적
+            if use_pairwise:
+                pairwise_loss_val = pairwise_ranking_loss(
+                    v_pos=pos_value_logits,
+                    v_neg=neg_value_logits,
+                    mask_pos=pos_mask,
+                    mask_neg=neg_mask,
+                )
+                value_loss = value_loss + pairwise_coef * pairwise_loss_val
+
+            if use_mc_mse:
+                # Positive: reward=1
+                pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
+                pos_mc_loss = compute_mc_value_loss(
+                    pos_value_logits, pos_rewards, pos_attention_mask, pos_mask
+                )
+                # Negative: reward=0
+                neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
+                neg_mc_loss = compute_mc_value_loss(
+                    neg_value_logits, neg_rewards, neg_attention_mask, neg_mask
+                )
+                mc_mse_loss_val = (pos_mc_loss + neg_mc_loss) / 2
+                value_loss = value_loss + mc_mse_coef * mc_mse_loss_val
+
+            # Pairwise 메트릭 누적 (항상 계산 - 메트릭용)
             pairwise_metrics = compute_pairwise_accuracy(
                 v_pos=pos_value_logits,
                 v_neg=neg_value_logits,
@@ -565,16 +646,36 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             # Optimizer step (accumulation 완료 시에만)
             if accumulation_counter >= gradient_accumulation_steps:
-                # Gradient clipping (누적된 gradient에 적용)
-                if config.training.max_grad_norm > 0:
-                    # DEBUG: max_grad_norm 값 확인
-                    if global_step == 0:
-                        logger.info(f"DEBUG: config.training.max_grad_norm = {config.training.max_grad_norm}")
-
+                # 컴포넌트별 gradient clipping (trunk과 value_head 분리)
+                if use_component_clipping:
+                    # trunk과 value_head에 각각 다른 max_grad_norm 적용
+                    component_clip_stats = compute_gradient_clip_stats_by_component(
+                        adapter,
+                        trunk_max_grad_norm=trunk_max_grad_norm,
+                        value_head_max_grad_norm=value_head_max_grad_norm,
+                    )
+                    # 하위 호환성: 기존 grad_clip_stats 형식으로 변환 (전체 norm 근사)
+                    grad_clip_stats = {
+                        "grad_norm_pre_clip": (
+                            component_clip_stats["trunk_grad_norm_pre"] ** 2
+                            + component_clip_stats["value_head_grad_norm_pre"] ** 2
+                        ) ** 0.5,
+                        "grad_norm_post_clip": (
+                            component_clip_stats["trunk_grad_norm_post"] ** 2
+                            + component_clip_stats["value_head_grad_norm_post"] ** 2
+                        ) ** 0.5,
+                        "grad_clip_ratio": min(
+                            component_clip_stats["trunk_clip_ratio"],
+                            component_clip_stats["value_head_clip_ratio"],
+                        ),
+                    }
+                elif fallback_max_grad_norm > 0:
+                    # 기존 방식: 전체 모델에 단일 max_grad_norm 적용
                     grad_clip_stats = compute_gradient_clip_stats(
                         adapter,
-                        config.training.max_grad_norm,
+                        fallback_max_grad_norm,
                     )
+                    component_clip_stats = None
                 else:
                     grad_norm_dict = compute_gradient_norm(adapter)
                     grad_clip_stats = {
@@ -582,6 +683,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         "grad_norm_post_clip": grad_norm_dict["grad_norm"],
                         "grad_clip_ratio": 1.0,
                     }
+                    component_clip_stats = None
 
                 optimizer.step()
                 if scheduler is not None:
@@ -620,20 +722,28 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
                     if is_main_process():
                         if use_mlflow:
-                            mlflow.log_metrics(
-                                {
-                                    "train/loss": avg_loss,
-                                    "train/grad_norm": avg_grad_norm_post,
-                                    "train/learning_rate": value_head_lr,
-                                    "train/pairwise_accuracy": avg_pairwise_acc,
-                                    "value/mean_pos": avg_mean_pos,
-                                    "value/mean_neg": avg_mean_neg,
-                                    "value/margin": avg_mean_pos - avg_mean_neg,
-                                    "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
-                                    "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
-                                },
-                                step=global_step,
-                            )
+                            metrics_to_log = {
+                                "train/loss": avg_loss,
+                                "train/grad_norm": avg_grad_norm_post,
+                                "train/learning_rate": value_head_lr,
+                                "train/pairwise_accuracy": avg_pairwise_acc,
+                                "value/mean_pos": avg_mean_pos,
+                                "value/mean_neg": avg_mean_neg,
+                                "value/margin": avg_mean_pos - avg_mean_neg,
+                                "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
+                                "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
+                            }
+                            # 컴포넌트별 gradient clipping 사용 시 개별 norm 로깅
+                            if component_clip_stats is not None:
+                                metrics_to_log.update({
+                                    "train/trunk_grad_norm_pre": component_clip_stats["trunk_grad_norm_pre"],
+                                    "train/trunk_grad_norm_post": component_clip_stats["trunk_grad_norm_post"],
+                                    "train/trunk_clip_ratio": component_clip_stats["trunk_clip_ratio"],
+                                    "train/value_head_grad_norm_pre": component_clip_stats["value_head_grad_norm_pre"],
+                                    "train/value_head_grad_norm_post": component_clip_stats["value_head_grad_norm_post"],
+                                    "train/value_head_clip_ratio": component_clip_stats["value_head_clip_ratio"],
+                                })
+                            mlflow.log_metrics(metrics_to_log, step=global_step)
                     logger.info(
                         f"Step {global_step}/{total_optimization_steps}, "
                         f"Loss: {avg_loss:.4f}, "
@@ -648,12 +758,15 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         if accumulation_counter > 0:
             logger.info(f"Processing incomplete accumulation ({accumulation_counter} batches before validation)")
 
-            # Gradient clipping
-            if config.training.max_grad_norm > 0:
-                grad_clip_stats = compute_gradient_clip_stats(
+            # Gradient clipping (컴포넌트별 또는 전체)
+            if use_component_clipping:
+                compute_gradient_clip_stats_by_component(
                     adapter,
-                    config.training.max_grad_norm,
+                    trunk_max_grad_norm=trunk_max_grad_norm,
+                    value_head_max_grad_norm=value_head_max_grad_norm,
                 )
+            elif fallback_max_grad_norm > 0:
+                compute_gradient_clip_stats(adapter, fallback_max_grad_norm)
 
             optimizer.step()
             if scheduler is not None:
@@ -704,6 +817,11 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             adapter=adapter,
             dataloader=val_loader,
             device=device,
+            trunk_frozen=trunk_frozen,
+            use_pairwise=use_pairwise,
+            use_mc_mse=use_mc_mse,
+            pairwise_coef=pairwise_coef,
+            mc_mse_coef=mc_mse_coef,
             return_raw_counts=True,
         )
 
@@ -820,6 +938,11 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             adapter=adapter,
             dataloader=val_loader,
             device=device,
+            trunk_frozen=trunk_frozen,
+            use_pairwise=use_pairwise,
+            use_mc_mse=use_mc_mse,
+            pairwise_coef=pairwise_coef,
+            mc_mse_coef=mc_mse_coef,
             return_raw_counts=True,
         )
 

@@ -64,14 +64,21 @@ training:
   n_epochs: 2.0
   batch_size: 32  # Per GPU (각 배치에 pos+neg 쌍 포함)
   gradient_accumulation_steps: 1
-  trunk_learning_rate: 1.0e-5
-  value_head_learning_rate: 1.0e-4
-  max_grad_norm: 0.5
+
+  # 컴포넌트별 학습률 (LoRA는 Full FT 대비 LR 10배 권장)
+  trunk_learning_rate: 1.0e-4    # LoRA Trunk LR
+  value_head_learning_rate: 1.0e-4  # Head와 Trunk 보폭 맞춤
+
+  # 컴포넌트별 gradient clipping (trunk과 value_head 독립 적용)
+  # trunk gradient scale ~1.5, value_head gradient scale ~25 이므로 분리 필요
+  trunk_max_grad_norm: 1.0       # Trunk(MTP) gradient clipping
+  value_head_max_grad_norm: 5.0  # Value head gradient clipping
+  max_grad_norm: 1.0             # fallback (컴포넌트별 설정 없을 때)
 
   # Value head 설정
-  value_head_type: linear  # linear (4096 → 1) 또는 mlp (4096 → 512 → 256 → 1)
-  dropout: 0.0
-  trunk_frozen: false  # false면 value loss gradient가 trunk로 전파됨
+  value_head_type: mlp  # linear (4096 → 1) 또는 mlp (4096 → 512 → 256 → 1)
+  dropout: 0.3
+  trunk_frozen: true  # false면 value loss gradient가 trunk로 전파됨
 
   # TD error weighting
   beta: 1
@@ -80,9 +87,9 @@ training:
   gamma: 1.0
   lam: 1.0
 
-  # Value loss 스케일링 (value_head gradient가 trunk gradient를 압도하지 않도록)
-  # value_head_grad ~25, trunk_grad ~1.5 → 0.05로 스케일링하여 균형
-  value_loss_coef: 0.05
+  # Value loss 스케일링 (컴포넌트별 clipping과 별개로 loss 비율 조정)
+  # 이제 gradient clipping이 분리되어 있으므로 순수 loss 비율로만 사용
+  value_loss_coef: 0.3
 
   # Value loss 모드 선택 (pairwise와 mc_mse 독립적 또는 동시 사용 가능)
   value_loss:
@@ -92,6 +99,21 @@ training:
     mc_mse_coef: 1.0     # MC MSE loss 계수
 
   log_interval: 1
+
+  # LoRA 설정 (All-Linear LoRA for CodeContests)
+  use_lora: true
+  lora:
+    rank: 64           # 코드/논리 태스크는 64 권장
+    alpha: 128.0       # rank의 2배
+    dropout: 0.05      # 과적합 방지
+    target_modules:    # 모든 Linear Layer에 적용
+      - wq
+      - wk
+      - wv
+      - wo
+      - w1
+      - w2
+      - w3
 
   # Learning rate scheduler
   lr_scheduler:
@@ -107,6 +129,7 @@ checkpoint:
   save_final: true
   save_total_limit: 4
   s3_upload: false
+  save_lora_only: true  # LoRA 사용 시 LoRA + value head만 저장 (메모리 효율)
 
 # 런타임 설정
 runtime:

@@ -232,6 +232,233 @@ def cleanup_old_checkpoints(
             checkpoint_path.unlink()
 
 
+def save_lora_checkpoint(
+    adapter,
+    optimizer: torch.optim.Optimizer,
+    epoch: int | float,
+    train_metrics: dict[str, float],
+    val_metrics: dict[str, float],
+    checkpoint_path: Path | str,
+    config: dict | None = None,
+    s3_upload: bool = False,
+    mlflow_run_id: str | None = None,
+    save_value_head: bool = True,
+) -> None:
+    """LoRA 전용 checkpoint 저장 (LoRA 파라미터 + value head만)
+
+    전체 모델 대신 LoRA 파라미터와 value head만 저장하여 checkpoint 크기를 대폭 줄임.
+    Base model은 별도로 유지하고, 추론 시 base model + LoRA checkpoint 조합으로 사용.
+
+    Args:
+        adapter: MetaLlamaMTPAdapter (FSDP-wrapped 또는 일반 모델, LoRA 적용됨)
+        optimizer: torch.optim.Optimizer
+        epoch: 현재 epoch (fractional epoch 지원)
+        train_metrics: Training metrics
+        val_metrics: Validation metrics
+        checkpoint_path: 저장 경로
+        config: 학습 설정 정보 (base model 경로 등)
+        s3_upload: S3 업로드 여부
+        mlflow_run_id: MLflow run ID
+        save_value_head: Value head도 함께 저장할지 여부
+
+    Saved checkpoint format:
+        {
+            "epoch": float,
+            "lora_state_dict": dict,  # LoRA 파라미터만
+            "value_head_state_dict": dict,  # Value head (선택적)
+            "optimizer_state_dict": dict,
+            "train_metrics": dict,
+            "val_metrics": dict,
+            "config": dict,
+            "lora_config": dict,  # LoRA 설정 (rank, alpha 등)
+        }
+    """
+    import torch.distributed as dist
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp.fully_sharded_data_parallel import (
+        StateDictType,
+        FullStateDictConfig,
+    )
+
+    checkpoint_path = Path(checkpoint_path)
+
+    # FSDP Full state dict gathering (모든 rank가 참여해야 함)
+    if isinstance(adapter, FSDP):
+        with FSDP.state_dict_type(
+            adapter,
+            StateDictType.FULL_STATE_DICT,
+            FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+        ):
+            full_state_dict = adapter.state_dict()
+
+        # rank 0만 실제 저장 수행
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+
+        unwrapped = adapter.module
+    else:
+        full_state_dict = adapter.state_dict()
+        unwrapped = adapter
+
+    # LoRA 파라미터만 추출
+    lora_state_dict = {
+        k: v for k, v in full_state_dict.items()
+        if "lora_A" in k or "lora_B" in k
+    }
+
+    # Value head 파라미터 추출 (선택적)
+    value_head_state_dict = {}
+    if save_value_head:
+        value_head_state_dict = {
+            k: v for k, v in full_state_dict.items()
+            if "value_head" in k
+        }
+
+    # LoRA config 추출 (adapter에서)
+    lora_config = None
+    if hasattr(unwrapped, "lora_enabled") and unwrapped.lora_enabled:
+        # transformer의 첫 번째 LoRALinear에서 config 추출
+        for name, module in unwrapped.transformer.named_modules():
+            if hasattr(module, "rank") and hasattr(module, "alpha"):
+                lora_config = {
+                    "rank": module.rank,
+                    "alpha": module.alpha,
+                }
+                break
+
+    # 크기 비교 로깅
+    full_size = sum(v.numel() for v in full_state_dict.values())
+    lora_size = sum(v.numel() for v in lora_state_dict.values())
+    vh_size = sum(v.numel() for v in value_head_state_dict.values())
+    saved_size = lora_size + vh_size
+
+    logger.info(f"LoRA checkpoint 저장:")
+    logger.info(f"  전체 모델: {full_size:,} params")
+    logger.info(f"  LoRA: {lora_size:,} params ({lora_size/full_size*100:.2f}%)")
+    if save_value_head:
+        logger.info(f"  Value head: {vh_size:,} params ({vh_size/full_size*100:.2f}%)")
+    logger.info(f"  저장 크기: {saved_size:,} params ({saved_size/full_size*100:.2f}%)")
+
+    # 저장
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    checkpoint = {
+        "epoch": epoch,
+        "lora_state_dict": lora_state_dict,
+        "value_head_state_dict": value_head_state_dict if save_value_head else {},
+        "optimizer_state_dict": optimizer.state_dict(),
+        "train_metrics": train_metrics,
+        "val_metrics": val_metrics,
+        "config": config,
+        "lora_config": lora_config,
+        "checkpoint_type": "lora",  # checkpoint 타입 구분용
+    }
+
+    torch.save(checkpoint, checkpoint_path)
+    logger.info(f"LoRA checkpoint 저장 완료: {checkpoint_path}")
+    logger.info(f"  Epoch: {epoch}")
+    logger.info(f"  Val loss: {val_metrics.get('val_loss', 'N/A')}")
+
+    # S3 업로드 (비동기)
+    if s3_upload and mlflow_run_id:
+        from weighted_mtp.utils.s3_utils import s3_upload_executor, upload_to_s3_async
+        s3_upload_executor.submit(upload_to_s3_async, checkpoint_path, mlflow_run_id)
+        logger.info(f"S3 업로드 예약: {checkpoint_path.name}")
+    elif s3_upload and not mlflow_run_id:
+        logger.warning(f"S3 업로드 건너뜀 (run_id 없음): {checkpoint_path.name}")
+
+
+def load_lora_checkpoint(
+    adapter,
+    checkpoint_path: Path | str,
+    device: torch.device,
+    load_value_head: bool = True,
+    strict: bool = True,
+) -> dict:
+    """LoRA checkpoint 로드 (LoRA 파라미터 + value head를 기존 adapter에 적용)
+
+    Base model이 이미 로드된 adapter에 LoRA 가중치와 value head를 로드합니다.
+
+    Args:
+        adapter: MetaLlamaMTPAdapter (LoRA가 적용된 상태)
+        checkpoint_path: LoRA checkpoint 경로
+        device: torch.device
+        load_value_head: Value head도 함께 로드할지 여부
+        strict: 누락된 키가 있으면 에러 발생 여부
+
+    Returns:
+        checkpoint metadata (epoch, config, val_metrics 등)
+
+    Raises:
+        FileNotFoundError: Checkpoint 파일이 존재하지 않음
+        ValueError: Checkpoint이 LoRA 타입이 아님
+    """
+    checkpoint_path = Path(checkpoint_path)
+
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint 파일이 존재하지 않습니다: {checkpoint_path}")
+
+    # Checkpoint 로드
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    logger.info(f"LoRA checkpoint 로드: {checkpoint_path}")
+
+    # LoRA checkpoint 타입 확인
+    checkpoint_type = checkpoint.get("checkpoint_type", "full")
+    if checkpoint_type != "lora":
+        raise ValueError(
+            f"LoRA checkpoint가 아닙니다. checkpoint_type={checkpoint_type}\n"
+            f"일반 checkpoint는 load_state_dict()를 사용하세요."
+        )
+
+    # LoRA state dict 로드
+    lora_state_dict = checkpoint.get("lora_state_dict", {})
+    if not lora_state_dict:
+        logger.warning("LoRA state_dict가 비어있습니다.")
+
+    # Value head state dict 로드
+    value_head_state_dict = checkpoint.get("value_head_state_dict", {})
+
+    # 현재 adapter의 state_dict 가져오기
+    current_state_dict = adapter.state_dict()
+
+    # LoRA 가중치 업데이트
+    for key, value in lora_state_dict.items():
+        if key in current_state_dict:
+            current_state_dict[key] = value
+        elif strict:
+            raise KeyError(f"LoRA key not found in model: {key}")
+        else:
+            logger.warning(f"LoRA key not found, skipping: {key}")
+
+    # Value head 가중치 업데이트
+    if load_value_head and value_head_state_dict:
+        for key, value in value_head_state_dict.items():
+            if key in current_state_dict:
+                current_state_dict[key] = value
+            elif strict:
+                raise KeyError(f"Value head key not found in model: {key}")
+            else:
+                logger.warning(f"Value head key not found, skipping: {key}")
+
+    # State dict 적용
+    adapter.load_state_dict(current_state_dict)
+
+    logger.info(f"LoRA checkpoint 로드 완료:")
+    logger.info(f"  LoRA params: {len(lora_state_dict)} keys")
+    if load_value_head:
+        logger.info(f"  Value head params: {len(value_head_state_dict)} keys")
+    logger.info(f"  Epoch: {checkpoint.get('epoch', 'N/A')}")
+
+    # Metadata 반환
+    return {
+        "epoch": checkpoint.get("epoch"),
+        "config": checkpoint.get("config"),
+        "val_metrics": checkpoint.get("val_metrics", {}),
+        "train_metrics": checkpoint.get("train_metrics", {}),
+        "lora_config": checkpoint.get("lora_config"),
+    }
+
+
 def save_hf_checkpoint(
     model,
     tokenizer,
