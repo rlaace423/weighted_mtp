@@ -1,0 +1,1 @@
+{'save_dir': 'storage/checkpoints/verifiable/verifiable-pairwise', 'save_checkpoint_every': 0.25, 'save_best': True, 'save_final': True, 'save_total_limit': 4, 's3_upload': False}

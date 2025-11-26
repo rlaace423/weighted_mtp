@@ -62,7 +62,6 @@ def validate_verifiable(
     beta: float,
     weight_clip_min: float,
     weight_clip_max: float,
-    pairwise_coef: float = 0.1,
 ) -> dict[str, float]:
     """Validation 수행 (Stage 2) - Pairwise 전용
 
@@ -73,7 +72,6 @@ def validate_verifiable(
         beta: TD error weighting 계수
         weight_clip_min: Weight 최소값
         weight_clip_max: Weight 최대값
-        pairwise_coef: Pairwise ranking loss 계수
 
     Returns:
         Validation metrics (weighted_ce_loss, value_loss, pairwise_accuracy, margin)
@@ -127,6 +125,9 @@ def validate_verifiable(
             batch_size, seq_len, n_future, vocab_size = pos_logits.shape
 
             # TD error (Positive만 - Policy weighting용)
+            # Response 토큰 마스크 (labels != -100)
+            pos_response_mask = (pos_labels != -100).long()
+
             td_errors = compute_td_errors(
                 value_logits=pos_value_logits,
                 rewards=pos_rewards,
@@ -135,7 +136,7 @@ def validate_verifiable(
             )
             weights = build_weights(
                 td_errors=td_errors,
-                attention_mask=pos_attention_mask,
+                attention_mask=pos_response_mask,
                 beta=beta,
                 min_weight=weight_clip_min,
                 max_weight=weight_clip_max,
@@ -182,8 +183,8 @@ def validate_verifiable(
             total_pairwise_accuracy += pairwise_metrics["pairwise_accuracy"]
             total_margin += pairwise_metrics["margin"]
 
-            # Total Loss
-            total_loss = weighted_ce_loss + pairwise_coef * value_loss
+            # Total Loss (trunk: CE, value_head: pairwise)
+            total_loss = weighted_ce_loss + value_loss
 
             # Metrics 수집
             total_weighted_ce_loss += weighted_ce_loss.item()
@@ -496,19 +497,29 @@ def run_verifiable_training(
             )
             pos_logits = pos_outputs["logits"]
             pos_value_logits = pos_outputs["value_logits"]
+            pos_hidden_states = pos_outputs["hidden_states"]
 
-            # Forward (Negative) - Value Loss만 사용
-            neg_outputs = adapter(
-                neg_input_ids,
-                neg_attention_mask,
-                return_value_logits=True,
-                return_hidden_states=False  # hidden states 불필요
-            )
+            # Value head용 value_logits (trunk gradient 차단)
+            # trunk은 weighted_ce_loss로만 학습, value_head는 pairwise_loss로만 학습
+            pos_hidden_detached = pos_hidden_states.detach()
+            pos_value_for_ranking = adapter.value_head(pos_hidden_detached)
+
+            # Forward (Negative) - Value Loss만 사용 (no_grad로 메모리 절감)
+            with torch.no_grad():
+                neg_outputs = adapter(
+                    neg_input_ids,
+                    neg_attention_mask,
+                    return_value_logits=True,
+                    return_hidden_states=False
+                )
             neg_value_logits = neg_outputs["value_logits"]
 
             batch_size, seq_len, n_future, vocab_size = pos_logits.shape
 
             # TD error 계산 (Positive만 - Policy weighting용)
+            # Response 토큰 마스크 (labels != -100)
+            pos_response_mask = (pos_labels != -100).long()
+
             td_errors = compute_td_errors(
                 value_logits=pos_value_logits,
                 rewards=pos_rewards,
@@ -517,9 +528,10 @@ def run_verifiable_training(
             )
 
             # Weight 산출 (Normalized IQL with Advantage Whitening)
+            # Response 토큰만으로 정규화 (Instruction 제외)
             weights = build_weights(
                 td_errors=td_errors,
-                attention_mask=pos_attention_mask,
+                attention_mask=pos_response_mask,
                 beta=config.training.beta,
                 min_weight=config.training.weight_clip_min,
                 max_weight=config.training.weight_clip_max,
@@ -558,14 +570,13 @@ def run_verifiable_training(
             weighted_ce_loss = batch_weighted_ce_loss / n_future
             unweighted_ce_loss = batch_unweighted_ce_loss / n_future
 
-            # Pairwise Ranking Loss (value head 학습)
+            # Pairwise Ranking Loss (value head만 학습, trunk gradient 차단됨)
             pos_mask = (pos_labels != -100).to(model_dtype)
             neg_mask = (neg_labels != -100).to(model_dtype)
-            value_loss = pairwise_ranking_loss(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
+            value_loss = pairwise_ranking_loss(pos_value_for_ranking, neg_value_logits, pos_mask, neg_mask)
 
-            # Total Loss
-            pairwise_coef = getattr(config.training, "pairwise_coef", 0.1)
-            total_loss = weighted_ce_loss + pairwise_coef * value_loss
+            # Total Loss (trunk은 CE로만, value_head는 pairwise로만 학습)
+            total_loss = weighted_ce_loss + value_loss
 
             # 로깅용 변수 설정
             input_ids = pos_input_ids
@@ -760,7 +771,6 @@ def run_verifiable_training(
         # Validation 실행 (epoch 경계에서)
         logger.info(f"--- Validation at epoch {current_epoch:.2f} ---")
 
-        pairwise_coef = getattr(config.training, "pairwise_coef", 0.1)
         val_metrics = validate_verifiable(
             adapter=adapter,
             dataloader=val_loader,
@@ -768,7 +778,6 @@ def run_verifiable_training(
             beta=config.training.beta,
             weight_clip_min=config.training.weight_clip_min,
             weight_clip_max=config.training.weight_clip_max,
-            pairwise_coef=pairwise_coef,
         )
 
         # Validation metrics aggregation (1회 통신)
@@ -878,7 +887,6 @@ def run_verifiable_training(
             beta=config.training.beta,
             weight_clip_min=config.training.weight_clip_min,
             weight_clip_max=config.training.weight_clip_max,
-            pairwise_coef=getattr(config.training, "pairwise_coef", 0.1),
         )
 
         save_checkpoint(

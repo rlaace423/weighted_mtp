@@ -1,0 +1,14 @@
+artifact_uri: file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns/869427667672898361/a0a47ff5fa7d410582ced2a813fa71fd/artifacts
+end_time: null
+entry_point_name: ''
+experiment_id: '869427667672898361'
+lifecycle_stage: active
+run_id: a0a47ff5fa7d410582ced2a813fa71fd
+run_name: verifiable-pairwise
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1764159637652
+status: 1
+tags: []
+user_id: wmtp_admin

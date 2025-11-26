@@ -126,7 +126,6 @@ def test_verifiable_config_validation():
 
     # Training 파라미터 검증 (verifiable 특화)
     assert hasattr(config.training, "beta"), "Should have beta for TD error"
-    assert hasattr(config.training, "pairwise_coef"), "Should have pairwise_coef"
     assert hasattr(config.training, "weight_clip_min"), "Should have weight_clip_min"
     assert hasattr(config.training, "weight_clip_max"), "Should have weight_clip_max"
 

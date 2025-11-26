@@ -157,11 +157,9 @@ training:
   log_interval: 1             # 로깅 간격 (steps)
 
   # Verifiable 전용 (TD error weighting)
-  beta: 0.2                    # TD error temperature
-  value_coef: 0.5              # Value loss coefficient
-  weight_clip_min: 0.1         # 최소 가중치
+  beta: 1.0                    # TD error temperature
+  weight_clip_min: 0           # 최소 가중치
   weight_clip_max: 5.0         # 최대 가중치
-  loss_type: mse               # Loss type (mse/huber/mae)
 
   # Rho-1 전용
   temperature: 1.0             # Rho-1 temperature
@@ -174,9 +172,9 @@ training:
 - `learning_rate`: Learning rate (0 < lr <= 1.0)
 
 **Stage별 특수 필드**:
-- **Verifiable**: `beta`, `value_coef`, `weight_clip_min`, `weight_clip_max` 필수
+- **Verifiable**: `beta`, `weight_clip_min`, `weight_clip_max` 필수
 - **Rho-1**: `temperature`, `k_percent` 필수
-- **Critic**: `loss_type` 필드 사용
+- **Critic**: pairwise 모드 사용
 
 ### 3.6 checkpoint (체크포인트 설정)
 
@@ -352,9 +350,8 @@ data_sampling:
       difficulty_weights: {low: 0.7, medium: 0.3, high: 0.0}
 
 training:
-  beta: 0.2                    # TD error temperature
-  value_coef: 0.5              # Value loss coefficient
-  weight_clip_min: 0.1
+  beta: 1.0                    # TD error temperature
+  weight_clip_min: 0
   weight_clip_max: 5.0
 ```
 
@@ -362,8 +359,8 @@ training:
 ```bash
 python src/weighted_mtp/pipelines/run_verifiable.py \
   --config configs/verifiable/verifiable.yaml \
-  --override training.beta=0.8 \
-  --override experiment.critic_checkpoint=storage/checkpoints/critic/my_checkpoint.pt
+  --override training.beta=0.9 \
+  --override models.policy.path=storage/checkpoints/critic/my_checkpoint.pt
 ```
 
 ### Rho-1 (Reference-based weighting)

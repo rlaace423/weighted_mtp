@@ -70,8 +70,7 @@ def verifiable_pairwise_test_config():
             "trunk_learning_rate": 1e-5,
             "value_head_learning_rate": 1e-3,
             "max_grad_norm": 1.0,
-            "beta": 0.5,
-            "pairwise_coef": 0.1,  # Pairwise auxiliary loss 계수
+            "beta": 1.0,
             "weight_clip_min": 0,
             "weight_clip_max": 3,
             "log_interval": 1,
@@ -124,7 +123,8 @@ def verifiable_pairwise_test_config():
 def test_verifiable_pairwise_loss_structure():
     """Verifiable Pairwise loss 구조 테스트
 
-    total_loss = weighted_ce_loss + pairwise_coef * aux_loss
+    total_loss = weighted_ce_loss + value_loss
+    (trunk은 CE만, value_head는 pairwise loss만 학습)
     """
     import torch
     import torch.nn.functional as F
@@ -147,19 +147,18 @@ def test_verifiable_pairwise_loss_structure():
     neg_mask = pos_mask.clone()
 
     # Weighted policy loss (simplified)
-    policy_loss = F.cross_entropy(
+    weighted_ce_loss = F.cross_entropy(
         pos_logits[:, :, 0, :].reshape(-1, vocab_size),
         pos_labels.reshape(-1),
         reduction="mean",
         ignore_index=-100,
     )
 
-    # Auxiliary pairwise loss
-    aux_loss = pairwise_ranking_loss(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
+    # Pairwise ranking loss (value head만 학습)
+    value_loss = pairwise_ranking_loss(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
 
-    # Total loss = weighted_ce_loss + pairwise_coef * aux_loss
-    pairwise_coef = 0.1
-    total_loss = policy_loss + pairwise_coef * aux_loss
+    # Total loss = weighted_ce_loss + value_loss (계수 없음)
+    total_loss = weighted_ce_loss + value_loss
 
     # Assertions
     assert total_loss.dim() == 0, "Total loss should be scalar"
@@ -167,8 +166,8 @@ def test_verifiable_pairwise_loss_structure():
     assert total_loss.item() > 0, "Total loss should be positive"
 
     print(f"\n[Verifiable Pairwise Loss Structure]")
-    print(f"  Policy loss: {policy_loss.item():.4f}")
-    print(f"  Pairwise aux loss: {aux_loss.item():.4f}")
+    print(f"  Weighted CE loss: {weighted_ce_loss.item():.4f}")
+    print(f"  Value loss (pairwise): {value_loss.item():.4f}")
     print(f"  Total loss: {total_loss.item():.4f}")
 
 
@@ -206,7 +205,7 @@ def test_verifiable_pairwise_gradient_flow():
 
 @pytest.mark.integration
 def test_verifiable_pairwise_config_parsing():
-    """Config에서 use_pairwise와 pairwise_coef 파싱 테스트"""
+    """Config에서 use_pairwise 파싱 테스트"""
     from omegaconf import OmegaConf
 
     # Pairwise 활성화 config
@@ -216,21 +215,22 @@ def test_verifiable_pairwise_config_parsing():
             "n_samples": 100,
         },
         "training": {
-            "pairwise_coef": 0.2,
+            "beta": 1.0,
+            "weight_clip_min": 0,
+            "weight_clip_max": 3,
         },
     })
 
     sampling_config = OmegaConf.to_container(config_pairwise.data_sampling, resolve=True)
     use_pairwise = sampling_config.get("use_pairwise", False)
-    pairwise_coef = getattr(config_pairwise.training, "pairwise_coef", 0.1)
 
     assert use_pairwise is True, "use_pairwise should be True"
-    assert pairwise_coef == 0.2, f"pairwise_coef should be 0.2, got {pairwise_coef}"
+    assert config_pairwise.training.beta == 1.0, "beta should be 1.0"
 
     # 기본값 테스트
     config_default = OmegaConf.create({
         "data_sampling": {
-            "use_pairwise": True,
+            "use_pairwise": False,
             "n_samples": 100,
         },
         "training": {},
@@ -238,14 +238,12 @@ def test_verifiable_pairwise_config_parsing():
 
     sampling_config2 = OmegaConf.to_container(config_default.data_sampling, resolve=True)
     use_pairwise2 = sampling_config2.get("use_pairwise", False)
-    pairwise_coef2 = getattr(config_default.training, "pairwise_coef", 0.1)
 
-    assert use_pairwise2 is True, "use_pairwise should be True"
-    assert pairwise_coef2 == 0.1, f"pairwise_coef should default to 0.1, got {pairwise_coef2}"
+    assert use_pairwise2 is False, "use_pairwise should be False"
 
     print(f"\n[Config Parsing Test]")
-    print(f"  Explicit pairwise_coef: use_pairwise={use_pairwise}, pairwise_coef={pairwise_coef}")
-    print(f"  Default pairwise_coef: use_pairwise={use_pairwise2}, pairwise_coef={pairwise_coef2}")
+    print(f"  Pairwise mode: use_pairwise={use_pairwise}")
+    print(f"  Pointwise mode: use_pairwise={use_pairwise2}")
 
 
 @pytest.mark.integration

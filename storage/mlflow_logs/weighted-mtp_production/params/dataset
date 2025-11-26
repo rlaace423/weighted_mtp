@@ -1,0 +1,1 @@
+{'name': 'codecontests', 'train': 'storage/datasets/codecontests/processed/train.jsonl', 'validation': 'storage/datasets/codecontests/processed/valid.jsonl', 'max_length': 2048}

@@ -321,7 +321,7 @@ MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
 uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_verifiable \
-  --config configs/verifiable/verifiable.yaml \
+  --config configs/verifiable/verifiable_pairwise.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 
 MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
@@ -400,8 +400,8 @@ tail -f logs/baseline_*.log
 ```bash
 # 특정 디렉토리 다운로드
 rsync -avz --progress -e "ssh -p 10507" \
-  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/storage/checkpoints/baseline/ \
-  ./storage/checkpoints_nipa/baseline/
+  work@proxy1.nipa2025.ktcloud.com:~/grad_school/wooshikwon/weighted_mtp/mlruns/869427667672898361/a0a47ff5fa7d410582ced2a813fa71fd/ \
+  ./storage/mlflow_logs/weighted-mtp_production/
 
 # mlruns 전체 다운로드
 rsync -avz --progress -e "ssh -p 10507" \

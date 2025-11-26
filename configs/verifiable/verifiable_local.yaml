@@ -48,9 +48,8 @@ training:
   trunk_learning_rate: 3e-6  # Trunk peak LR
   value_head_learning_rate: 1.0e-5  # Value head peak LR
   max_grad_norm: 1.0
-  beta: 0.2
-  pairwise_coef: 0.1  # Pairwise ranking loss coefficient
-  weight_clip_min: 0.1
+  beta: 1.0
+  weight_clip_min: 0
   weight_clip_max: 3.0
   log_interval: 5
 
