@@ -287,11 +287,11 @@ class MetaLlamaMTPAdapter(nn.Module):
         return logits
 
     def trunk_forward(self, input_ids: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Trunk만 실행, head_forward/value_forward용 캐시 반환
+        """Trunk만 실행, head_forward/value_forward용 캐시 반환 (FSDP 호환)
 
         메모리 효율적 학습을 위해 trunk와 head를 분리 실행할 때 사용.
         전체 logits [B, S, 4, vocab]을 한 번에 유지하지 않고
-        head별로 순차 처리하여 메모리 절약 (8.4GB → 2.1GB).
+        head별로 순차 처리하여 메모리 절약.
 
         Args:
             input_ids: [batch, seq] 입력 토큰
@@ -304,21 +304,14 @@ class MetaLlamaMTPAdapter(nn.Module):
                 "mask": causal mask 또는 None,
             }
         """
-        h_trunk, freqs_cis, mask = self.transformer.trunk_forward(input_ids)
-        hidden_states = self.transformer.norm(h_trunk)
-        return {
-            "h_trunk": h_trunk,
-            "hidden_states": hidden_states,
-            "freqs_cis": freqs_cis,
-            "mask": mask,
-        }
+        return self.transformer(input_ids, mode="trunk")
 
     def head_forward(
         self,
         trunk_output: dict[str, torch.Tensor],
         head_idx: int,
     ) -> torch.Tensor:
-        """특정 MTP head만 실행
+        """특정 MTP head만 실행 (FSDP 호환)
 
         trunk_forward()로 얻은 캐시를 사용하여 특정 head의 logits만 계산.
         [B, S, vocab] 크기만 유지하므로 메모리 효율적.
@@ -330,12 +323,7 @@ class MetaLlamaMTPAdapter(nn.Module):
         Returns:
             logits: [batch, seq, vocab]
         """
-        return self.transformer.head_forward(
-            trunk_output["h_trunk"],
-            head_idx,
-            trunk_output["freqs_cis"],
-            trunk_output["mask"],
-        )
+        return self.transformer(mode="head", trunk_cache=trunk_output, head_idx=head_idx)
 
     def value_forward(
         self,

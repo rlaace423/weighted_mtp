@@ -280,27 +280,52 @@ class Transformer(nn.Module):
 
     def forward(
         self,
-        tokens: torch.Tensor,
+        tokens: Optional[torch.Tensor] = None,
         start_pos: int = 0,
         return_all_heads: bool = False,
         return_hidden_states: bool = False,
+        mode: str = "full",
+        trunk_cache: Optional[dict] = None,
+        head_idx: Optional[int] = None,
     ):
-        """Forward pass
+        """Forward pass (FSDP 호환)
 
         Args:
-            tokens: [batch, seq] 입력 토큰
+            tokens: [batch, seq] 입력 토큰 (mode="full", "trunk"에서 필수)
             start_pos: KV cache 시작 위치 (학습 시 0)
             return_all_heads: True면 모든 MTP heads 반환
             return_hidden_states: True면 hidden_states도 함께 반환 (Value Head용)
+            mode: 실행 모드
+                - "full": 전체 forward (기본)
+                - "trunk": trunk만 실행, trunk_cache 반환
+                - "head": 특정 head만 실행 (trunk_cache, head_idx 필요)
+            trunk_cache: mode="head"일 때 필수. trunk_forward 반환값
+            head_idx: mode="head"일 때 필수. 실행할 head 인덱스
 
         Returns:
-            if return_hidden_states:
-                (logits, hidden_states) tuple
-                - logits: [batch, seq, n_future_tokens, vocab] or [batch, seq, vocab]
-                - hidden_states: [batch, seq, hidden_size] (trunk 마지막 layer, norm 적용 후)
-            else:
-                logits: [batch, seq, n_future_tokens, vocab] or [batch, seq, vocab]
+            mode="full":
+                if return_hidden_states: (logits, hidden_states)
+                else: logits
+            mode="trunk":
+                dict {"h_trunk", "hidden_states", "freqs_cis", "mask"}
+            mode="head":
+                logits: [batch, seq, vocab]
         """
+        # mode="head": trunk_cache 기반 특정 head만 실행
+        if mode == "head":
+            if trunk_cache is None or head_idx is None:
+                raise ValueError("mode='head' requires trunk_cache and head_idx")
+            prediction_heads = [self.layers[-1]] + list(self.extra_heads)
+            h = prediction_heads[head_idx](
+                trunk_cache["h_trunk"], 0, trunk_cache["freqs_cis"], trunk_cache["mask"]
+            )
+            h = self.norm(h)
+            return self.output(h)
+
+        # mode="full" 또는 "trunk": tokens 필수
+        if tokens is None:
+            raise ValueError("tokens required for mode='full' or 'trunk'")
+
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
 
@@ -323,6 +348,16 @@ class Transformer(nn.Module):
             h = layer(h, start_pos, freqs_cis, mask)
         h_trunk = h
 
+        # mode="trunk": trunk만 실행, cache 반환
+        if mode == "trunk":
+            hidden_states = self.norm(h_trunk)
+            return {
+                "h_trunk": h_trunk,
+                "hidden_states": hidden_states,
+                "freqs_cis": freqs_cis,
+                "mask": mask,
+            }
+
         # Prediction heads
         latents = []
         n_heads_to_use = self.n_future_tokens if return_all_heads else 1
@@ -343,66 +378,3 @@ class Transformer(nn.Module):
             return output, hidden_states
 
         return output
-
-    def trunk_forward(
-        self,
-        tokens: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        """Trunk layers만 실행 (메모리 효율적 학습용)
-
-        head_forward()와 함께 사용하여 MTP heads를 순차 실행 가능.
-        전체 logits [B, S, 4, vocab]을 한 번에 유지하지 않고
-        head별로 [B, S, vocab]씩 처리하여 메모리 절약.
-
-        Args:
-            tokens: [batch, seq] 입력 토큰
-
-        Returns:
-            h_trunk: [batch, seq, dim] trunk 출력 (prediction heads 입력용)
-            freqs_cis: [seq, head_dim/2] RoPE 주파수 (head_forward용)
-            mask: [seq, seq] causal mask 또는 None (head_forward용)
-        """
-        _bsz, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens)
-
-        freqs_cis = self.freqs_cis[:seqlen].to(tokens.device)
-
-        mask = None
-        if seqlen > 1:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device)
-            mask = torch.triu(mask, diagonal=1)
-            mask = torch.hstack([
-                torch.zeros((seqlen, 0), device=tokens.device),
-                mask
-            ]).type_as(h)
-
-        for layer in self.layers[:-1]:
-            h = layer(h, 0, freqs_cis, mask)
-
-        return h, freqs_cis, mask
-
-    def head_forward(
-        self,
-        h_trunk: torch.Tensor,
-        head_idx: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        """특정 prediction head만 실행 (메모리 효율적 학습용)
-
-        trunk_forward()로 얻은 h_trunk를 입력받아 특정 MTP head만 실행.
-        [B, S, vocab] 크기의 logits만 반환하여 메모리 절약.
-
-        Args:
-            h_trunk: [batch, seq, dim] trunk 출력 (trunk_forward 반환값)
-            head_idx: head 인덱스 (0 = layers[-1], 1~3 = extra_heads[0~2])
-            freqs_cis: [seq, head_dim/2] RoPE 주파수 (trunk_forward 반환값)
-            mask: [seq, seq] causal mask 또는 None (trunk_forward 반환값)
-
-        Returns:
-            logits: [batch, seq, vocab] 해당 head의 예측
-        """
-        prediction_heads = [self.layers[-1]] + list(self.extra_heads)
-        h = prediction_heads[head_idx](h_trunk, 0, freqs_cis, mask)
-        h = self.norm(h)
-        return self.output(h)

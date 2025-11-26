@@ -58,7 +58,7 @@ data_sampling:
 # 학습 설정 (H200 4-GPU 최적화)
 training:
   n_epochs: 1.0
-  batch_size: 32  # Per GPU
+  batch_size: 36  # Per GPU
   gradient_accumulation_steps: 1  # Effective batch size = 128
   trunk_learning_rate: 1.0e-5  # Trunk peak LR
   value_head_learning_rate: 1.0e-3  # Value head peak LR
