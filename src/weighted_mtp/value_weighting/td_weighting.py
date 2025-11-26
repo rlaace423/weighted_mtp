@@ -186,10 +186,9 @@ def build_weights(
 
     가중치 산정 흐름:
     1. 배치 단위 표준화 (Whitening): 스케일 불변성 확보
-    2. exp(A_norm / beta): 중요도 변환 (평균 ≈ 1)
-    3. Clipping: 범위 제한으로 안정성 보장
-
-    Whitening + exp 변환으로 이미 평균이 1 근처이므로 별도 정규화 불필요.
+    2. exp(A_norm / beta): 중요도 변환
+    3. 평균 1 정규화: LR 스케일 유지 (Jensen's inequality 보정)
+    4. Clipping: 범위 제한으로 안정성 보장
 
     Args:
         td_errors: [batch, seq] TD error (compute_td_errors 출력)
@@ -199,7 +198,7 @@ def build_weights(
         max_weight: 최대 가중치 (기본 5.0)
 
     Returns:
-        weights: [batch, seq] Token-level weights (clipped)
+        weights: [batch, seq] Token-level weights (평균 ≈ 1, clipped)
     """
     # 유효 토큰만으로 통계 계산
     mask = attention_mask.bool()
@@ -213,7 +212,11 @@ def build_weights(
     # Exponential transformation
     weights = torch.exp(td_normalized / beta)
 
-    # Clipping (Whitening + exp 변환으로 이미 평균 ≈ 1)
+    # 평균 1 정규화 (Jensen's inequality: E[exp(X)] > exp(E[X]) 보정)
+    valid_weights = weights[mask]
+    weights = weights / (valid_weights.mean() + 1e-8)
+
+    # Clipping (정규화 후 범위 제한)
     weights = torch.clamp(weights, min=min_weight, max=max_weight)
 
     # Padding 위치는 0으로 마스킹
