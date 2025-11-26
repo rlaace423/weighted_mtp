@@ -30,9 +30,10 @@ dataset:
 data_sampling:
   seed: 42
   val_n_samples: 10
+  use_pairwise: false
 
   n_samples: 20
-  correct_ratio: 1.0
+  max_pairs_per_problem: 25
 
   difficulty_bins:
     diff_7: [7, 7]

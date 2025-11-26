@@ -22,7 +22,7 @@ experiment:
 models:
   policy:
     name: meta-llama-mtp
-    path: storage/checkpoints/critic/critic-pretrain-pairwise-mlp/checkpoint_final.pt
+    path: storage/checkpoints/critic/critic-pretrain-pairwise/checkpoint_epoch_1.25.pt
     tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     params:
       dim: 4096
@@ -44,33 +44,41 @@ dataset:
 # 데이터 샘플링
 data_sampling:
   seed: 42
-  val_n_samples: 1000
-  use_pairwise: true  # Pairwise 모드 활성화
+  val_n_samples: 500
+  use_pairwise: true
 
-  n_samples: 200000  # 최종 쌍 수 (pairwise 모드)
-  max_pairs_per_problem: 10  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
+  n_samples: 100000  # 학습용 (correct, incorrect) 쌍
+  max_pairs_per_problem: 25  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
 
   difficulty_bins:
+    zero: [0, 0]
     diff_7: [7, 7]
     else: [8, 25]
   difficulty_weights:
-    diff_7: 0.35
-    else: 0.65
+    zero: 0.4
+    diff_7: 0.3
+    else: 0.3
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
-  n_epochs: 1.0
-  batch_size: 64  # Per GPU (각 배치에 pos+neg 쌍 포함)
+  n_epochs: 2.0
+  batch_size: 32  # Per GPU (각 배치에 pos+neg 쌍 포함)
   gradient_accumulation_steps: 1
-  trunk_learning_rate: 0
-  value_head_learning_rate: 5.0e-4  
+  trunk_learning_rate: 1.0e-5
+  value_head_learning_rate: 1.0e-3
   max_grad_norm: 0.5
 
-  # Normalized IQL weighting (Advantage Whitening)
-  beta: 1.0  # Temperature (낮을수록 상위 토큰 집중)
-  pairwise_coef: 0.1  # Pairwise ranking loss coefficient
-  weight_clip_min: 0.1  # 최소 가중치
-  weight_clip_max: 3.0  # 최대 가중치
+  # TD error weighting
+  beta: 0.9
+  value_coef: 0.5
+  weight_clip_min: 0
+  weight_clip_max: 3
+  loss_type: mse
+  gamma: 1.0
+  lam: 1.0
+
+  # Pairwise auxiliary loss
+  aux_coef: 0.1  # Pairwise ranking loss 계수
 
   log_interval: 1
 

@@ -33,9 +33,19 @@ dataset:
   max_length: 1024
 
 data_sampling:
-  n_samples: 500
-  correct_ratio: 1.0
   seed: 42
+  val_n_samples: 10
+  use_pairwise: false
+
+  n_samples: 500
+  max_pairs_per_problem: 25
+
+  difficulty_bins:
+    diff_7: [7, 7]
+    else: [8, 25]
+  difficulty_weights:
+    diff_7: 0.35
+    else: 0.65
 
 training:
   n_epochs: 0.2

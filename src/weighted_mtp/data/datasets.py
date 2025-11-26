@@ -73,9 +73,10 @@ def load_dataset(
         )
     jsonl_path = Path(data_files[split])
 
-    # Problem-level 쌍 샘플링 (difficulty_weights 설정 시)
-    if use_pairwise and difficulty_weights and difficulty_bins:
-        # problem_index_map 로드
+    # Problem-level 샘플링 (difficulty_weights + difficulty_bins 설정 시)
+    # use_pairwise 여부와 관계없이 동일한 쌍 샘플링 로직 사용
+    # use_pairwise=false면 최종 결과에서 correct 샘플만 추출
+    if difficulty_weights and difficulty_bins:
         problem_index_map = _load_problem_index_map(dataset_name, split)
 
         if not problem_index_map:
@@ -84,7 +85,7 @@ def load_dataset(
                 f"먼저 'python scripts/create_storage/extract_metadata.py' 를 실행하세요."
             )
 
-        # Problem-level 쌍 샘플링
+        # Problem-level 쌍 샘플링 (공통 로직)
         all_pairs = _sample_pairs_by_difficulty(
             problem_index_map=problem_index_map,
             n_samples=n_samples,
@@ -94,22 +95,41 @@ def load_dataset(
             max_pairs_per_problem=max_pairs_per_problem,
         )
 
-        # 분산 처리
-        if world_size > 1:
-            rank_pairs = all_pairs[rank::world_size]
-            logger.info(
-                f"[Rank {rank}/{world_size}] 전체 {len(all_pairs):,} 쌍 중 "
-                f"{len(rank_pairs):,} 쌍 로드 (분산 학습)"
-            )
-        else:
-            rank_pairs = all_pairs
-            logger.info(f"Pairwise 샘플링 완료: {len(rank_pairs):,} 쌍 (로컬 환경)")
+        if use_pairwise:
+            # Pairwise 모드: correct + incorrect 쌍 그대로 사용
+            if world_size > 1:
+                rank_pairs = all_pairs[rank::world_size]
+                logger.info(
+                    f"[Rank {rank}/{world_size}] 전체 {len(all_pairs):,} 쌍 중 "
+                    f"{len(rank_pairs):,} 쌍 로드 (분산 학습)"
+                )
+            else:
+                rank_pairs = all_pairs
+                logger.info(f"Pairwise 샘플링 완료: {len(rank_pairs):,} 쌍 (로컬 환경)")
 
-        # JSONL에서 쌍 데이터 읽기
-        samples = _read_jsonl_pairwise(jsonl_path, rank_pairs)
+            samples = _read_jsonl_pairwise(jsonl_path, rank_pairs)
+        else:
+            # Pointwise 모드: 쌍에서 correct 샘플만 추출
+            correct_indices = list(dict.fromkeys(p["correct_idx"] for p in all_pairs))
+            logger.info(
+                f"Pointwise 변환: {len(all_pairs):,} 쌍 → "
+                f"{len(correct_indices):,} correct 샘플 (중복 제거)"
+            )
+
+            if world_size > 1:
+                rank_indices = correct_indices[rank::world_size]
+                logger.info(
+                    f"[Rank {rank}/{world_size}] 전체 {len(correct_indices):,} 샘플 중 "
+                    f"{len(rank_indices):,} 샘플 로드 (분산 학습)"
+                )
+            else:
+                rank_indices = correct_indices
+                logger.info(f"Pointwise 샘플링 완료: {len(rank_indices):,} correct 샘플")
+
+            samples = _read_jsonl_by_indices(jsonl_path, rank_indices)
 
     else:
-        # 기존 방식 (difficulty 설정 없거나 non-pairwise)
+        # 기존 방식 (difficulty 설정 없거나 cap 없음)
         metadata = _load_metadata(dataset_name, split)
 
         if metadata is None:
@@ -764,11 +784,32 @@ def _sample_pairs_by_difficulty(
         else:
             logger.info(f"{bin_name}: {len(problems):,} problems, {total_pairs:,} 가용 쌍")
 
-    # 3. Difficulty weight에 따라 bin별 샘플 수 할당
+    # 3. 비어있는 bin 감지 및 weight 재분배
+    empty_bins = []
+    valid_weights = {}
+    for bin_name, weight in difficulty_weights.items():
+        if weight <= 0:
+            continue
+        problems = bin_problems.get(bin_name, [])
+        if not problems:
+            empty_bins.append(bin_name)
+            logger.warning(f"Bin '{bin_name}'에 유효한 problem이 없습니다. weight 재분배됨.")
+        else:
+            valid_weights[bin_name] = weight
+
+    # Weight 정규화 (비어있는 bin 제외하고 합계 1.0으로)
+    if empty_bins and valid_weights:
+        total_valid_weight = sum(valid_weights.values())
+        normalized_weights = {k: v / total_valid_weight for k, v in valid_weights.items()}
+        logger.info(f"Weight 재분배: {valid_weights} → {normalized_weights}")
+    else:
+        normalized_weights = difficulty_weights
+
+    # 4. Difficulty weight에 따라 bin별 샘플 수 할당
     selected_pairs = []
     sampling_results = {}
 
-    for bin_name, weight in difficulty_weights.items():
+    for bin_name, weight in normalized_weights.items():
         if weight <= 0:
             continue
 
@@ -776,7 +817,6 @@ def _sample_pairs_by_difficulty(
         problems = bin_problems.get(bin_name, [])
 
         if not problems:
-            logger.warning(f"Bin '{bin_name}'에 유효한 problem이 없습니다.")
             sampling_results[bin_name] = {"target": bin_n_samples, "actual": 0}
             continue
 
@@ -791,7 +831,7 @@ def _sample_pairs_by_difficulty(
         selected_pairs.extend(bin_pairs)
         sampling_results[bin_name] = {"target": bin_n_samples, "actual": len(bin_pairs)}
 
-    # 4. 샘플링 결과 로깅
+    # 5. 샘플링 결과 로깅
     logger.info("=== 샘플링 결과 ===")
     total_actual = 0
     for bin_name, result in sampling_results.items():

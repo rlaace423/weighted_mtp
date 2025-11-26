@@ -44,10 +44,10 @@ dataset:
 # 데이터 샘플링 (Pairwise)
 data_sampling:
   seed: 42
-  val_n_samples: 1000
+  val_n_samples: 500
   use_pairwise: true
 
-  n_samples: 55000  # 학습용 (correct, incorrect) 쌍
+  n_samples: 50000  # 학습용 (correct, incorrect) 쌍
   max_pairs_per_problem: 15  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
 
   difficulty_bins:
@@ -59,7 +59,7 @@ data_sampling:
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
-  n_epochs: 1.0
+  n_epochs: 3.0
   batch_size: 64  # Pairwise는 메모리 2배 소모 (pos + neg)
   gradient_accumulation_steps: 1
   trunk_learning_rate: 0
@@ -68,7 +68,7 @@ training:
   num_unfrozen_layers: 0
   value_head_type: mlp
   dropout: 0.1  # Shortcut Learning 방지
-  log_interval: 10
+  log_interval: 1
 
   # Learning rate scheduler
   lr_scheduler:
@@ -79,7 +79,7 @@ training:
 # 체크포인트
 checkpoint:
   save_dir: storage/checkpoints/critic/${experiment.name}
-  save_checkpoint_every: 0.2
+  save_checkpoint_every: 0.25
   save_best: true
   save_final: true
   save_total_limit: 3
