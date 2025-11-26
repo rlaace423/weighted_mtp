@@ -68,12 +68,28 @@ training:
   value_head_learning_rate: 1.0e-4
   max_grad_norm: 0.5
 
+  # Value head 설정
+  value_head_type: linear  # linear (4096 → 1) 또는 mlp (4096 → 512 → 256 → 1)
+  dropout: 0.0
+  trunk_frozen: false  # false면 value loss gradient가 trunk로 전파됨
+
   # TD error weighting
   beta: 1
   weight_clip_min: 0.1
   weight_clip_max: 2
   gamma: 1.0
   lam: 1.0
+
+  # Value loss 스케일링 (value_head gradient가 trunk gradient를 압도하지 않도록)
+  # value_head_grad ~25, trunk_grad ~1.5 → 0.05로 스케일링하여 균형
+  value_loss_coef: 0.05
+
+  # Value loss 모드 선택 (pairwise와 mc_mse 독립적 또는 동시 사용 가능)
+  value_loss:
+    use_pairwise: true   # Pairwise ranking loss
+    use_mc_mse: false    # MC tokenwise MSE loss
+    pairwise_coef: 1.0   # Pairwise loss 계수
+    mc_mse_coef: 1.0     # MC MSE loss 계수
 
   log_interval: 1
 

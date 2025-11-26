@@ -51,15 +51,17 @@ data_sampling:
   max_pairs_per_problem: 15  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
 
   difficulty_bins:
+    zero: [0, 0]
     diff_7: [7, 7]
     else: [8, 25]
   difficulty_weights:
-    diff_7: 0.35
-    else: 0.65
+    zero: 0.4
+    diff_7: 0.3
+    else: 0.3
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
-  n_epochs: 3.0
+  n_epochs: 2.0
   batch_size: 64  # Pairwise는 메모리 2배 소모 (pos + neg)
   gradient_accumulation_steps: 1
   trunk_learning_rate: 0

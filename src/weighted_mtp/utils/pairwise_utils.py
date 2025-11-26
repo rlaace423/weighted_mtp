@@ -1,6 +1,6 @@
-"""Pairwise Ranking Loss 유틸리티
+"""Value Loss 유틸리티
 
-Bradley-Terry 모델 기반 Pairwise Ranking Loss 및 메트릭 계산
+Pairwise Ranking Loss 및 MC MSE Loss 계산
 run_critic, run_verifiable에서 공통 사용
 """
 
@@ -77,3 +77,42 @@ def compute_pairwise_accuracy(
         "correct_pairs": correct_pairs.item(),
         "total_pairs": total_pairs,
     }
+
+
+def compute_mc_value_loss(
+    value_logits: torch.Tensor,
+    rewards: torch.Tensor,
+    attention_mask: torch.Tensor,
+    response_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Monte Carlo Value Loss (Tokenwise MSE)
+
+    Terminal reward를 모든 토큰에 전파하여 MSE loss 계산
+    V(s_t) → R (correct: 1.0, incorrect: 0.0)
+
+    Args:
+        value_logits: [batch, seq, 1] Value head 출력
+        rewards: [batch] Binary reward (0.0: incorrect, 1.0: correct)
+        attention_mask: [batch, seq] 유효 토큰 마스크
+        response_mask: [batch, seq] Response 토큰 마스크 (labels != -100)
+
+    Returns:
+        mc_loss: scalar tensor
+    """
+    _, seq_len, _ = value_logits.shape
+    dtype = value_logits.dtype
+
+    # MC targets: 모든 토큰에 동일한 terminal reward 할당
+    mc_targets = rewards.view(-1, 1).expand(-1, seq_len).to(dtype)
+
+    # Response 토큰만으로 MSE 계산 (Instruction 제외)
+    combined_mask = attention_mask * response_mask
+
+    # Tokenwise MSE
+    values = value_logits.squeeze(-1)
+    mse = (values - mc_targets) ** 2
+
+    # Masked mean
+    masked_mse = (mse * combined_mask).sum() / (combined_mask.sum() + 1e-8)
+
+    return masked_mse

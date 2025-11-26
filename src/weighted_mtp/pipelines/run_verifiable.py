@@ -25,6 +25,7 @@ from weighted_mtp.utils import (
     cleanup_s3_checkpoints,
     compute_gradient_clip_stats,
     compute_gradient_norm_by_component,
+    compute_mc_value_loss,
     compute_mtp_ce_loss,
     compute_pairwise_accuracy,
     compute_value_function_stats,
@@ -61,8 +62,13 @@ def validate_verifiable(
     beta: float,
     weight_clip_min: float,
     weight_clip_max: float,
+    trunk_frozen: bool = True,
+    use_pairwise: bool = True,
+    use_mc_mse: bool = False,
+    pairwise_coef: float = 1.0,
+    mc_mse_coef: float = 1.0,
 ) -> dict[str, float]:
-    """Validation 수행 (Stage 2) - Pairwise 전용
+    """Validation 수행 (Stage 2)
 
     Args:
         adapter: Adapter
@@ -71,6 +77,11 @@ def validate_verifiable(
         beta: TD error weighting 계수
         weight_clip_min: Weight 최소값
         weight_clip_max: Weight 최대값
+        trunk_frozen: True면 value loss gradient가 trunk로 흐르지 않음
+        use_pairwise: Pairwise ranking loss 사용 여부
+        use_mc_mse: MC tokenwise MSE loss 사용 여부
+        pairwise_coef: Pairwise loss 계수
+        mc_mse_coef: MC MSE loss 계수
 
     Returns:
         Validation metrics (weighted_ce_loss, value_loss, pairwise_accuracy, margin)
@@ -107,7 +118,8 @@ def validate_verifiable(
                 pos_input_ids,
                 pos_attention_mask,
                 return_value_logits=True,
-                return_hidden_states=True
+                return_hidden_states=True,
+                trunk_frozen=trunk_frozen,
             )
             pos_logits = pos_outputs["logits"]
             pos_value_logits = pos_outputs["value_logits"]
@@ -117,7 +129,8 @@ def validate_verifiable(
                 neg_input_ids,
                 neg_attention_mask,
                 return_value_logits=True,
-                return_hidden_states=False
+                return_hidden_states=False,
+                trunk_frozen=trunk_frozen,
             )
             neg_value_logits = neg_outputs["value_logits"]
 
@@ -152,17 +165,37 @@ def validate_verifiable(
             weighted_ce_loss = ce_losses["weighted_ce_loss"]
             unweighted_ce_loss = ce_losses["unweighted_ce_loss"]
 
-            # Pairwise Ranking Loss (value head 학습)
+            # Response 마스크 계산
             pos_mask = (pos_labels != -100).to(model_dtype)
             neg_mask = (neg_labels != -100).to(model_dtype)
-            value_loss = pairwise_ranking_loss(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
 
-            # Pairwise accuracy
+            # Value Loss 계산 (조건부)
+            value_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
+
+            if use_pairwise:
+                pairwise_loss_val = pairwise_ranking_loss(
+                    pos_value_logits, neg_value_logits, pos_mask, neg_mask
+                )
+                value_loss = value_loss + pairwise_coef * pairwise_loss_val
+
+            if use_mc_mse:
+                pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
+                pos_mc_loss = compute_mc_value_loss(
+                    pos_value_logits, pos_rewards, pos_attention_mask, pos_mask
+                )
+                neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
+                neg_mc_loss = compute_mc_value_loss(
+                    neg_value_logits, neg_rewards, neg_attention_mask, neg_mask
+                )
+                mc_mse_loss_val = (pos_mc_loss + neg_mc_loss) / 2
+                value_loss = value_loss + mc_mse_coef * mc_mse_loss_val
+
+            # Pairwise accuracy (항상 계산 - 메트릭용)
             pairwise_metrics = compute_pairwise_accuracy(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
             total_pairwise_accuracy += pairwise_metrics["pairwise_accuracy"]
             total_margin += pairwise_metrics["margin"]
 
-            # Total Loss (trunk: CE, value_head: pairwise)
+            # Total Loss
             total_loss = weighted_ce_loss + value_loss
 
             # Metrics 수집
@@ -244,10 +277,18 @@ def run_verifiable_training(
 
     # 5. 모델 로드 (pretrained 또는 checkpoint)
     logger.info(f"Loading model: {config.models.policy.path}")
+
+    # value_head_type 설정 (기본값: mlp)
+    value_head_type = getattr(config.training, "value_head_type", "mlp")
+    # dropout 설정 (기본값: 0.0)
+    dropout = getattr(config.training, "dropout", 0.0)
+
     adapter = MetaLlamaMTPAdapter.from_pretrained(
         model_path=config.models.policy.path,
         device=device,
         dtype=config.models.policy.dtype,
+        value_head_type=value_head_type,
+        dropout=dropout,
     )
     tokenizer = load_tokenizer_from_config(config)
 
@@ -402,6 +443,18 @@ def run_verifiable_training(
     # 모델 dtype 감지
     model_dtype = next(adapter.parameters()).dtype
 
+    # trunk_frozen 설정 (기본값: True = value loss gradient가 trunk로 흐르지 않음)
+    trunk_frozen = getattr(config.training, "trunk_frozen", True)
+    logger.info(f"Trunk frozen: {trunk_frozen}")
+
+    # value_loss 설정 (기본값: pairwise만 사용)
+    value_loss_config = config.training.get("value_loss", {})
+    use_pairwise = value_loss_config.get("use_pairwise", True)
+    use_mc_mse = value_loss_config.get("use_mc_mse", False)
+    pairwise_coef = value_loss_config.get("pairwise_coef", 1.0)
+    mc_mse_coef = value_loss_config.get("mc_mse_coef", 1.0)
+    logger.info(f"Value loss: use_pairwise={use_pairwise}, use_mc_mse={use_mc_mse}")
+
     # FSDP 워밍업: 첫 forward에서 all-gather 동기화 문제 방지
     logger.info("FSDP warmup forward pass 시작...")
     adapter.eval()
@@ -472,22 +525,34 @@ def run_verifiable_training(
                 pos_input_ids,
                 pos_attention_mask,
                 return_value_logits=True,
-                return_hidden_states=True
+                return_hidden_states=True,
+                trunk_frozen=trunk_frozen,
             )
             pos_logits = pos_outputs["logits"]
             pos_value_logits = pos_outputs["value_logits"]
 
-            # Pairwise loss용 value_logits (trunk gradient는 adapter에서 이미 차단됨)
+            # Pairwise loss용 value_logits
             pos_value_for_ranking = pos_value_logits
 
-            # Forward (Negative) - Value Loss만 사용 (no_grad로 메모리 절감)
-            with torch.no_grad():
+            # Forward (Negative) - MC MSE 사용 시 gradient 필요
+            if use_mc_mse:
                 neg_outputs = adapter(
                     neg_input_ids,
                     neg_attention_mask,
                     return_value_logits=True,
-                    return_hidden_states=False
+                    return_hidden_states=False,
+                    trunk_frozen=trunk_frozen,
                 )
+            else:
+                # Pairwise만 사용 시 negative gradient 불필요 (메모리 절감)
+                with torch.no_grad():
+                    neg_outputs = adapter(
+                        neg_input_ids,
+                        neg_attention_mask,
+                        return_value_logits=True,
+                        return_hidden_states=False,
+                        trunk_frozen=trunk_frozen,
+                    )
             neg_value_logits = neg_outputs["value_logits"]
 
             # TD error 계산 (Positive만 - Policy weighting용)
@@ -521,13 +586,37 @@ def run_verifiable_training(
             weighted_ce_loss = ce_losses["weighted_ce_loss"]
             unweighted_ce_loss = ce_losses["unweighted_ce_loss"]
 
-            # Pairwise Ranking Loss (value head만 학습, trunk gradient 차단됨)
+            # Response 마스크 계산
             pos_mask = (pos_labels != -100).to(model_dtype)
             neg_mask = (neg_labels != -100).to(model_dtype)
-            value_loss = pairwise_ranking_loss(pos_value_for_ranking, neg_value_logits, pos_mask, neg_mask)
 
-            # Total Loss (trunk은 CE로만, value_head는 pairwise로만 학습)
-            total_loss = weighted_ce_loss + value_loss
+            # Value Loss 계산 (조건부)
+            value_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
+            pairwise_loss_value = torch.tensor(0.0, device=device, dtype=model_dtype)
+            mc_mse_loss_value = torch.tensor(0.0, device=device, dtype=model_dtype)
+
+            if use_pairwise:
+                pairwise_loss_value = pairwise_ranking_loss(
+                    pos_value_for_ranking, neg_value_logits, pos_mask, neg_mask
+                )
+                value_loss = value_loss + pairwise_coef * pairwise_loss_value
+
+            if use_mc_mse:
+                # Positive: reward=1
+                pos_mc_loss = compute_mc_value_loss(
+                    pos_value_logits, pos_rewards, pos_attention_mask, pos_mask
+                )
+                # Negative: reward=0
+                neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
+                neg_mc_loss = compute_mc_value_loss(
+                    neg_value_logits, neg_rewards, neg_attention_mask, neg_mask
+                )
+                mc_mse_loss_value = (pos_mc_loss + neg_mc_loss) / 2
+                value_loss = value_loss + mc_mse_coef * mc_mse_loss_value
+
+            # Total Loss
+            value_loss_coef = config.training.get("value_loss_coef", 1.0)
+            total_loss = weighted_ce_loss + value_loss_coef * value_loss
 
             # 로깅용 변수 설정
             input_ids = pos_input_ids
@@ -732,6 +821,11 @@ def run_verifiable_training(
             beta=config.training.beta,
             weight_clip_min=config.training.weight_clip_min,
             weight_clip_max=config.training.weight_clip_max,
+            trunk_frozen=trunk_frozen,
+            use_pairwise=use_pairwise,
+            use_mc_mse=use_mc_mse,
+            pairwise_coef=pairwise_coef,
+            mc_mse_coef=mc_mse_coef,
         )
 
         # Validation metrics aggregation (1회 통신)
@@ -841,6 +935,11 @@ def run_verifiable_training(
             beta=config.training.beta,
             weight_clip_min=config.training.weight_clip_min,
             weight_clip_max=config.training.weight_clip_max,
+            trunk_frozen=trunk_frozen,
+            use_pairwise=use_pairwise,
+            use_mc_mse=use_mc_mse,
+            pairwise_coef=pairwise_coef,
+            mc_mse_coef=mc_mse_coef,
         )
 
         save_checkpoint(
