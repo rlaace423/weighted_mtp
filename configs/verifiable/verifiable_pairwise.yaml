@@ -1,5 +1,5 @@
-# Verifiable WMTP (Stage 2)
-# WMTP with TD error-based token weighting
+# Verifiable WMTP + Pairwise Auxiliary Loss (Stage 2)
+# TD Weighting + Pairwise Ranking Loss
 # 프로덕션 설정 (VESSL H200 4-GPU)
 
 # 프로젝트 정보
@@ -9,12 +9,13 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: verifiable-wmtp-final
-  description: "WMTP with TD error-based token weighting"
+  name: verifiable-pairwise
+  description: "WMTP with TD weighting + Pairwise auxiliary loss"
   stage: verifiable
   tags:
     - verifiable
-    - wmtp
+    - pairwise-auxiliary
+    - td-weighting
     - production
 
 # 모델 설정
@@ -44,7 +45,7 @@ dataset:
 data_sampling:
   seed: 42
   val_n_samples: 1000
-  use_pairwise: true  # value head 학습은 항상 pairwise
+  use_pairwise: true  # Pairwise 모드 활성화
 
   n_samples: 200000  # 최종 쌍 수 (pairwise 모드)
 
@@ -58,17 +59,17 @@ data_sampling:
 # 학습 설정 (H200 4-GPU 최적화)
 training:
   n_epochs: 1.0
-  batch_size: 32  # Per GPU
-  gradient_accumulation_steps: 1  # Effective batch size = 128
-  trunk_learning_rate: 1.0e-5  # Trunk peak LR
-  value_head_learning_rate: 1.0e-3  # Value head peak LR
+  batch_size: 32  # Per GPU (각 배치에 pos+neg 쌍 포함)
+  gradient_accumulation_steps: 1
+  trunk_learning_rate: 1.0e-5
+  value_head_learning_rate: 1.0e-3
   max_grad_norm: 0.5
 
   # TD error weighting
-  beta: 0.9  # TD error temperature
+  beta: 0.9
   pairwise_coef: 0.1  # Pairwise ranking loss coefficient
-  weight_clip_min: 0  # 최소 가중치
-  weight_clip_max: 3  # 최대 가중치
+  weight_clip_min: 0
+  weight_clip_max: 3
 
   log_interval: 1
 
@@ -108,9 +109,9 @@ storage:
   datasets_dir: storage/datasets
   checkpoints_dir: storage/checkpoints
 
-# MLflow 추적 (로컬 파일 기반)
+# MLflow 추적
 mlflow:
-  tracking_uri: ""  # 빈 문자열 = ./mlruns 디렉터리 사용
+  tracking_uri: ""
   experiment: "weighted-mtp/production"
 
 # 로깅

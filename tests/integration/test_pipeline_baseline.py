@@ -29,6 +29,11 @@ def test_baseline_pipeline_micro_mtp():
 
     # Override 파라미터 (초경량 테스트 설정)
     override_params = {
+        "models": {
+            "policy": {
+                "dtype": "float32",  # MPS에서 float16은 cross_entropy overflow 가능
+            },
+        },
         "data_sampling": {
             "n_samples": 20,  # 20개 샘플
         },
@@ -112,7 +117,6 @@ def test_baseline_config_validation():
 
     # Baseline 특화 검증
     assert config.experiment.stage == "baseline", "Should be baseline stage"
-    assert config.data_sampling.auto_data_balancing == False, "Baseline doesn't balance"
     assert config.data_sampling.correct_ratio == 1.0, "Baseline uses only correct samples"
     assert config.runtime.device == "mps", "Should use MPS for local test"
 

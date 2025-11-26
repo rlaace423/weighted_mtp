@@ -1,16 +1,17 @@
 """JSONL 파일에서 메타데이터만 추출하여 인덱스 파일 생성
 
-전체 JSONL을 한 번 스캔하여 각 샘플의 is_correct, difficulty 정보만 추출합니다.
-이를 통해 런타임에 전체 데이터를 로드하지 않고 필요한 샘플만 선택할 수 있습니다.
+전체 JSONL을 한 번 스캔하여 각 샘플의 is_correct, difficulty, problem_id 정보를 추출합니다.
+problem_index_map을 생성하여 Problem-level 쌍 샘플링을 지원합니다.
 
 Usage:
-    python scripts/extract_metadata.py
-    python scripts/extract_metadata.py --dataset codecontests
-    python scripts/extract_metadata.py --dataset codecontests --split train
+    python scripts/create_storage/extract_metadata.py
+    python scripts/create_storage/extract_metadata.py --dataset codecontests
+    python scripts/create_storage/extract_metadata.py --dataset codecontests --split train
 """
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 import argparse
@@ -22,11 +23,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _extract_problem_id(task_id: str) -> Optional[str]:
+    """task_id에서 problem_id 추출
+
+    task_id 형식: "{problem_id}_correct_{N}" 또는 "{problem_id}_incorrect_{N}"
+
+    Args:
+        task_id: 태스크 ID (예: "brcktsrm_correct_0", "comm3_incorrect_5")
+
+    Returns:
+        problem_id (예: "brcktsrm", "comm3") 또는 None
+    """
+    if not task_id:
+        return None
+
+    # "_correct_" 또는 "_incorrect_" 패턴으로 분리
+    match = re.match(r"^(.+?)_(correct|incorrect)_\d+$", task_id)
+    if match:
+        return match.group(1)
+
+    # 패턴 매칭 실패 시 task_id 그대로 반환
+    return task_id
+
+
 def extract_metadata_from_jsonl(
     jsonl_path: Path,
     output_path: Path,
 ) -> dict:
-    """JSONL 파일에서 메타데이터 추출
+    """JSONL 파일에서 메타데이터 추출 (problem_index_map 포함)
 
     Args:
         jsonl_path: 입력 JSONL 파일 경로
@@ -41,6 +65,8 @@ def extract_metadata_from_jsonl(
     logger.info(f"메타데이터 추출 시작: {jsonl_path}")
 
     metadata_list = []
+    problem_index_map = {}
+
     stats = {
         "total": 0,
         "correct": 0,
@@ -48,6 +74,7 @@ def extract_metadata_from_jsonl(
         "difficulty_dist": {},
         "has_is_correct": False,
         "has_difficulty": False,
+        "has_problem_id": False,
     }
 
     with open(jsonl_path, "r", encoding="utf-8") as f:
@@ -61,14 +88,17 @@ def extract_metadata_from_jsonl(
                 logger.warning(f"라인 {idx} 파싱 오류: {e}")
                 continue
 
-            # 메타데이터 추출
             meta = {}
+            is_correct = None
+            difficulty = None
+            problem_id = None
 
             # is_correct 필드
             if "is_correct" in item:
-                meta["is_correct"] = item["is_correct"]
+                is_correct = item["is_correct"]
+                meta["is_correct"] = is_correct
                 stats["has_is_correct"] = True
-                if item["is_correct"]:
+                if is_correct:
                     stats["correct"] += 1
                 else:
                     stats["incorrect"] += 1
@@ -79,9 +109,29 @@ def extract_metadata_from_jsonl(
                 meta["difficulty"] = difficulty
                 stats["has_difficulty"] = True
 
-                # 난이도 분포 집계
                 diff_str = str(difficulty)
                 stats["difficulty_dist"][diff_str] = stats["difficulty_dist"].get(diff_str, 0) + 1
+
+            # problem_id 추출 (task_id에서 파싱)
+            task_id = item.get("task_id")
+            if task_id:
+                problem_id = _extract_problem_id(task_id)
+                if problem_id:
+                    meta["problem_id"] = problem_id
+                    stats["has_problem_id"] = True
+
+                    # problem_index_map 구성
+                    if problem_id not in problem_index_map:
+                        problem_index_map[problem_id] = {
+                            "difficulty": difficulty,
+                            "correct_indices": [],
+                            "incorrect_indices": [],
+                        }
+
+                    if is_correct is True:
+                        problem_index_map[problem_id]["correct_indices"].append(idx)
+                    elif is_correct is False:
+                        problem_index_map[problem_id]["incorrect_indices"].append(idx)
 
             metadata_list.append(meta)
             stats["total"] += 1
@@ -98,12 +148,34 @@ def extract_metadata_from_jsonl(
 
     if stats["has_difficulty"]:
         sorted_diff = sorted(stats["difficulty_dist"].items(), key=lambda x: int(x[0]))
-        diff_str = ", ".join([f"{k}:{v:,}" for k, v in sorted_diff[:5]])  # 상위 5개만
+        diff_str = ", ".join([f"{k}:{v:,}" for k, v in sorted_diff[:5]])
         logger.info(f"  difficulty 분포 (상위 5개): {diff_str}")
+
+    # problem_index_map 통계
+    if stats["has_problem_id"]:
+        n_problems = len(problem_index_map)
+        n_valid_problems = sum(
+            1 for p in problem_index_map.values()
+            if len(p["correct_indices"]) > 0 and len(p["incorrect_indices"]) > 0
+        )
+        total_possible_pairs = sum(
+            len(p["correct_indices"]) * len(p["incorrect_indices"])
+            for p in problem_index_map.values()
+        )
+
+        stats["n_problems"] = n_problems
+        stats["n_valid_problems"] = n_valid_problems
+        stats["total_possible_pairs"] = total_possible_pairs
+
+        logger.info(f"  problem_id 통계:")
+        logger.info(f"    전체 문제 수: {n_problems:,}")
+        logger.info(f"    유효 문제 수 (쌍 생성 가능): {n_valid_problems:,}")
+        logger.info(f"    총 가용 쌍 수: {total_possible_pairs:,}")
 
     # 메타데이터 저장
     output_data = {
         "metadata": metadata_list,
+        "problem_index_map": problem_index_map,
         "stats": stats,
         "source_file": str(jsonl_path),
     }

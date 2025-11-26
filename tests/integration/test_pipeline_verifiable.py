@@ -121,13 +121,12 @@ def test_verifiable_config_validation():
 
     # Verifiable 특화 검증
     assert config.experiment.stage == "verifiable", "Should be verifiable stage"
-    assert config.data_sampling.auto_data_balancing == True, "Verifiable uses balanced sampling"
-    assert config.data_sampling.correct_ratio == 0.5, "Verifiable uses 50:50 ratio"
+    assert config.data_sampling.use_pairwise is True, "Verifiable uses pairwise mode"
     assert config.runtime.device == "mps", "Should use MPS for local test"
 
     # Training 파라미터 검증 (verifiable 특화)
     assert hasattr(config.training, "beta"), "Should have beta for TD error"
-    assert hasattr(config.training, "value_coef"), "Should have value_coef"
+    assert hasattr(config.training, "pairwise_coef"), "Should have pairwise_coef"
     assert hasattr(config.training, "weight_clip_min"), "Should have weight_clip_min"
     assert hasattr(config.training, "weight_clip_max"), "Should have weight_clip_max"
 

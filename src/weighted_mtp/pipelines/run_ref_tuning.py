@@ -278,8 +278,6 @@ def run_ref_tuning_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Validation: {config.dataset.validation}")
 
     sampling_config = OmegaConf.to_container(config.data_sampling, resolve=True)
-    sampling_method = sampling_config.get("sampling_method")
-    logger.info(f"Sampling method: {sampling_method}")
 
     train_loader = create_dataloader(
         dataset_path=config.dataset.train,
@@ -291,11 +289,9 @@ def run_ref_tuning_training(config: DictConfig) -> tuple[dict[str, float], str]:
         shuffle=True,
     )
 
-    # Validation용 sampling_config
+    # Validation용 sampling_config (n_samples를 val_n_samples로 변경)
     val_sampling_config = sampling_config.copy()
-    if sampling_method == "difficulty":
-        val_sampling_config["difficulty"] = val_sampling_config.get("difficulty", {}).copy()
-        val_sampling_config["difficulty"]["n_samples"] = config.data_sampling.val_n_samples
+    val_sampling_config["n_samples"] = config.data_sampling.val_n_samples
 
     val_loader = create_dataloader(
         dataset_path=config.dataset.validation,

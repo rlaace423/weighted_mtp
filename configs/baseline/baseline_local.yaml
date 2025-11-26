@@ -25,23 +25,21 @@ dataset:
   name: codecontests
   train: storage/datasets/codecontests/processed/train.jsonl
   validation: storage/datasets/codecontests/processed/valid.jsonl
-  max_length: 512
+  max_length: 1024
 
 data_sampling:
-  sampling_method: "difficulty"
   seed: 42
   val_n_samples: 100
 
-  difficulty:
-    n_samples: 500
-    auto_data_balancing: false
-    correct_ratio: 1.0
-    bins:
-      diff_7: [7, 7]
-      else: [8, 25]
-    weights:
-      diff_7: 0.35
-      else: 0.65
+  n_samples: 500
+  correct_ratio: 1.0
+
+  difficulty_bins:
+    diff_7: [7, 7]
+    else: [8, 25]
+  difficulty_weights:
+    diff_7: 0.35
+    else: 0.65
 
 training:
   n_epochs: 0.2

@@ -27,12 +27,14 @@ from weighted_mtp.utils import (
     cleanup_old_checkpoints,
     cleanup_s3_checkpoints,
     compute_gradient_clip_stats,
+    compute_pairwise_accuracy,
     compute_value_function_stats,
     compute_weight_statistics,
     create_param_groups,
     create_scheduler,
     get_model_size,
     get_system_info,
+    pairwise_ranking_loss,
     s3_upload_executor,
     save_checkpoint,
     shutdown_s3_executor,
@@ -49,7 +51,6 @@ from weighted_mtp.runtime import (
 from weighted_mtp.value_weighting.td_weighting import (
     build_weights,
     compute_td_errors,
-    compute_td_targets,
     compute_td_stats,
 )
 
@@ -59,27 +60,23 @@ def validate_verifiable(
     dataloader: DataLoader,
     device: torch.device,
     beta: float,
-    value_coef: float,
     weight_clip_min: float,
     weight_clip_max: float,
-    gamma: float = 1.0,
-    lam: float = 0.0,
+    pairwise_coef: float = 0.1,
 ) -> dict[str, float]:
-    """Validation 수행 (Stage 2)
+    """Validation 수행 (Stage 2) - Pairwise 전용
 
     Args:
         adapter: Adapter
-        dataloader: Validation DataLoader
+        dataloader: Validation DataLoader (pairwise format)
         device: 디바이스
         beta: TD error weighting 계수
-        value_coef: Value loss 계수
         weight_clip_min: Weight 최소값
         weight_clip_max: Weight 최대값
-        gamma: TD discount factor
-        lam: GAE lambda
+        pairwise_coef: Pairwise ranking loss 계수
 
     Returns:
-        Validation metrics
+        Validation metrics (weighted_ce_loss, value_loss, pairwise_accuracy, margin)
     """
     adapter.eval()
 
@@ -89,41 +86,53 @@ def validate_verifiable(
     total_loss_sum = 0.0
     n_batches = 0
 
+    # Pairwise metrics
+    total_pairwise_accuracy = 0.0
+    total_margin = 0.0
+
     # 모델 dtype 감지
     model_dtype = next(adapter.parameters()).dtype
 
     with torch.no_grad():
         for batch in dataloader:
-            # 1. Batch를 device로 이동
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-            is_correct = batch["is_correct"].to(device)
+            # Pairwise batch 구조
+            pos_input_ids = batch["pos_input_ids"].to(device)
+            pos_attention_mask = batch["pos_attention_mask"].to(device)
+            pos_labels = batch["pos_labels"].to(device)
+            neg_input_ids = batch["neg_input_ids"].to(device)
+            neg_attention_mask = batch["neg_attention_mask"].to(device)
+            neg_labels = batch["neg_labels"].to(device)
 
-            # 2. is_correct → rewards 변환 (모델 dtype 일치)
-            rewards = is_correct.to(model_dtype)
+            pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
 
-            # 3. Forward (MTP + Value)
-            outputs = adapter(
-                input_ids,
-                attention_mask,
+            # Forward (Positive)
+            pos_outputs = adapter(
+                pos_input_ids,
+                pos_attention_mask,
                 return_value_logits=True,
                 return_hidden_states=True
             )
-            logits = outputs["logits"]  # [batch, seq, n_future, vocab]
-            value_logits = outputs["value_logits"]  # [batch, seq, 1]
+            pos_logits = pos_outputs["logits"]
+            pos_value_logits = pos_outputs["value_logits"]
 
-            batch_size, seq_len, n_future, vocab_size = logits.shape
+            # Forward (Negative)
+            neg_outputs = adapter(
+                neg_input_ids,
+                neg_attention_mask,
+                return_value_logits=True,
+                return_hidden_states=False
+            )
+            neg_value_logits = neg_outputs["value_logits"]
 
-            # 4. TD error 계산
+            batch_size, seq_len, n_future, vocab_size = pos_logits.shape
+
+            # TD error (Positive만 - Policy weighting용)
             td_errors = compute_td_errors(
-                value_logits=value_logits,
-                rewards=rewards,
-                attention_mask=attention_mask,
+                value_logits=pos_value_logits,
+                rewards=pos_rewards,
+                attention_mask=pos_attention_mask,
                 gamma=1.0,
             )
-
-            # 5. Weight 산출
             weights = build_weights(
                 td_errors=td_errors,
                 beta=beta,
@@ -131,18 +140,16 @@ def validate_verifiable(
                 max_weight=weight_clip_max,
             )
 
-            # 6. Weighted CE loss + Unweighted CE loss (baseline 비교용)
+            # Policy Loss (Positive만, TD Weighted)
             batch_weighted_ce_loss = 0.0
             batch_unweighted_ce_loss = 0.0
 
             for k in range(1, n_future + 1):
                 valid_len = seq_len - k
-
-                logits_k = logits[:, :valid_len, k - 1, :]
-                labels_k = labels[:, k : k + valid_len]
-                # Weight는 예측 대상 토큰 t+k의 TD error: δ_{t+k} = V(t+k) - V(t+k-1)
+                logits_k = pos_logits[:, :valid_len, k - 1, :]
+                labels_k = pos_labels[:, k : k + valid_len]
                 weights_k = weights[:, k : k + valid_len]
-                mask_k = attention_mask[:, k : k + valid_len]
+                mask_k = pos_attention_mask[:, k : k + valid_len]
 
                 ce_loss_k = F.cross_entropy(
                     logits_k.reshape(-1, vocab_size),
@@ -150,14 +157,10 @@ def validate_verifiable(
                     reduction="none",
                     ignore_index=-100,
                 )
-
-                # labels=-100인 토큰은 loss=0, mask에서도 제외
                 valid_label_mask_k = (labels_k != -100).float()
                 combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
 
-                # Weighted CE (TD error 기반 가중치 적용)
                 weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
-                # Unweighted CE (baseline 비교용, 균등 가중치)
                 unweighted_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
 
                 mask_sum_k = combined_mask_k.sum()
@@ -168,30 +171,20 @@ def validate_verifiable(
             weighted_ce_loss = batch_weighted_ce_loss / n_future
             unweighted_ce_loss = batch_unweighted_ce_loss / n_future
 
-            # 7. Value loss (TD target 기반)
-            td_targets = compute_td_targets(
-                value_logits=value_logits,
-                rewards=rewards,
-                attention_mask=attention_mask,
-                gamma=gamma,
-                lam=lam,
-            )
+            # Pairwise Ranking Loss (value head 학습)
+            pos_mask = (pos_labels != -100).to(model_dtype)
+            neg_mask = (neg_labels != -100).to(model_dtype)
+            value_loss = pairwise_ranking_loss(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
 
-            # Mask padded tokens AND instruction tokens (labels != -100)
-            valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
-            attn_mask_expanded = attention_mask.unsqueeze(-1).to(model_dtype)
-            loss_mask = valid_label_mask * attn_mask_expanded
+            # Pairwise accuracy
+            pairwise_metrics = compute_pairwise_accuracy(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
+            total_pairwise_accuracy += pairwise_metrics["pairwise_accuracy"]
+            total_margin += pairwise_metrics["margin"]
 
-            # Value loss 계산 (MSE)
-            loss_per_token = F.mse_loss(value_logits, td_targets, reduction="none")
+            # Total Loss
+            total_loss = weighted_ce_loss + pairwise_coef * value_loss
 
-            masked_value_loss = loss_per_token * loss_mask
-            value_loss = masked_value_loss.sum() / (loss_mask.sum() + 1e-8)
-
-            # 8. Total loss
-            total_loss = weighted_ce_loss + value_coef * value_loss
-
-            # 9. Metrics 수집
+            # Metrics 수집
             total_weighted_ce_loss += weighted_ce_loss.item()
             total_unweighted_ce_loss += unweighted_ce_loss.item()
             total_value_loss += value_loss.item()
@@ -209,6 +202,8 @@ def validate_verifiable(
         "val_unweighted_ce_loss": avg_unweighted_ce_loss,
         "val_value_loss": avg_value_loss,
         "val_loss": avg_total_loss,
+        "val_pairwise_accuracy": total_pairwise_accuracy / n_batches,
+        "val_margin": total_margin / n_batches,
     }
 
     return metrics
@@ -345,10 +340,10 @@ def run_verifiable_training(
     logger.info(f"Train: {config.dataset.train}")
     logger.info(f"Validation: {config.dataset.validation}")
 
-    # sampling_config를 dict로 변환
+    # sampling_config를 dict로 변환 (항상 pairwise 모드)
     sampling_config = OmegaConf.to_container(config.data_sampling, resolve=True)
-    sampling_method = sampling_config.get("sampling_method")
-    logger.info(f"샘플링 방식: {sampling_method}")
+    sampling_config["use_pairwise"] = True
+    logger.info("Pairwise 모드 (value head 학습)")
 
     train_loader = create_dataloader(
         dataset_path=config.dataset.train,
@@ -360,11 +355,13 @@ def run_verifiable_training(
         shuffle=True,
     )
 
-    # Validation용 sampling_config (동일 방식, val_n_samples 사용)
+    # Validation용 sampling_config (val_n_samples 적용)
     val_sampling_config = sampling_config.copy()
-    if sampling_method == "difficulty":
-        val_sampling_config["difficulty"] = val_sampling_config.get("difficulty", {}).copy()
+    if "difficulty" in val_sampling_config and val_sampling_config["difficulty"]:
+        val_sampling_config["difficulty"] = val_sampling_config["difficulty"].copy()
         val_sampling_config["difficulty"]["n_samples"] = config.data_sampling.val_n_samples
+    else:
+        val_sampling_config["n_samples"] = config.data_sampling.val_n_samples
 
     val_loader = create_dataloader(
         dataset_path=config.dataset.validation,
@@ -478,35 +475,47 @@ def run_verifiable_training(
             # 1 batch 훈련 (Stage 2 로직)
             adapter.train()
 
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-            is_correct = batch["is_correct"].to(device)
+            # Pairwise 모드: Positive/Negative 데이터 추출
+            pos_input_ids = batch["pos_input_ids"].to(device)
+            pos_attention_mask = batch["pos_attention_mask"].to(device)
+            pos_labels = batch["pos_labels"].to(device)
+            neg_input_ids = batch["neg_input_ids"].to(device)
+            neg_attention_mask = batch["neg_attention_mask"].to(device)
+            neg_labels = batch["neg_labels"].to(device)
 
-            # 모델 dtype 일치
-            rewards = is_correct.to(model_dtype)
+            # Positive sample: reward=1 (correct)
+            pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
 
-            # Forward (MTP + Value)
-            outputs = adapter(
-                input_ids,
-                attention_mask,
+            # Forward (Positive) - Policy Loss + Value Loss 사용
+            pos_outputs = adapter(
+                pos_input_ids,
+                pos_attention_mask,
                 return_value_logits=True,
                 return_hidden_states=True
             )
-            logits = outputs["logits"]
-            value_logits = outputs["value_logits"]
+            pos_logits = pos_outputs["logits"]
+            pos_value_logits = pos_outputs["value_logits"]
 
-            batch_size, seq_len, n_future, vocab_size = logits.shape
+            # Forward (Negative) - Value Loss만 사용
+            neg_outputs = adapter(
+                neg_input_ids,
+                neg_attention_mask,
+                return_value_logits=True,
+                return_hidden_states=False  # hidden states 불필요
+            )
+            neg_value_logits = neg_outputs["value_logits"]
 
-            # TD error 계산
+            batch_size, seq_len, n_future, vocab_size = pos_logits.shape
+
+            # TD error 계산 (Positive만 - Policy weighting용)
             td_errors = compute_td_errors(
-                value_logits=value_logits,
-                rewards=rewards,
-                attention_mask=attention_mask,
+                value_logits=pos_value_logits,
+                rewards=pos_rewards,
+                attention_mask=pos_attention_mask,
                 gamma=1.0,
             )
 
-            # Weight 산출
+            # Weight 산출 (Positive에만 적용)
             weights = build_weights(
                 td_errors=td_errors,
                 beta=config.training.beta,
@@ -514,18 +523,17 @@ def run_verifiable_training(
                 max_weight=config.training.weight_clip_max,
             )
 
-            # Weighted CE loss + Unweighted CE loss (baseline 비교용)
+            # Policy Loss (Positive만, TD Weighted)
             batch_weighted_ce_loss = 0.0
             batch_unweighted_ce_loss = 0.0
 
             for k in range(1, n_future + 1):
                 valid_len = seq_len - k
 
-                logits_k = logits[:, :valid_len, k - 1, :]
-                labels_k = labels[:, k : k + valid_len]
-                # Weight는 예측 대상 토큰 t+k의 TD error: δ_{t+k} = V(t+k) - V(t+k-1)
+                logits_k = pos_logits[:, :valid_len, k - 1, :]
+                labels_k = pos_labels[:, k : k + valid_len]
                 weights_k = weights[:, k : k + valid_len]
-                mask_k = attention_mask[:, k : k + valid_len]
+                mask_k = pos_attention_mask[:, k : k + valid_len]
 
                 ce_loss_k = F.cross_entropy(
                     logits_k.reshape(-1, vocab_size),
@@ -534,13 +542,10 @@ def run_verifiable_training(
                     ignore_index=-100,
                 )
 
-                # labels=-100인 토큰은 loss=0, mask에서도 제외
                 valid_label_mask_k = (labels_k != -100).float()
                 combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
 
-                # Weighted CE (TD error 기반 가중치 적용)
                 weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
-                # Unweighted CE (baseline 비교용, 균등 가중치)
                 unweighted_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
 
                 mask_sum_k = combined_mask_k.sum()
@@ -551,28 +556,26 @@ def run_verifiable_training(
             weighted_ce_loss = batch_weighted_ce_loss / n_future
             unweighted_ce_loss = batch_unweighted_ce_loss / n_future
 
-            # Value loss (TD target 기반 Continual Learning)
-            td_targets = compute_td_targets(
-                value_logits=value_logits,
-                rewards=rewards,
-                attention_mask=attention_mask,
-                gamma=getattr(config.training, "gamma", 1.0),
-                lam=getattr(config.training, "lam", 0.0),
-            )
+            # Pairwise Ranking Loss (value head 학습)
+            pos_mask = (pos_labels != -100).to(model_dtype)
+            neg_mask = (neg_labels != -100).to(model_dtype)
+            value_loss = pairwise_ranking_loss(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
 
-            # Mask padded tokens AND instruction tokens (labels != -100)
-            valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
-            attn_mask_expanded = attention_mask.unsqueeze(-1).to(model_dtype)
-            loss_mask = valid_label_mask * attn_mask_expanded
+            # Total Loss
+            pairwise_coef = getattr(config.training, "pairwise_coef", 0.1)
+            total_loss = weighted_ce_loss + pairwise_coef * value_loss
 
-            # Value loss 계산 (MSE)
-            loss_per_token = F.mse_loss(value_logits, td_targets, reduction="none")
-
-            masked_value_loss = loss_per_token * loss_mask
-            value_loss = masked_value_loss.sum() / (loss_mask.sum() + 1e-8)
-
-            # Total loss
-            total_loss = weighted_ce_loss + config.training.value_coef * value_loss
+            # 로깅용 변수 설정
+            input_ids = pos_input_ids
+            attention_mask = pos_attention_mask
+            labels = pos_labels
+            is_correct = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
+            rewards = pos_rewards
+            value_logits = pos_value_logits
+            logits = pos_logits
+            valid_label_mask = pos_mask.unsqueeze(-1)
+            # pairwise 모드에서는 rewards를 td_targets로 사용 (로깅용)
+            td_targets = rewards.view(-1, 1, 1).expand_as(value_logits)
 
             # Loss scaling (gradient accumulation 적용)
             scaled_loss = total_loss / gradient_accumulation_steps
@@ -755,25 +758,27 @@ def run_verifiable_training(
         # Validation 실행 (epoch 경계에서)
         logger.info(f"--- Validation at epoch {current_epoch:.2f} ---")
 
+        pairwise_coef = getattr(config.training, "pairwise_coef", 0.1)
         val_metrics = validate_verifiable(
             adapter=adapter,
             dataloader=val_loader,
             device=device,
             beta=config.training.beta,
-            value_coef=config.training.value_coef,
             weight_clip_min=config.training.weight_clip_min,
             weight_clip_max=config.training.weight_clip_max,
-            gamma=getattr(config.training, "gamma", 1.0),
-            lam=getattr(config.training, "lam", 0.0),
+            pairwise_coef=pairwise_coef,
         )
 
         # Validation metrics aggregation (1회 통신)
-        reduced_val = all_reduce_scalars({
+        val_reduce_dict = {
             "val_total": val_metrics["val_loss"],
             "val_weighted_ce": val_metrics["val_weighted_ce_loss"],
             "val_unweighted_ce": val_metrics["val_unweighted_ce_loss"],
             "val_value": val_metrics["val_value_loss"],
-        })
+            "val_pairwise_accuracy": val_metrics["val_pairwise_accuracy"],
+            "val_margin": val_metrics["val_margin"],
+        }
+        reduced_val = all_reduce_scalars(val_reduce_dict)
         avg_val_total = reduced_val["val_total"]
         avg_val_weighted_ce = reduced_val["val_weighted_ce"]
         avg_val_unweighted_ce = reduced_val["val_unweighted_ce"]
@@ -869,11 +874,9 @@ def run_verifiable_training(
             dataloader=val_loader,
             device=device,
             beta=config.training.beta,
-            value_coef=config.training.value_coef,
             weight_clip_min=config.training.weight_clip_min,
             weight_clip_max=config.training.weight_clip_max,
-            gamma=getattr(config.training, "gamma", 1.0),
-            lam=getattr(config.training, "lam", 0.0),
+            pairwise_coef=getattr(config.training, "pairwise_coef", 0.1),
         )
 
         save_checkpoint(

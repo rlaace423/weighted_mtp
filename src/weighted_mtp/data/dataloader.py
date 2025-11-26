@@ -107,7 +107,6 @@ def create_dataloader(
         sampling_config: 샘플링 설정 딕셔너리
             - use_pairwise: Pairwise 포맷 사용 여부 (기본: False)
             - n_samples: 샘플링할 총 샘플 수
-            - auto_data_balancing: correct/incorrect 균형 샘플링
             - correct_ratio: correct 샘플 비율
             - difficulty_weights: 난이도별 가중치
             - difficulty_bins: 난이도 구간 정의

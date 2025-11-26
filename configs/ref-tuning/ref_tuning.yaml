@@ -34,20 +34,18 @@ dataset:
 
 # 데이터 샘플링 (Rho-1과 동일: 정답만 학습)
 data_sampling:
-  sampling_method: "difficulty"
   seed: 82
   val_n_samples: 1000
 
-  difficulty:
-    n_samples: 50000
-    auto_data_balancing: false
-    correct_ratio: 1.0
-    bins:
-      diff_7: [7, 7]
-      else: [8, 25]
-    weights:
-      diff_7: 0.35
-      else: 0.65
+  n_samples: 50000
+  correct_ratio: 1.0
+
+  difficulty_bins:
+    diff_7: [7, 7]
+    else: [8, 25]
+  difficulty_weights:
+    diff_7: 0.35
+    else: 0.65
 
 # 학습 설정 (2.7B 모델, 2-GPU 최적화)
 training:

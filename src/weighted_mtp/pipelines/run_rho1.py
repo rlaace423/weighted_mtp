@@ -102,8 +102,6 @@ def load_reference_model(config: dict, device: torch.device) -> nn.Module:
     return ref_model
 
 
-
-
 def validate_rho1(
     adapter: MetaLlamaMTPAdapter,
     ref_model: nn.Module,
@@ -356,8 +354,6 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
     # sampling_config를 dict로 변환
     sampling_config = OmegaConf.to_container(config.data_sampling, resolve=True)
-    sampling_method = sampling_config.get("sampling_method")
-    logger.info(f"샘플링 방식: {sampling_method}")
 
     train_loader = create_dataloader(
         dataset_path=config.dataset.train,
@@ -369,11 +365,9 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
         shuffle=True,
     )
 
-    # Validation용 sampling_config (동일 방식, val_n_samples 사용)
+    # Validation용 sampling_config (n_samples를 val_n_samples로 변경)
     val_sampling_config = sampling_config.copy()
-    if sampling_method == "difficulty":
-        val_sampling_config["difficulty"] = val_sampling_config.get("difficulty", {}).copy()
-        val_sampling_config["difficulty"]["n_samples"] = config.data_sampling.val_n_samples
+    val_sampling_config["n_samples"] = config.data_sampling.val_n_samples
 
     val_loader = create_dataloader(
         dataset_path=config.dataset.validation,

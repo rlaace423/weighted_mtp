@@ -26,9 +26,10 @@ class TestDistributedLoading:
         dataset = load_dataset(
             dataset_name="mbpp",
             split="train",
-            n_samples=total_samples,
-            auto_data_balancing=False,
-            correct_ratio=1.0,
+            sampling_config={
+                "n_samples": total_samples,
+                "correct_ratio": 1.0,
+            },
             rank=rank,
             world_size=world_size,
             seed=42,
@@ -56,7 +57,10 @@ class TestDistributedLoading:
             dataset = load_dataset(
                 dataset_name="mbpp",
                 split="train",
-                n_samples=total_samples,
+                sampling_config={
+                    "n_samples": total_samples,
+                    "correct_ratio": 1.0,
+                },
                 rank=rank,
                 world_size=world_size,
                 seed=42,
@@ -83,7 +87,10 @@ class TestDistributedLoading:
             dataset = load_dataset(
                 dataset_name="mbpp",
                 split="train",
-                n_samples=total_samples,
+                sampling_config={
+                    "n_samples": total_samples,
+                    "correct_ratio": 1.0,
+                },
                 rank=rank,
                 world_size=world_size,
                 seed=42,
@@ -109,7 +116,10 @@ class TestDistributedLoading:
         dataset1 = load_dataset(
             dataset_name="mbpp",
             split="train",
-            n_samples=total_samples,
+            sampling_config={
+                "n_samples": total_samples,
+                "correct_ratio": 1.0,
+            },
             rank=rank,
             world_size=world_size,
             seed=42,
@@ -120,7 +130,10 @@ class TestDistributedLoading:
         dataset2 = load_dataset(
             dataset_name="mbpp",
             split="train",
-            n_samples=total_samples,
+            sampling_config={
+                "n_samples": total_samples,
+                "correct_ratio": 1.0,
+            },
             rank=rank,
             world_size=world_size,
             seed=42,
@@ -142,7 +155,10 @@ class TestDistributedLoading:
             dataset = load_dataset(
                 dataset_name="mbpp",
                 split="train",
-                n_samples=total_samples,
+                sampling_config={
+                    "n_samples": total_samples,
+                    "correct_ratio": 1.0,
+                },
                 rank=rank,
                 world_size=world_size,
                 seed=42,

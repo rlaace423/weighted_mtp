@@ -49,20 +49,18 @@ dataset:
 
 # 데이터 샘플링
 data_sampling:
-  sampling_method: "difficulty"
   seed: 42
   val_n_samples: 1000
 
-  difficulty:
-    n_samples: 200000
-    auto_data_balancing: false
-    correct_ratio: 1.0  # Rho-1은 정답만 학습
-    bins:
-      diff_7: [7, 7]    # 데이터 많음 (약 90만 -> 비중 축소 필요)
-      else: [8, 25]     # 데이터 적당 (약 60만)
-    weights:
-      diff_7: 0.35  # 90만개 중 일부만 샘플링 (약 35% 할당)
-      else: 0.65    # 어려운 문제 집중 (약 60% 할당)
+  n_samples: 200000
+  correct_ratio: 1.0  # Rho-1은 정답만 학습
+
+  difficulty_bins:
+    diff_7: [7, 7]
+    else: [8, 25]
+  difficulty_weights:
+    diff_7: 0.35
+    else: 0.65
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:

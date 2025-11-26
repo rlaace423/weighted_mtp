@@ -42,20 +42,18 @@ dataset:
 
 # 데이터 샘플링
 data_sampling:
-  sampling_method: "difficulty"
   seed: 82
   val_n_samples: 1000
+  use_pairwise: true  # value head 학습은 항상 pairwise
 
-  difficulty:
-    n_samples: 100000
-    auto_data_balancing: true
-    correct_ratio: 0.5  # Correct/Incorrect 균형
-    bins:
-      diff_7: [7, 7]    # 데이터 많음 (약 90만 -> 비중 축소 필요)
-      else: [8, 25]     # 데이터 적당 (약 60만)
-    weights:
-      diff_7: 0.35  # 90만개 중 일부만 샘플링 (약 35% 할당)
-      else: 0.65    # 어려운 문제 집중 (약 60% 할당)
+  n_samples: 100000  # 최종 쌍 수 (pairwise 모드)
+
+  difficulty_bins:
+    diff_7: [7, 7]
+    else: [8, 25]
+  difficulty_weights:
+    diff_7: 0.35
+    else: 0.65
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:
@@ -65,8 +63,6 @@ training:
   trunk_learning_rate: 5e-6
   value_head_learning_rate: 3e-4
   max_grad_norm: 1.0
-  gamma: 1.0
-  lam: 1.0  # MC (sigmoid value_head_type 필수 조건)
   num_unfrozen_layers: 2
   value_head_type: sigmoid  # BCE loss + Sigmoid
   log_interval: 1

@@ -31,7 +31,8 @@ def test_critic_pipeline_micro_mtp():
     # Override 파라미터 (초경량 테스트 설정)
     override_params = {
         "data_sampling": {
-            "n_samples": 20,  # 20개 샘플
+            "n_samples": 20,  # 최종 쌍 수 (pairwise 모드)
+            "use_pairwise": True,  # Pairwise ranking loss 학습
         },
         "training": {
             "n_epochs": 1.5,  # 1.5 epoch (30 samples total)
@@ -110,8 +111,7 @@ def test_critic_config_validation():
 
     # Critic 특화 검증
     assert config.experiment.stage == "critic", "Should be critic stage"
-    assert config.data_sampling.auto_data_balancing == True, "Critic needs balanced sampling"
-    assert config.data_sampling.correct_ratio == 0.5, "Critic uses 50:50 ratio"
+    assert config.data_sampling.use_pairwise is True, "Critic uses pairwise mode"
     assert config.runtime.device == "mps", "Should use MPS for local test"
 
     # 모델 경로 검증

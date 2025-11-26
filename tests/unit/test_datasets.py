@@ -3,7 +3,7 @@
 핵심 검증 항목:
 - 데이터셋 로딩 기본 기능
 - Config-driven 샘플링 전략 자동 선택
-- Balanced sampling (auto_data_balancing=True)
+- Correct/Incorrect 비율 기반 샘플링
 - Correct-only sampling (correct_ratio=1.0)
 - Difficulty-based sampling (difficulty_weights 있음)
 - 재현성 (seed 고정)
@@ -22,9 +22,10 @@ def small_dataset():
     return load_dataset(
         "codecontests",
         split="train",
-        n_samples=50,
-        auto_data_balancing=False,
-        correct_ratio=0.5,
+        sampling_config={
+            "n_samples": 50,
+            "correct_ratio": 0.5,
+        },
         seed=42
     )
 
@@ -62,17 +63,18 @@ class TestLoadDataset:
         assert isinstance(sample["is_correct"], bool), "is_correct는 bool 타입"
 
 
-class TestBalancedSampling:
-    """Balanced correct/incorrect 샘플링 테스트 (Critic)"""
+class TestCorrectRatioSampling:
+    """Correct/Incorrect 비율 기반 샘플링 테스트"""
 
-    def test_balanced_sampling_50_50(self):
-        """50:50 균형 샘플링 검증"""
+    def test_sampling_50_50(self):
+        """50:50 비율 샘플링 검증"""
         dataset = load_dataset(
             "codecontests",
             split="train",
-            n_samples=100,
-            auto_data_balancing=True,
-            correct_ratio=0.5,
+            sampling_config={
+                "n_samples": 100,
+                "correct_ratio": 0.5,
+            },
             seed=42
         )
 
@@ -80,20 +82,20 @@ class TestBalancedSampling:
 
         # correct/incorrect 카운트
         correct_count = sum(1 for sample in dataset if sample["is_correct"])
-        incorrect_count = len(dataset) - correct_count
 
         # 50:50 비율 검증 (오차 ±10% 허용)
         ratio = correct_count / len(dataset)
         assert 0.4 <= ratio <= 0.6, f"Expected ~50%, got {ratio:.2%}"
 
-    def test_balanced_sampling_70_30(self):
-        """70:30 균형 샘플링 검증"""
+    def test_sampling_70_30(self):
+        """70:30 비율 샘플링 검증"""
         dataset = load_dataset(
             "codecontests",
             split="train",
-            n_samples=100,
-            auto_data_balancing=True,
-            correct_ratio=0.7,
+            sampling_config={
+                "n_samples": 100,
+                "correct_ratio": 0.7,
+            },
             seed=42
         )
 
@@ -112,9 +114,10 @@ class TestCorrectOnlySampling:
         dataset = load_dataset(
             "codecontests",
             split="train",
-            n_samples=50,
-            auto_data_balancing=False,
-            correct_ratio=1.0,
+            sampling_config={
+                "n_samples": 50,
+                "correct_ratio": 1.0,
+            },
             seed=42
         )
 
@@ -137,8 +140,7 @@ class TestDifficultyBasedSampling:
             "codecontests",
             split="train",
             n_samples=50,
-            auto_data_balancing=True,
-            correct_ratio=0.5,
+                        correct_ratio=0.5,
             difficulty_weights=difficulty_weights,
             difficulty_bins=difficulty_bins,
             seed=42
@@ -160,8 +162,7 @@ class TestDifficultyBasedSampling:
             "codecontests",
             split="train",
             n_samples=100,
-            auto_data_balancing=True,
-            correct_ratio=0.5,
+                        correct_ratio=0.5,
             difficulty_weights=difficulty_weights,
             difficulty_bins=difficulty_bins,
             seed=42
@@ -191,8 +192,7 @@ class TestReproducibility:
             "codecontests",
             split="train",
             n_samples=20,
-            auto_data_balancing=True,
-            correct_ratio=0.5,
+                        correct_ratio=0.5,
             seed=42
         )
 
@@ -200,8 +200,7 @@ class TestReproducibility:
             "codecontests",
             split="train",
             n_samples=20,
-            auto_data_balancing=True,
-            correct_ratio=0.5,
+                        correct_ratio=0.5,
             seed=42
         )
 
@@ -217,8 +216,7 @@ class TestReproducibility:
             "codecontests",
             split="train",
             n_samples=20,
-            auto_data_balancing=True,
-            correct_ratio=0.5,
+                        correct_ratio=0.5,
             seed=42
         )
 
@@ -226,8 +224,7 @@ class TestReproducibility:
             "codecontests",
             split="train",
             n_samples=20,
-            auto_data_balancing=True,
-            correct_ratio=0.5,
+                        correct_ratio=0.5,
             seed=999
         )
 
@@ -246,8 +243,7 @@ class TestSplits:
             "codecontests",
             split="train",
             n_samples=10,
-            auto_data_balancing=False,
-            seed=42
+                        seed=42
         )
         assert len(dataset) == 10
 
@@ -257,8 +253,7 @@ class TestSplits:
             "codecontests",
             split="validation",
             n_samples=10,
-            auto_data_balancing=False,
-            seed=42
+                        seed=42
         )
         assert len(dataset) == 10
 
@@ -268,7 +263,6 @@ class TestSplits:
             "codecontests",
             split="test",
             n_samples=10,
-            auto_data_balancing=False,
-            seed=42
+                        seed=42
         )
         assert len(dataset) == 10

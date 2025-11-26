@@ -25,14 +25,21 @@ dataset:
   name: codecontests
   train: storage/datasets/codecontests/processed/train.jsonl
   validation: storage/datasets/codecontests/processed/valid.jsonl
-  max_length: 512
+  max_length: 1024
 
 data_sampling:
-  n_samples: 500
-  auto_data_balancing: true
-  correct_ratio: 0.5
-  difficulty_range: [1, 11]
   seed: 42
+  val_n_samples: 100
+  use_pairwise: true
+
+  n_samples: 500  # 최종 쌍 수 (pairwise 모드)
+
+  difficulty_bins:
+    diff_7: [7, 7]
+    else: [8, 25]
+  difficulty_weights:
+    diff_7: 0.35
+    else: 0.65
 
 training:
   n_epochs: 0.1
@@ -41,8 +48,6 @@ training:
   trunk_learning_rate: 3e-5  # Trunk (unfrozen layers) peak LR
   value_head_learning_rate: 1.0e-4  # Value head peak LR
   max_grad_norm: 1.0
-  gamma: 1.0
-  lam: 0.95  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
   num_unfrozen_layers: 4  # 마지막 N개 TransformerBlock unfreeze (0=value head만)
   log_interval: 5
 

@@ -18,7 +18,11 @@ from weighted_mtp.pipelines.run_rho1 import run_rho1_training
 @pytest.mark.integration
 @pytest.mark.slow
 def test_rho1_pipeline_micro_mtp():
-    """Rho-1 파이프라인 end-to-end 테스트 (micro-mtp + MPS)"""
+    """Rho-1 파이프라인 end-to-end 테스트 (micro-mtp + MPS)
+
+    Note: Rho-1은 HuggingFace reference model이 필요합니다.
+    로컬에서는 HuggingFace 모델이 없으므로 skip됩니다.
+    """
 
     # MPS 사용 가능 여부 확인
     if not torch.backends.mps.is_available():
@@ -27,6 +31,20 @@ def test_rho1_pipeline_micro_mtp():
     # Test config 경로
     config_path = "configs/rho1/rho1_local.yaml"
     assert Path(config_path).exists(), f"Config not found: {config_path}"
+
+    # Reference model 경로 확인 (HuggingFace 모델 필요)
+    config = OmegaConf.load(config_path)
+    ref_path = Path(config.models.reference.path)
+
+    # HuggingFace 모델 확인: config.json 존재 여부 (커스텀 MTP 모델은 configs/config.json)
+    hf_config_path = ref_path / "config.json"
+    mtp_config_path = ref_path / "configs" / "config.json"
+
+    if mtp_config_path.exists() and not hf_config_path.exists():
+        pytest.skip(
+            f"Rho-1 requires HuggingFace reference model, but got custom MTP model at {ref_path}. "
+            "Run this test in an environment with HuggingFace models (e.g., VESSL)."
+        )
 
     # Override 파라미터 (초경량 테스트 설정)
     override_params = {
@@ -114,7 +132,6 @@ def test_rho1_config_validation():
     # Rho-1 특화 검증
     assert config.experiment.stage == "rho1", "Should be rho1 stage"
     assert hasattr(config.models, "reference"), "Rho-1 needs reference model"
-    assert config.data_sampling.auto_data_balancing == False, "Rho-1 doesn't balance"
     assert config.data_sampling.correct_ratio == 1.0, "Rho-1 uses only correct samples"
     assert config.runtime.device == "mps", "Should use MPS for local test"
 

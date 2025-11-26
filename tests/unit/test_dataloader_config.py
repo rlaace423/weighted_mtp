@@ -103,7 +103,6 @@ class TestGetDifficultyConfig:
         config = OmegaConf.create({
             "data_sampling": {
                 "n_samples": 1000,
-                "auto_data_balancing": False,
             }
         })
 
@@ -161,11 +160,12 @@ class TestSamplingWithDifficultyConfig:
         dataset = load_dataset(
             "codecontests",
             split="train",
-            n_samples=n_samples,
-            auto_data_balancing=False,
-            correct_ratio=1.0,
-            difficulty_weights={"diff_7": 0.35, "else": 0.65},
-            difficulty_bins={"diff_7": [7, 7], "else": [8, 25]},
+            sampling_config={
+                "n_samples": n_samples,
+                "correct_ratio": 1.0,
+                "difficulty_weights": {"diff_7": 0.35, "else": 0.65},
+                "difficulty_bins": {"diff_7": [7, 7], "else": [8, 25]},
+            },
             seed=42
         )
 
@@ -208,11 +208,12 @@ class TestSamplingWithDifficultyConfig:
         dataset = load_dataset(
             "codecontests",
             split="train",
-            n_samples=n_samples,
-            auto_data_balancing=True,
-            correct_ratio=0.5,
-            difficulty_weights={"all": 1.0},
-            difficulty_bins={"all": [1, 25]},
+            sampling_config={
+                "n_samples": n_samples,
+                "correct_ratio": 0.5,
+                "difficulty_weights": {"all": 1.0},
+                "difficulty_bins": {"all": [1, 25]},
+            },
             seed=42
         )
 
@@ -247,11 +248,12 @@ class TestSamplingWithDifficultyConfig:
         dataset = load_dataset(
             "codecontests",
             split="train",
-            n_samples=n_samples,
-            auto_data_balancing=True,
-            correct_ratio=0.5,
-            difficulty_weights={"low": 0.7, "medium": 0.3},
-            difficulty_bins={"low": [1, 3], "medium": [4, 7]},
+            sampling_config={
+                "n_samples": n_samples,
+                "correct_ratio": 0.5,
+                "difficulty_weights": {"low": 0.7, "medium": 0.3},
+                "difficulty_bins": {"low": [1, 3], "medium": [4, 7]},
+            },
             seed=42
         )
 
@@ -277,11 +279,10 @@ class TestSamplingWithDifficultyConfig:
             f"medium: expected ~{expected_medium}, got {medium_count}"
 
         # 전체 correct/incorrect 비율 검증
-        # 데이터 분포에 따라 실제 비율이 다를 수 있음 (데이터 부족 시 보충)
         correct_count = sum(1 for sample in dataset if sample["is_correct"])
         incorrect_count = len(dataset) - correct_count
 
-        # auto_data_balancing=True이므로 correct/incorrect 모두 존재해야 함
+        # correct_ratio=0.5이므로 correct/incorrect 모두 존재해야 함
         assert correct_count > 0, "correct 샘플이 있어야 함"
         assert incorrect_count > 0, "incorrect 샘플이 있어야 함"
 
@@ -289,11 +290,9 @@ class TestSamplingWithDifficultyConfig:
         """동일 seed + difficulty 설정 → 동일 결과"""
         config = {
             "n_samples": 200,
-            "auto_data_balancing": False,
             "correct_ratio": 1.0,
             "difficulty_weights": {"diff_7": 0.35, "else": 0.65},
             "difficulty_bins": {"diff_7": [7, 7], "else": [8, 25]},
-            "seed": 42,
         }
 
         dataset1 = load_dataset("codecontests", split="train", **config)

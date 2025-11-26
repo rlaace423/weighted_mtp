@@ -25,14 +25,21 @@ dataset:
   name: codecontests
   train: storage/datasets/codecontests/processed/train.jsonl
   validation: storage/datasets/codecontests/processed/valid.jsonl
-  max_length: 512
+  max_length: 1024
 
 data_sampling:
-  n_samples: 500
-  auto_data_balancing: true
-  correct_ratio: 0.5
-  curriculum_learning: false
   seed: 42
+  val_n_samples: 100
+  use_pairwise: true
+
+  n_samples: 500  # 최종 쌍 수 (pairwise 모드)
+
+  difficulty_bins:
+    diff_7: [7, 7]
+    else: [8, 25]
+  difficulty_weights:
+    diff_7: 0.35
+    else: 0.65
 
 training:
   n_epochs: 0.2
@@ -42,11 +49,9 @@ training:
   value_head_learning_rate: 1.0e-5  # Value head peak LR
   max_grad_norm: 1.0
   beta: 0.2
-  value_coef: 0.5
+  pairwise_coef: 0.1  # Pairwise ranking loss coefficient
   weight_clip_min: 0.1
   weight_clip_max: 3.0
-  gamma: 1.0
-  lam: 0.95  # GAE lambda (0.0=TD(0), 0.95=GAE, 1.0=MC)
   log_interval: 5
 
   # Learning rate scheduler

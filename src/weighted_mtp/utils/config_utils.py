@@ -220,16 +220,10 @@ def validate_config(config: DictConfig) -> None:
         batch_size = config.training.batch_size
         if hasattr(config, "data_sampling"):
             ds = config.data_sampling
-            # difficulty 방식: n_samples 검증
-            if hasattr(ds, "difficulty") and hasattr(ds.difficulty, "n_samples"):
-                n_samples = ds.difficulty.n_samples
+            if hasattr(ds, "n_samples"):
+                n_samples = ds.n_samples
                 if batch_size > n_samples:
                     errors.append(f"batch_size({batch_size})가 n_samples({n_samples})보다 큼")
-            # pairwise 방식: n_pairs 검증
-            if hasattr(ds, "pairwise") and hasattr(ds.pairwise, "n_pairs"):
-                n_pairs = ds.pairwise.n_pairs
-                if batch_size > n_pairs:
-                    errors.append(f"batch_size({batch_size})가 n_pairs({n_pairs})보다 큼")
 
     # 에러 보고
     if errors:
@@ -328,9 +322,8 @@ def _validate_critic_stage(config: DictConfig, errors: List[str]) -> None:
 def _validate_data_sampling(config: DictConfig, errors: List[str]) -> None:
     """data_sampling 섹션 검증
 
-    sampling_method에 따라 필수 하위 구조를 검증한다.
-    - "difficulty": 난이도 기반 샘플링
-    - "pairwise": (correct, incorrect) 쌍 기반 샘플링
+    Difficulty 기반 샘플링 설정을 검증한다.
+    use_pairwise 옵션은 샘플링 후 pairwise 포맷 변환 여부를 결정한다.
 
     Args:
         config: Config 객체
@@ -341,75 +334,24 @@ def _validate_data_sampling(config: DictConfig, errors: List[str]) -> None:
 
     ds = config.data_sampling
 
-    # sampling_method 필수
-    if not hasattr(ds, "sampling_method"):
-        errors.append("data_sampling.sampling_method 필드 필수 ('difficulty' 또는 'pairwise')")
-        return
-
-    method = ds.sampling_method
-
-    if method == "difficulty":
-        # difficulty 섹션 필수 검증
-        if not hasattr(ds, "difficulty"):
-            errors.append(
-                "sampling_method='difficulty'일 때 data_sampling.difficulty 섹션 필수"
-            )
-        else:
-            _validate_difficulty_config(ds.difficulty, errors)
-    elif method == "pairwise":
-        # pairwise 섹션 필수 검증
-        if not hasattr(ds, "pairwise"):
-            errors.append(
-                "sampling_method='pairwise'일 때 data_sampling.pairwise 섹션 필수"
-            )
-        else:
-            _validate_pairwise_config(ds.pairwise, errors)
-    else:
-        errors.append(
-            f"data_sampling.sampling_method는 'difficulty' 또는 'pairwise'여야 함: {method}"
-        )
-
-
-def _validate_difficulty_config(difficulty: DictConfig, errors: List[str]) -> None:
-    """difficulty 샘플링 설정 검증
-
-    Args:
-        difficulty: difficulty 설정 객체
-        errors: 에러 목록 (mutable)
-    """
-    # 필수 필드
-    if not hasattr(difficulty, "n_samples"):
-        errors.append("data_sampling.difficulty.n_samples 필드 필수")
-    elif difficulty.n_samples <= 0:
-        errors.append(f"n_samples는 양수여야 함: {difficulty.n_samples}")
+    # n_samples 검증
+    if hasattr(ds, "n_samples"):
+        if ds.n_samples <= 0:
+            errors.append(f"n_samples는 양수여야 함: {ds.n_samples}")
 
     # correct_ratio 검증 (선택)
-    if hasattr(difficulty, "correct_ratio"):
-        ratio = difficulty.correct_ratio
+    if hasattr(ds, "correct_ratio"):
+        ratio = ds.correct_ratio
         if ratio < 0 or ratio > 1:
             errors.append(f"correct_ratio는 0~1 범위여야 함: {ratio}")
 
     # difficulty_weights와 difficulty_bins 일관성
-    has_weights = hasattr(difficulty, "difficulty_weights")
-    has_bins = hasattr(difficulty, "difficulty_bins")
+    has_weights = hasattr(ds, "difficulty_weights")
+    has_bins = hasattr(ds, "difficulty_bins")
     if has_weights and not has_bins:
         errors.append("difficulty_weights 사용 시 difficulty_bins도 필수")
     if has_bins and not has_weights:
         errors.append("difficulty_bins 사용 시 difficulty_weights도 필수")
-
-
-def _validate_pairwise_config(pairwise: DictConfig, errors: List[str]) -> None:
-    """pairwise 샘플링 설정 검증
-
-    Args:
-        pairwise: pairwise 설정 객체
-        errors: 에러 목록 (mutable)
-    """
-    # 필수 필드: n_pairs
-    if not hasattr(pairwise, "n_pairs"):
-        errors.append("data_sampling.pairwise.n_pairs 필드 필수")
-    elif pairwise.n_pairs <= 0:
-        errors.append(f"n_pairs는 양수여야 함: {pairwise.n_pairs}")
 
 
 def _has_nested_field(config: DictConfig, field_path: str) -> bool:

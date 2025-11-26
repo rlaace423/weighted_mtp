@@ -25,14 +25,14 @@ from weighted_mtp.utils import (
     ThroughputTracker,
     cleanup_old_checkpoints,
     cleanup_s3_checkpoints,
-    compute_classification_metrics_from_counts,
-    compute_critic_classification_counts,
     compute_gradient_clip_stats,
     compute_gradient_norm,
+    compute_pairwise_accuracy,
     create_param_groups,
     create_scheduler,
     get_model_size,
     get_system_info,
+    pairwise_ranking_loss,
     s3_upload_executor,
     save_checkpoint,
     shutdown_s3_executor,
@@ -46,81 +46,6 @@ from weighted_mtp.runtime import (
     all_reduce_scalars,
     barrier,
 )
-from weighted_mtp.value_weighting.td_weighting import compute_td_targets
-
-
-# ============================================================================
-# Pairwise Loss 및 메트릭 함수
-# ============================================================================
-
-
-def pairwise_ranking_loss(
-    v_pos: torch.Tensor,
-    v_neg: torch.Tensor,
-    mask_pos: torch.Tensor,
-    mask_neg: torch.Tensor,
-) -> torch.Tensor:
-    """Bradley-Terry Pairwise Ranking Loss
-
-    P(pos > neg) = sigmoid(V_pos - V_neg)
-    Loss = -log(sigmoid(V_pos - V_neg))
-
-    Args:
-        v_pos: [batch, seq, 1] positive sample values
-        v_neg: [batch, seq, 1] negative sample values
-        mask_pos: [batch, seq] valid token mask for positive
-        mask_neg: [batch, seq] valid token mask for negative
-
-    Returns:
-        Scalar loss
-    """
-    # 시퀀스 평균 value 계산
-    v_pos_mean = (v_pos.squeeze(-1) * mask_pos).sum(dim=1) / (mask_pos.sum(dim=1) + 1e-8)
-    v_neg_mean = (v_neg.squeeze(-1) * mask_neg).sum(dim=1) / (mask_neg.sum(dim=1) + 1e-8)
-
-    # Pairwise ranking loss: -log(sigmoid(v_pos - v_neg))
-    return -torch.nn.functional.logsigmoid(v_pos_mean - v_neg_mean).mean()
-
-
-def compute_pairwise_accuracy(
-    v_pos: torch.Tensor,
-    v_neg: torch.Tensor,
-    mask_pos: torch.Tensor,
-    mask_neg: torch.Tensor,
-) -> dict[str, float]:
-    """Pairwise Accuracy 및 관련 메트릭 계산
-
-    Args:
-        v_pos: [batch, seq, 1] positive sample values
-        v_neg: [batch, seq, 1] negative sample values
-        mask_pos: [batch, seq] valid token mask for positive
-        mask_neg: [batch, seq] valid token mask for negative
-
-    Returns:
-        {pairwise_accuracy, mean_pos, mean_neg, margin}
-    """
-    # 시퀀스 평균 value 계산
-    v_pos_mean = (v_pos.squeeze(-1) * mask_pos).sum(dim=1) / (mask_pos.sum(dim=1) + 1e-8)
-    v_neg_mean = (v_neg.squeeze(-1) * mask_neg).sum(dim=1) / (mask_neg.sum(dim=1) + 1e-8)
-
-    # V(correct) > V(incorrect)인 쌍의 비율
-    correct_pairs = (v_pos_mean > v_neg_mean).float().sum()
-    total_pairs = v_pos_mean.size(0)
-    pairwise_accuracy = (correct_pairs / total_pairs).item()
-
-    # 평균 값
-    mean_pos = v_pos_mean.mean().item()
-    mean_neg = v_neg_mean.mean().item()
-    margin = mean_pos - mean_neg
-
-    return {
-        "pairwise_accuracy": pairwise_accuracy,
-        "mean_pos": mean_pos,
-        "mean_neg": mean_neg,
-        "margin": margin,
-        "correct_pairs": correct_pairs.item(),
-        "total_pairs": total_pairs,
-    }
 
 
 def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
@@ -151,148 +76,6 @@ def load_adapter(config: dict, device: torch.device) -> MetaLlamaMTPAdapter:
 
 
 def validate_critic(
-    adapter: MetaLlamaMTPAdapter,
-    dataloader: DataLoader,
-    device: torch.device,
-    gamma: float = 1.0,
-    lam: float = 0.0,
-    value_head_type: str = "mlp",
-    return_raw_counts: bool = False,
-) -> dict[str, float]:
-    """Validation 수행
-
-    Args:
-        adapter: Adapter
-        dataloader: Validation DataLoader
-        device: 디바이스
-        gamma: TD discount factor
-        lam: GAE lambda
-        value_head_type: "linear" (BCE) 또는 "mlp" (MSE)
-        return_raw_counts: True이면 raw counts 반환 (분산학습용 aggregation)
-
-    Returns:
-        Validation metrics (또는 return_raw_counts=True이면 raw counts 포함)
-    """
-    adapter.eval()
-
-    total_loss = 0.0
-    n_batches = 0
-
-    # 분류 메트릭용 누적 변수 (micro-average)
-    total_tp = 0.0
-    total_fp = 0.0
-    total_fn = 0.0
-    total_correct_sum = 0.0
-    total_correct_count = 0.0
-    total_incorrect_sum = 0.0
-    total_incorrect_count = 0.0
-
-    # 모델 dtype 감지
-    model_dtype = next(adapter.parameters()).dtype
-
-    with torch.no_grad():
-        for batch in dataloader:
-            # 1. Batch를 device로 이동
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-            is_correct = batch["is_correct"].to(device)
-
-            # 2. is_correct → rewards 변환 (모델 dtype 일치)
-            rewards = is_correct.to(model_dtype)
-
-            # 3. Forward (Value head만)
-            outputs = adapter(input_ids, attention_mask, return_value_logits=True)
-            value_logits = outputs["value_logits"]
-
-            # 4. TD target 계산
-            td_targets = compute_td_targets(
-                value_logits=value_logits,
-                rewards=rewards,
-                attention_mask=attention_mask,
-                gamma=gamma,
-                lam=lam,
-            )
-
-            # Mask padded tokens AND instruction tokens (labels != -100)
-            valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
-
-            # 5. Value loss 계산 (value_head_type에 따라 분기)
-            if value_head_type == "sigmoid":
-                # BCE loss (sigmoid 출력)
-                loss_per_token = torch.nn.functional.binary_cross_entropy(
-                    value_logits, td_targets, reduction="none"
-                )
-            else:
-                # MSE loss (linear, mlp)
-                loss_per_token = torch.nn.functional.mse_loss(
-                    value_logits, td_targets, reduction="none"
-                )
-
-            masked_loss = loss_per_token * valid_label_mask
-            value_loss = masked_loss.sum() / (valid_label_mask.sum() + 1e-8)
-
-            total_loss += value_loss.item()
-
-            # 6. 분류 메트릭 count 누적 (micro-average)
-            valid_mask_2d = (labels != -100).to(model_dtype)
-            cls_counts = compute_critic_classification_counts(
-                value_logits=value_logits,
-                is_correct=is_correct,
-                attention_mask=valid_mask_2d,
-            )
-            total_tp += cls_counts["tp"]
-            total_fp += cls_counts["fp"]
-            total_fn += cls_counts["fn"]
-            total_correct_sum += cls_counts["correct_sum"]
-            total_correct_count += cls_counts["correct_count"]
-            total_incorrect_sum += cls_counts["incorrect_sum"]
-            total_incorrect_count += cls_counts["incorrect_count"]
-
-            n_batches += 1
-
-    # 평균 loss 계산
-    avg_loss = total_loss / n_batches
-
-    # 분류 메트릭 최종 계산 (micro-average)
-    cls_metrics = compute_classification_metrics_from_counts(
-        tp=total_tp,
-        fp=total_fp,
-        fn=total_fn,
-        correct_sum=total_correct_sum,
-        correct_count=total_correct_count,
-        incorrect_sum=total_incorrect_sum,
-        incorrect_count=total_incorrect_count,
-    )
-
-    metrics = {
-        "val_loss": avg_loss,
-        "val_pred_gap": cls_metrics["pred_gap"],
-        "val_mean_correct": cls_metrics["mean_correct"],
-        "val_mean_incorrect": cls_metrics["mean_incorrect"],
-        "val_precision": cls_metrics["precision"],
-        "val_recall": cls_metrics["recall"],
-        "val_f1": cls_metrics["f1"],
-    }
-
-    # 분산학습용: raw counts 포함 반환
-    if return_raw_counts:
-        metrics["_raw_counts"] = {
-            "loss_sum": total_loss,
-            "n_batches": n_batches,
-            "tp": total_tp,
-            "fp": total_fp,
-            "fn": total_fn,
-            "correct_sum": total_correct_sum,
-            "correct_count": total_correct_count,
-            "incorrect_sum": total_incorrect_sum,
-            "incorrect_count": total_incorrect_count,
-        }
-
-    return metrics
-
-
-def validate_critic_pairwise(
     adapter: MetaLlamaMTPAdapter,
     dataloader: DataLoader,
     device: torch.device,
@@ -563,10 +346,10 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Train: {config.dataset.train}")
     logger.info(f"Validation: {config.dataset.validation}")
 
-    # sampling_config를 dict로 변환
+    # sampling_config를 dict로 변환 (pairwise 모드 강제)
     sampling_config = OmegaConf.to_container(config.data_sampling, resolve=True)
-    use_pairwise = sampling_config.get("use_pairwise", False)
-    logger.info(f"Pairwise 모드: {use_pairwise}")
+    sampling_config["use_pairwise"] = True  # value head 학습은 항상 pairwise
+    logger.info("Pairwise 모드 (value head 학습)")
 
     train_loader = create_dataloader(
         dataset_path=config.dataset.train,
@@ -693,23 +476,11 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         period_metrics_sum = {"train_loss": 0.0}
         period_batches = 0
 
-        # Train 분류 메트릭용 누적 변수 (micro-average)
-        train_tp = 0.0
-        train_fp = 0.0
-        train_fn = 0.0
-        train_correct_sum = 0.0
-        train_correct_count = 0.0
-        train_incorrect_sum = 0.0
-        train_incorrect_count = 0.0
-
         # Pairwise 메트릭용 변수
         train_correct_pairs = 0.0
         train_total_pairs = 0
         train_mean_pos_sum = 0.0
         train_mean_neg_sum = 0.0
-
-        # Pairwise 모드 여부
-        is_pairwise = use_pairwise
 
         for _ in range(batches_this_period):
             try:
@@ -722,101 +493,48 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             # 1 batch 훈련
             adapter.train()
 
-            # Pairwise 모드와 Pointwise 모드 분기
-            if is_pairwise:
-                # Pairwise batch 구조
-                pos_input_ids = batch["pos_input_ids"].to(device)
-                pos_attention_mask = batch["pos_attention_mask"].to(device)
-                pos_labels = batch["pos_labels"].to(device)
-                neg_input_ids = batch["neg_input_ids"].to(device)
-                neg_attention_mask = batch["neg_attention_mask"].to(device)
-                neg_labels = batch["neg_labels"].to(device)
+            # Pairwise batch 구조
+            pos_input_ids = batch["pos_input_ids"].to(device)
+            pos_attention_mask = batch["pos_attention_mask"].to(device)
+            pos_labels = batch["pos_labels"].to(device)
+            neg_input_ids = batch["neg_input_ids"].to(device)
+            neg_attention_mask = batch["neg_attention_mask"].to(device)
+            neg_labels = batch["neg_labels"].to(device)
 
-                # Forward
-                pos_outputs = adapter(pos_input_ids, pos_attention_mask, return_value_logits=True)
-                neg_outputs = adapter(neg_input_ids, neg_attention_mask, return_value_logits=True)
+            # Forward
+            pos_outputs = adapter(pos_input_ids, pos_attention_mask, return_value_logits=True)
+            neg_outputs = adapter(neg_input_ids, neg_attention_mask, return_value_logits=True)
 
-                pos_value_logits = pos_outputs["value_logits"]
-                neg_value_logits = neg_outputs["value_logits"]
+            pos_value_logits = pos_outputs["value_logits"]
+            neg_value_logits = neg_outputs["value_logits"]
 
-                # Mask (labels != -100)
-                pos_mask = (pos_labels != -100).to(model_dtype)
-                neg_mask = (neg_labels != -100).to(model_dtype)
+            # Mask (labels != -100)
+            pos_mask = (pos_labels != -100).to(model_dtype)
+            neg_mask = (neg_labels != -100).to(model_dtype)
 
-                # Pairwise ranking loss
-                value_loss = pairwise_ranking_loss(
-                    v_pos=pos_value_logits,
-                    v_neg=neg_value_logits,
-                    mask_pos=pos_mask,
-                    mask_neg=neg_mask,
-                )
+            # Pairwise ranking loss
+            value_loss = pairwise_ranking_loss(
+                v_pos=pos_value_logits,
+                v_neg=neg_value_logits,
+                mask_pos=pos_mask,
+                mask_neg=neg_mask,
+            )
 
-                # Pairwise 메트릭 누적
-                pairwise_metrics = compute_pairwise_accuracy(
-                    v_pos=pos_value_logits,
-                    v_neg=neg_value_logits,
-                    mask_pos=pos_mask,
-                    mask_neg=neg_mask,
-                )
-                train_correct_pairs += pairwise_metrics["correct_pairs"]
-                train_total_pairs += pairwise_metrics["total_pairs"]
-                train_mean_pos_sum += pairwise_metrics["mean_pos"]
-                train_mean_neg_sum += pairwise_metrics["mean_neg"]
+            # Pairwise 메트릭 누적
+            pairwise_metrics = compute_pairwise_accuracy(
+                v_pos=pos_value_logits,
+                v_neg=neg_value_logits,
+                mask_pos=pos_mask,
+                mask_neg=neg_mask,
+            )
+            train_correct_pairs += pairwise_metrics["correct_pairs"]
+            train_total_pairs += pairwise_metrics["total_pairs"]
+            train_mean_pos_sum += pairwise_metrics["mean_pos"]
+            train_mean_neg_sum += pairwise_metrics["mean_neg"]
 
-                # Throughput용 변수
-                batch_size_actual = pos_input_ids.size(0) * 2  # pos + neg
-                n_tokens = pos_attention_mask.sum().item() + neg_attention_mask.sum().item()
-                value_logits = pos_value_logits  # 로깅용
-                valid_label_mask = pos_mask.unsqueeze(-1)  # 로깅용 placeholder
-                is_correct = torch.ones(pos_input_ids.size(0), device=device)  # placeholder
-
-            else:
-                # 기존 Pointwise 모드
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
-                labels = batch["labels"].to(device)
-                is_correct = batch["is_correct"].to(device)
-
-                # 모델 dtype 일치
-                rewards = is_correct.to(model_dtype)
-                outputs = adapter(input_ids, attention_mask, return_value_logits=True)
-                value_logits = outputs["value_logits"]
-
-                batch_size, seq_len, _ = value_logits.shape
-
-                # TD target 계산 (MC 방식 삭제, TD Learning 적용)
-                td_targets = compute_td_targets(
-                    value_logits=value_logits,
-                    rewards=rewards,
-                    attention_mask=attention_mask,
-                    gamma=config.training.gamma,
-                    lam=getattr(config.training, "lam", 0.0),
-                )
-
-                # Mask padded tokens AND instruction tokens (labels != -100)
-                valid_label_mask = (labels != -100).unsqueeze(-1).to(model_dtype)
-                attn_mask_expanded = attention_mask.unsqueeze(-1).to(model_dtype)
-                loss_mask = valid_label_mask * attn_mask_expanded
-
-                # Value loss 계산 (value_head_type에 따라 분기)
-                value_head_type = config.training.value_head_type
-                if value_head_type == "sigmoid":
-                    # BCE loss (sigmoid 출력)
-                    loss_per_token = torch.nn.functional.binary_cross_entropy(
-                        value_logits, td_targets, reduction="none"
-                    )
-                else:
-                    # MSE loss (linear, mlp)
-                    loss_per_token = torch.nn.functional.mse_loss(
-                        value_logits, td_targets, reduction="none"
-                    )
-
-                masked_loss = loss_per_token * loss_mask
-                value_loss = masked_loss.sum() / (loss_mask.sum() + 1e-8)
-
-                # Throughput용 변수
-                batch_size_actual = input_ids.size(0)
-                n_tokens = attention_mask.sum().item()
+            # Throughput용 변수
+            batch_size_actual = pos_input_ids.size(0) * 2  # pos + neg
+            n_tokens = pos_attention_mask.sum().item() + neg_attention_mask.sum().item()
 
             # Loss scaling (gradient accumulation 적용)
             scaled_loss = value_loss / gradient_accumulation_steps
@@ -831,22 +549,6 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             # Period metrics 누적 (batch 단위)
             period_metrics_sum["train_loss"] += value_loss.item()
-
-            # Train 분류 메트릭 count 누적 (micro-average) - Pointwise 모드에서만
-            if not is_pairwise:
-                valid_mask_2d = (labels != -100).to(model_dtype)
-                cls_counts = compute_critic_classification_counts(
-                    value_logits=value_logits,
-                    is_correct=is_correct,
-                    attention_mask=valid_mask_2d,
-                )
-                train_tp += cls_counts["tp"]
-                train_fp += cls_counts["fp"]
-                train_fn += cls_counts["fn"]
-                train_correct_sum += cls_counts["correct_sum"]
-                train_correct_count += cls_counts["correct_count"]
-                train_incorrect_sum += cls_counts["incorrect_sum"]
-                train_incorrect_count += cls_counts["incorrect_count"]
 
             # Optimizer step (accumulation 완료 시에만)
             if accumulation_counter >= gradient_accumulation_steps:
@@ -887,98 +589,45 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     # Value head LR 가져오기 (param_groups[1]이 value_head)
                     value_head_lr = optimizer.param_groups[1]["lr"] if len(optimizer.param_groups) > 1 else optimizer.param_groups[0]["lr"]
 
-                    if is_pairwise:
-                        # Pairwise 모드: pairwise accuracy, mean_pos, mean_neg
-                        batch_pairwise_acc = pairwise_metrics["pairwise_accuracy"]
-                        batch_mean_pos = pairwise_metrics["mean_pos"]
-                        batch_mean_neg = pairwise_metrics["mean_neg"]
+                    # Pairwise 메트릭 로깅
+                    batch_pairwise_acc = pairwise_metrics["pairwise_accuracy"]
+                    batch_mean_pos = pairwise_metrics["mean_pos"]
+                    batch_mean_neg = pairwise_metrics["mean_neg"]
 
-                        reduced = all_reduce_scalars({
-                            "loss": value_loss.item(),
-                            "pairwise_accuracy": batch_pairwise_acc,
-                            "mean_pos": batch_mean_pos,
-                            "mean_neg": batch_mean_neg,
-                        })
-                        avg_loss = reduced["loss"]
-                        avg_pairwise_acc = reduced["pairwise_accuracy"]
-                        avg_mean_pos = reduced["mean_pos"]
-                        avg_mean_neg = reduced["mean_neg"]
+                    reduced = all_reduce_scalars({
+                        "loss": value_loss.item(),
+                        "pairwise_accuracy": batch_pairwise_acc,
+                        "mean_pos": batch_mean_pos,
+                        "mean_neg": batch_mean_neg,
+                    })
+                    avg_loss = reduced["loss"]
+                    avg_pairwise_acc = reduced["pairwise_accuracy"]
+                    avg_mean_pos = reduced["mean_pos"]
+                    avg_mean_neg = reduced["mean_neg"]
 
-                        if is_main_process():
-                            if use_mlflow:
-                                mlflow.log_metrics(
-                                    {
-                                        "train/loss": avg_loss,
-                                        "train/grad_norm": avg_grad_norm_post,
-                                        "train/learning_rate": value_head_lr,
-                                        "train/pairwise_accuracy": avg_pairwise_acc,
-                                        "value/mean_pos": avg_mean_pos,
-                                        "value/mean_neg": avg_mean_neg,
-                                        "value/margin": avg_mean_pos - avg_mean_neg,
-                                        "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
-                                        "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
-                                    },
-                                    step=global_step,
-                                )
-                        logger.info(
-                            f"Step {global_step}/{total_optimization_steps}, "
-                            f"Loss: {avg_loss:.4f}, "
-                            f"Pairwise Acc: {avg_pairwise_acc:.3f}, "
-                            f"Margin: {avg_mean_pos - avg_mean_neg:.4f}, "
-                            f"LR: {value_head_lr:.2e}"
-                        )
-                    else:
-                        # Pointwise 모드: mean_correct, mean_incorrect
-                        # Value prediction std 계산 (유효 토큰만)
-                        valid_values = value_logits[valid_label_mask.bool()]
-                        value_std = valid_values.std().item() if valid_values.numel() > 0 else 0.0
-
-                        # 배치 단위 mean_correct/mean_incorrect 계산
-                        batch_correct_mask = is_correct.bool()
-                        batch_incorrect_mask = ~batch_correct_mask
-                        valid_mask_2d_step = valid_label_mask.squeeze(-1).bool()
-
-                        # correct 시퀀스 내 토큰 평균
-                        correct_token_mask = batch_correct_mask.view(-1, 1).expand_as(valid_mask_2d_step) & valid_mask_2d_step
-                        batch_mean_correct = value_logits.squeeze(-1)[correct_token_mask].mean().item() if correct_token_mask.any() else 0.0
-
-                        # incorrect 시퀀스 내 토큰 평균
-                        incorrect_token_mask = batch_incorrect_mask.view(-1, 1).expand_as(valid_mask_2d_step) & valid_mask_2d_step
-                        batch_mean_incorrect = value_logits.squeeze(-1)[incorrect_token_mask].mean().item() if incorrect_token_mask.any() else 0.0
-
-                        # Loss, std, mean_correct/incorrect all_reduce (1회 통신)
-                        reduced = all_reduce_scalars({
-                            "loss": value_loss.item(),
-                            "value_std": value_std,
-                            "mean_correct": batch_mean_correct,
-                            "mean_incorrect": batch_mean_incorrect,
-                        })
-                        avg_loss = reduced["loss"]
-                        avg_value_std = reduced["value_std"]
-                        avg_mean_correct = reduced["mean_correct"]
-                        avg_mean_incorrect = reduced["mean_incorrect"]
-
-                        if is_main_process():
-                            if use_mlflow:
-                                mlflow.log_metrics(
-                                    {
-                                        "train/loss": avg_loss,
-                                        "train/grad_norm": avg_grad_norm_post,
-                                        "train/learning_rate": value_head_lr,
-                                        "value/std": avg_value_std,
-                                        "value/mean_correct": avg_mean_correct,
-                                        "value/mean_incorrect": avg_mean_incorrect,
-                                        "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
-                                        "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
-                                    },
-                                    step=global_step,
-                                )
-                        logger.info(
-                            f"Step {global_step}/{total_optimization_steps}, "
-                            f"Loss: {avg_loss:.4f}, "
-                            f"Grad Norm: {avg_grad_norm_post:.4f}, "
-                            f"LR: {value_head_lr:.2e}"
-                        )
+                    if is_main_process():
+                        if use_mlflow:
+                            mlflow.log_metrics(
+                                {
+                                    "train/loss": avg_loss,
+                                    "train/grad_norm": avg_grad_norm_post,
+                                    "train/learning_rate": value_head_lr,
+                                    "train/pairwise_accuracy": avg_pairwise_acc,
+                                    "value/mean_pos": avg_mean_pos,
+                                    "value/mean_neg": avg_mean_neg,
+                                    "value/margin": avg_mean_pos - avg_mean_neg,
+                                    "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
+                                    "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
+                                },
+                                step=global_step,
+                            )
+                    logger.info(
+                        f"Step {global_step}/{total_optimization_steps}, "
+                        f"Loss: {avg_loss:.4f}, "
+                        f"Pairwise Acc: {avg_pairwise_acc:.3f}, "
+                        f"Margin: {avg_mean_pos - avg_mean_neg:.4f}, "
+                        f"LR: {value_head_lr:.2e}"
+                    )
 
         # Period loop 종료
 
@@ -1012,216 +661,96 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         # GPU metrics (epoch-level)
         gpu_metrics_epoch = gpu_monitor.get_metrics()
 
-        if is_pairwise:
-            # Pairwise 모드: pairwise accuracy 기반 메트릭
-            reduced_train_pairwise = all_reduce_scalars({
-                "train_loss": train_loss_avg,
-                "train_correct_pairs": train_correct_pairs,
-                "train_total_pairs": train_total_pairs,
-                "train_mean_pos_sum": train_mean_pos_sum,
-                "train_mean_neg_sum": train_mean_neg_sum,
-            }, op="sum")
+        # Pairwise 메트릭 계산
+        reduced_train_pairwise = all_reduce_scalars({
+            "train_loss": train_loss_avg,
+            "train_correct_pairs": train_correct_pairs,
+            "train_total_pairs": train_total_pairs,
+            "train_mean_pos_sum": train_mean_pos_sum,
+            "train_mean_neg_sum": train_mean_neg_sum,
+        }, op="sum")
 
-            world_sz = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
-            train_loss_avg = reduced_train_pairwise["train_loss"] / max(1, world_sz)
-            train_pairwise_acc = reduced_train_pairwise["train_correct_pairs"] / max(1, reduced_train_pairwise["train_total_pairs"])
-            train_mean_pos = reduced_train_pairwise["train_mean_pos_sum"] / max(1, period_batches * world_sz)
-            train_mean_neg = reduced_train_pairwise["train_mean_neg_sum"] / max(1, period_batches * world_sz)
-            train_margin = train_mean_pos - train_mean_neg
+        world_sz = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+        train_loss_avg = reduced_train_pairwise["train_loss"] / max(1, world_sz)
+        train_pairwise_acc = reduced_train_pairwise["train_correct_pairs"] / max(1, reduced_train_pairwise["train_total_pairs"])
+        train_mean_pos = reduced_train_pairwise["train_mean_pos_sum"] / max(1, period_batches * world_sz)
+        train_mean_neg = reduced_train_pairwise["train_mean_neg_sum"] / max(1, period_batches * world_sz)
+        train_margin = train_mean_pos - train_mean_neg
 
-            logger.info(
-                f"Epoch {current_epoch:.2f} 도달 - "
-                f"Train Loss: {train_loss_avg:.4f}, "
-                f"Pairwise Acc: {train_pairwise_acc:.3f}, "
-                f"Margin: {train_margin:.4f}"
-            )
+        logger.info(
+            f"Epoch {current_epoch:.2f} 도달 - "
+            f"Train Loss: {train_loss_avg:.4f}, "
+            f"Pairwise Acc: {train_pairwise_acc:.3f}, "
+            f"Margin: {train_margin:.4f}"
+        )
 
-            # Validation (Pairwise)
-            logger.info(f"--- Validation at epoch {current_epoch:.2f} ---")
+        # Validation
+        logger.info(f"--- Validation at epoch {current_epoch:.2f} ---")
 
-            val_metrics = validate_critic_pairwise(
-                adapter=adapter,
-                dataloader=val_loader,
-                device=device,
-                return_raw_counts=True,
-            )
+        val_metrics = validate_critic(
+            adapter=adapter,
+            dataloader=val_loader,
+            device=device,
+            return_raw_counts=True,
+        )
 
-            # Validation raw counts all_reduce
-            raw_counts = val_metrics["_raw_counts"]
-            reduced_val_counts = all_reduce_scalars({
-                "loss_sum": raw_counts["loss_sum"],
-                "n_batches": raw_counts["n_batches"],
-                "correct_pairs": raw_counts["correct_pairs"],
-                "total_pairs": raw_counts["total_pairs"],
-                "mean_pos_sum": raw_counts["mean_pos_sum"],
-                "mean_neg_sum": raw_counts["mean_neg_sum"],
-            }, op="sum")
+        # Validation raw counts all_reduce
+        raw_counts = val_metrics["_raw_counts"]
+        reduced_val_counts = all_reduce_scalars({
+            "loss_sum": raw_counts["loss_sum"],
+            "n_batches": raw_counts["n_batches"],
+            "correct_pairs": raw_counts["correct_pairs"],
+            "total_pairs": raw_counts["total_pairs"],
+            "mean_pos_sum": raw_counts["mean_pos_sum"],
+            "mean_neg_sum": raw_counts["mean_neg_sum"],
+        }, op="sum")
 
-            avg_val_loss = reduced_val_counts["loss_sum"] / max(1, reduced_val_counts["n_batches"])
-            avg_val_pairwise_acc = reduced_val_counts["correct_pairs"] / max(1, reduced_val_counts["total_pairs"])
-            avg_val_mean_pos = reduced_val_counts["mean_pos_sum"] / max(1, reduced_val_counts["n_batches"])
-            avg_val_mean_neg = reduced_val_counts["mean_neg_sum"] / max(1, reduced_val_counts["n_batches"])
-            avg_val_margin = avg_val_mean_pos - avg_val_mean_neg
+        avg_val_loss = reduced_val_counts["loss_sum"] / max(1, reduced_val_counts["n_batches"])
+        avg_val_pairwise_acc = reduced_val_counts["correct_pairs"] / max(1, reduced_val_counts["total_pairs"])
+        avg_val_mean_pos = reduced_val_counts["mean_pos_sum"] / max(1, reduced_val_counts["n_batches"])
+        avg_val_mean_neg = reduced_val_counts["mean_neg_sum"] / max(1, reduced_val_counts["n_batches"])
+        avg_val_margin = avg_val_mean_pos - avg_val_mean_neg
 
-            # Epoch-level 로깅 (Pairwise)
-            if is_main_process():
-                if use_mlflow:
-                    mlflow.log_metrics(
-                        {
-                            # Train metrics
-                            "train/epoch_loss": train_loss_avg,
-                            "train/pairwise_accuracy": train_pairwise_acc,
-                            "train/mean_pos": train_mean_pos,
-                            "train/mean_neg": train_mean_neg,
-                            "train/margin": train_margin,
-                            # Validation metrics
-                            "val/loss": avg_val_loss,
-                            "val/pairwise_accuracy": avg_val_pairwise_acc,
-                            "val/mean_pos": avg_val_mean_pos,
-                            "val/mean_neg": avg_val_mean_neg,
-                            "val/margin": avg_val_margin,
-                            # Performance metrics
-                            "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
-                            "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
-                            "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
-                            "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
-                        },
-                        step=global_step,
-                    )
+        # Epoch-level 로깅
+        if is_main_process():
+            if use_mlflow:
+                mlflow.log_metrics(
+                    {
+                        # Train metrics
+                        "train/epoch_loss": train_loss_avg,
+                        "train/pairwise_accuracy": train_pairwise_acc,
+                        "train/mean_pos": train_mean_pos,
+                        "train/mean_neg": train_mean_neg,
+                        "train/margin": train_margin,
+                        # Validation metrics
+                        "val/loss": avg_val_loss,
+                        "val/pairwise_accuracy": avg_val_pairwise_acc,
+                        "val/mean_pos": avg_val_mean_pos,
+                        "val/mean_neg": avg_val_mean_neg,
+                        "val/margin": avg_val_margin,
+                        # Performance metrics
+                        "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
+                        "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
+                        "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
+                        "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
+                    },
+                    step=global_step,
+                )
 
-            logger.info(
-                f"Validation - Loss: {avg_val_loss:.4f}, "
-                f"Pairwise Acc: {avg_val_pairwise_acc:.3f}, "
-                f"Margin: {avg_val_margin:.4f}"
-            )
+        logger.info(
+            f"Validation - Loss: {avg_val_loss:.4f}, "
+            f"Pairwise Acc: {avg_val_pairwise_acc:.3f}, "
+            f"Margin: {avg_val_margin:.4f}"
+        )
 
-            # Aggregated validation metrics (checkpoint 저장용)
-            aggregated_val_metrics = {
-                "val_loss": avg_val_loss,
-                "val_pairwise_accuracy": avg_val_pairwise_acc,
-                "val_mean_pos": avg_val_mean_pos,
-                "val_mean_neg": avg_val_mean_neg,
-                "val_margin": avg_val_margin,
-            }
-
-        else:
-            # Pointwise 모드: classification 기반 메트릭
-            reduced_train = all_reduce_scalars({
-                "train_loss": train_loss_avg,
-                "train_tp": train_tp,
-                "train_fp": train_fp,
-                "train_fn": train_fn,
-                "train_correct_sum": train_correct_sum,
-                "train_correct_count": train_correct_count,
-                "train_incorrect_sum": train_incorrect_sum,
-                "train_incorrect_count": train_incorrect_count,
-            }, op="sum")
-            train_loss_avg = reduced_train["train_loss"] / max(1, torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1)
-
-            train_cls_metrics = compute_classification_metrics_from_counts(
-                tp=reduced_train["train_tp"],
-                fp=reduced_train["train_fp"],
-                fn=reduced_train["train_fn"],
-                correct_sum=reduced_train["train_correct_sum"],
-                correct_count=reduced_train["train_correct_count"],
-                incorrect_sum=reduced_train["train_incorrect_sum"],
-                incorrect_count=reduced_train["train_incorrect_count"],
-            )
-
-            logger.info(
-                f"Epoch {current_epoch:.2f} 도달 - "
-                f"Train Loss: {train_loss_avg:.4f}, "
-                f"Pred Gap: {train_cls_metrics['pred_gap']:.4f}, "
-                f"F1: {train_cls_metrics['f1']:.3f}"
-            )
-
-            # Validation (Pointwise)
-            logger.info(f"--- Validation at epoch {current_epoch:.2f} ---")
-
-            val_metrics = validate_critic(
-                adapter=adapter,
-                dataloader=val_loader,
-                device=device,
-                gamma=config.training.gamma,
-                lam=getattr(config.training, "lam", 0.0),
-                value_head_type=config.training.value_head_type,
-                return_raw_counts=True,
-            )
-
-            raw_counts = val_metrics["_raw_counts"]
-            reduced_val_counts = all_reduce_scalars({
-                "loss_sum": raw_counts["loss_sum"],
-                "n_batches": raw_counts["n_batches"],
-                "tp": raw_counts["tp"],
-                "fp": raw_counts["fp"],
-                "fn": raw_counts["fn"],
-                "correct_sum": raw_counts["correct_sum"],
-                "correct_count": raw_counts["correct_count"],
-                "incorrect_sum": raw_counts["incorrect_sum"],
-                "incorrect_count": raw_counts["incorrect_count"],
-            }, op="sum")
-
-            avg_val_loss = reduced_val_counts["loss_sum"] / max(1, reduced_val_counts["n_batches"])
-            val_cls_metrics = compute_classification_metrics_from_counts(
-                tp=reduced_val_counts["tp"],
-                fp=reduced_val_counts["fp"],
-                fn=reduced_val_counts["fn"],
-                correct_sum=reduced_val_counts["correct_sum"],
-                correct_count=reduced_val_counts["correct_count"],
-                incorrect_sum=reduced_val_counts["incorrect_sum"],
-                incorrect_count=reduced_val_counts["incorrect_count"],
-            )
-            avg_val_pred_gap = val_cls_metrics["pred_gap"]
-            avg_val_mean_correct = val_cls_metrics["mean_correct"]
-            avg_val_mean_incorrect = val_cls_metrics["mean_incorrect"]
-            avg_val_precision = val_cls_metrics["precision"]
-            avg_val_recall = val_cls_metrics["recall"]
-            avg_val_f1 = val_cls_metrics["f1"]
-
-            # Epoch-level 로깅 (Pointwise)
-            if is_main_process():
-                if use_mlflow:
-                    mlflow.log_metrics(
-                        {
-                            # Train metrics
-                            "train/epoch_loss": train_loss_avg,
-                            "train/mean_correct": train_cls_metrics["mean_correct"],
-                            "train/mean_incorrect": train_cls_metrics["mean_incorrect"],
-                            "train/precision": train_cls_metrics["precision"],
-                            "train/recall": train_cls_metrics["recall"],
-                            "train/f1": train_cls_metrics["f1"],
-                            # Validation metrics
-                            "val/loss": avg_val_loss,
-                            "val/mean_correct": avg_val_mean_correct,
-                            "val/mean_incorrect": avg_val_mean_incorrect,
-                            "val/precision": avg_val_precision,
-                            "val/recall": avg_val_recall,
-                            "val/f1": avg_val_f1,
-                            # Performance metrics
-                            "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
-                            "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
-                            "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
-                            "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
-                        },
-                        step=global_step,
-                    )
-
-            logger.info(
-                f"Validation - Loss: {avg_val_loss:.4f}, "
-                f"Pred Gap: {avg_val_pred_gap:.4f}, "
-                f"F1: {avg_val_f1:.3f}"
-            )
-
-            # Aggregated validation metrics (checkpoint 저장용)
-            aggregated_val_metrics = {
-                "val_loss": avg_val_loss,
-                "val_pred_gap": avg_val_pred_gap,
-                "val_mean_correct": avg_val_mean_correct,
-                "val_mean_incorrect": avg_val_mean_incorrect,
-                "val_precision": avg_val_precision,
-                "val_recall": avg_val_recall,
-                "val_f1": avg_val_f1,
-            }
+        # Aggregated validation metrics (checkpoint 저장용)
+        aggregated_val_metrics = {
+            "val_loss": avg_val_loss,
+            "val_pairwise_accuracy": avg_val_pairwise_acc,
+            "val_mean_pos": avg_val_mean_pos,
+            "val_mean_neg": avg_val_mean_neg,
+            "val_margin": avg_val_margin,
+        }
 
         # Checkpoint 저장 (validation loss 개선 시만)
         if avg_val_loss < best_val_loss:
@@ -1268,93 +797,42 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         next_checkpoint_epoch += save_checkpoint_every
 
     # 8. Final checkpoint
-    # is_pairwise를 while loop 밖에서 재정의 (final checkpoint용)
-    is_pairwise_final = use_pairwise
-
     if config.checkpoint.save_final:
         final_path = checkpoint_dir / "checkpoint_final.pt"
 
         # 최종 validation 실행
         logger.info("--- Final Validation ---")
 
-        if is_pairwise_final:
-            # Pairwise 모드
-            final_val_raw = validate_critic_pairwise(
-                adapter=adapter,
-                dataloader=val_loader,
-                device=device,
-                return_raw_counts=True,
-            )
+        final_val_raw = validate_critic(
+            adapter=adapter,
+            dataloader=val_loader,
+            device=device,
+            return_raw_counts=True,
+        )
 
-            final_raw_counts = final_val_raw["_raw_counts"]
-            reduced_final_counts = all_reduce_scalars({
-                "loss_sum": final_raw_counts["loss_sum"],
-                "n_batches": final_raw_counts["n_batches"],
-                "correct_pairs": final_raw_counts["correct_pairs"],
-                "total_pairs": final_raw_counts["total_pairs"],
-                "mean_pos_sum": final_raw_counts["mean_pos_sum"],
-                "mean_neg_sum": final_raw_counts["mean_neg_sum"],
-            }, op="sum")
+        final_raw_counts = final_val_raw["_raw_counts"]
+        reduced_final_counts = all_reduce_scalars({
+            "loss_sum": final_raw_counts["loss_sum"],
+            "n_batches": final_raw_counts["n_batches"],
+            "correct_pairs": final_raw_counts["correct_pairs"],
+            "total_pairs": final_raw_counts["total_pairs"],
+            "mean_pos_sum": final_raw_counts["mean_pos_sum"],
+            "mean_neg_sum": final_raw_counts["mean_neg_sum"],
+        }, op="sum")
 
-            final_avg_loss = reduced_final_counts["loss_sum"] / max(1, reduced_final_counts["n_batches"])
-            final_pairwise_acc = reduced_final_counts["correct_pairs"] / max(1, reduced_final_counts["total_pairs"])
-            final_mean_pos = reduced_final_counts["mean_pos_sum"] / max(1, reduced_final_counts["n_batches"])
-            final_mean_neg = reduced_final_counts["mean_neg_sum"] / max(1, reduced_final_counts["n_batches"])
-            final_margin = final_mean_pos - final_mean_neg
+        final_avg_loss = reduced_final_counts["loss_sum"] / max(1, reduced_final_counts["n_batches"])
+        final_pairwise_acc = reduced_final_counts["correct_pairs"] / max(1, reduced_final_counts["total_pairs"])
+        final_mean_pos = reduced_final_counts["mean_pos_sum"] / max(1, reduced_final_counts["n_batches"])
+        final_mean_neg = reduced_final_counts["mean_neg_sum"] / max(1, reduced_final_counts["n_batches"])
+        final_margin = final_mean_pos - final_mean_neg
 
-            final_val_metrics = {
-                "val_loss": final_avg_loss,
-                "val_pairwise_accuracy": final_pairwise_acc,
-                "val_mean_pos": final_mean_pos,
-                "val_mean_neg": final_mean_neg,
-                "val_margin": final_margin,
-            }
-
-        else:
-            # Pointwise 모드
-            final_val_raw = validate_critic(
-                adapter=adapter,
-                dataloader=val_loader,
-                device=device,
-                gamma=config.training.gamma,
-                lam=getattr(config.training, "lam", 0.0),
-                value_head_type=config.training.value_head_type,
-                return_raw_counts=True,
-            )
-
-            final_raw_counts = final_val_raw["_raw_counts"]
-            reduced_final_counts = all_reduce_scalars({
-                "loss_sum": final_raw_counts["loss_sum"],
-                "n_batches": final_raw_counts["n_batches"],
-                "tp": final_raw_counts["tp"],
-                "fp": final_raw_counts["fp"],
-                "fn": final_raw_counts["fn"],
-                "correct_sum": final_raw_counts["correct_sum"],
-                "correct_count": final_raw_counts["correct_count"],
-                "incorrect_sum": final_raw_counts["incorrect_sum"],
-                "incorrect_count": final_raw_counts["incorrect_count"],
-            }, op="sum")
-
-            final_avg_loss = reduced_final_counts["loss_sum"] / max(1, reduced_final_counts["n_batches"])
-            final_cls_metrics = compute_classification_metrics_from_counts(
-                tp=reduced_final_counts["tp"],
-                fp=reduced_final_counts["fp"],
-                fn=reduced_final_counts["fn"],
-                correct_sum=reduced_final_counts["correct_sum"],
-                correct_count=reduced_final_counts["correct_count"],
-                incorrect_sum=reduced_final_counts["incorrect_sum"],
-                incorrect_count=reduced_final_counts["incorrect_count"],
-            )
-
-            final_val_metrics = {
-                "val_loss": final_avg_loss,
-                "val_pred_gap": final_cls_metrics["pred_gap"],
-                "val_mean_correct": final_cls_metrics["mean_correct"],
-                "val_mean_incorrect": final_cls_metrics["mean_incorrect"],
-                "val_precision": final_cls_metrics["precision"],
-                "val_recall": final_cls_metrics["recall"],
-                "val_f1": final_cls_metrics["f1"],
-            }
+        final_val_metrics = {
+            "val_loss": final_avg_loss,
+            "val_pairwise_accuracy": final_pairwise_acc,
+            "val_mean_pos": final_mean_pos,
+            "val_mean_neg": final_mean_neg,
+            "val_margin": final_margin,
+        }
 
         save_checkpoint(
             adapter=adapter,

@@ -104,7 +104,7 @@ def validate_baseline(
             batch_size, seq_len, n_future, vocab_size = logits.shape
 
             # 3. Uniform CE loss (모든 토큰 weight=1.0)
-            batch_ce_loss = 0.0
+            batch_ce_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
 
             for k in range(1, n_future + 1):
                 valid_len = seq_len - k
@@ -255,8 +255,6 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
     # sampling_config를 dict로 변환
     sampling_config = OmegaConf.to_container(config.data_sampling, resolve=True)
-    sampling_method = sampling_config.get("sampling_method")
-    logger.info(f"샘플링 방식: {sampling_method}")
 
     train_loader = create_dataloader(
         dataset_path=config.dataset.train,
@@ -268,11 +266,9 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
         shuffle=True,
     )
 
-    # Validation용 sampling_config (동일 방식, val_n_samples 사용)
+    # Validation용 sampling_config (n_samples를 val_n_samples로 변경)
     val_sampling_config = sampling_config.copy()
-    if sampling_method == "difficulty":
-        val_sampling_config["difficulty"] = val_sampling_config.get("difficulty", {}).copy()
-        val_sampling_config["difficulty"]["n_samples"] = config.data_sampling.val_n_samples
+    val_sampling_config["n_samples"] = config.data_sampling.val_n_samples
 
     val_loader = create_dataloader(
         dataset_path=config.dataset.validation,
@@ -410,7 +406,7 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             batch_size, seq_len, n_future, vocab_size = logits.shape
 
             # Uniform CE loss (모든 토큰 weight=1.0)
-            batch_ce_loss = 0.0
+            batch_ce_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
 
             for k in range(1, n_future + 1):
                 valid_len = seq_len - k
@@ -439,7 +435,13 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
             # Loss scaling (gradient accumulation 적용)
             scaled_loss = ce_loss / gradient_accumulation_steps
-            scaled_loss.backward()
+
+            # 유효 토큰이 있는 경우에만 backward (grad_fn 체크)
+            if scaled_loss.grad_fn is not None:
+                scaled_loss.backward()
+            else:
+                # 모든 label이 -100인 경우 (학습 대상 토큰 없음)
+                logger.warning(f"Batch {batch_count}: No valid tokens for training, skipping backward")
 
             accumulation_counter += 1
             batch_count += 1

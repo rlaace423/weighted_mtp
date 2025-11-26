@@ -47,15 +47,13 @@ def pairwise_test_config():
             "name": "codecontests",
             "train": "storage/datasets/codecontests/processed/train.jsonl",
             "validation": "storage/datasets/codecontests/processed/valid.jsonl",
-            "max_length": 256,  # 테스트용 짧은 길이
+            "max_length": 1024,  # 충분한 길이
         },
         "data_sampling": {
             "seed": 42,
-            "val_n_samples": 10,
+            "val_n_samples": 50,
             "use_pairwise": True,
-            "n_samples": 50,  # difficulty 기반 샘플링 후 pairwise 쌍 생성
-            "auto_data_balancing": True,
-            "correct_ratio": 0.5,
+            "n_samples": 200,  # 최종 쌍 수 (pairwise 모드)
             "difficulty_bins": {
                 "diff_7": [7, 7],
                 "else": [8, 25],
@@ -76,8 +74,6 @@ def pairwise_test_config():
             "value_head_type": "mlp",
             "dropout": 0.1,
             "log_interval": 1,
-            "gamma": 1.0,
-            "lam": 1.0,
             "lr_scheduler": {
                 "type": "constant",
                 "warmup_ratio": 0.0,
@@ -200,8 +196,6 @@ def test_pairwise_batch_structure():
         "seed": 42,
         "use_pairwise": True,
         "n_samples": 500,  # 동일 problem_id 쌍 생성을 위해 충분한 샘플 필요
-        "auto_data_balancing": True,
-        "correct_ratio": 0.5,
         "difficulty_bins": {
             "diff_7": [7, 7],
             "else": [8, 25],
@@ -262,7 +256,7 @@ def test_pairwise_batch_structure():
 def test_pairwise_loss_computation():
     """Pairwise loss 계산 검증"""
     import torch
-    from weighted_mtp.pipelines.run_critic import (
+    from weighted_mtp.utils import (
         pairwise_ranking_loss,
         compute_pairwise_accuracy,
     )
@@ -308,7 +302,7 @@ def test_pairwise_loss_computation():
 def test_pairwise_loss_gradient():
     """Pairwise loss의 gradient 계산 가능 여부"""
     import torch
-    from weighted_mtp.pipelines.run_critic import pairwise_ranking_loss
+    from weighted_mtp.utils import pairwise_ranking_loss
 
     batch_size = 2
     seq_len = 64
@@ -341,7 +335,7 @@ def test_pairwise_expected_behavior():
     V(pos) < V(neg)이면 loss 증가
     """
     import torch
-    from weighted_mtp.pipelines.run_critic import pairwise_ranking_loss
+    from weighted_mtp.utils import pairwise_ranking_loss
 
     batch_size = 4
     seq_len = 64
