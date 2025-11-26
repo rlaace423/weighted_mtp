@@ -103,18 +103,26 @@ def validate_verifiable(
 
             pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
 
-            # Forward (Positive) - 메모리 효율적 분리 실행
-            trunk_output = adapter.trunk_forward(pos_input_ids)
-            pos_value_logits = adapter.value_forward(trunk_output, detach=False)
+            # Forward (Positive)
+            pos_outputs = adapter(
+                pos_input_ids,
+                pos_attention_mask,
+                return_value_logits=True,
+                return_hidden_states=True
+            )
+            pos_logits = pos_outputs["logits"]
+            pos_value_logits = pos_outputs["value_logits"]
 
             # Forward (Negative)
-            neg_trunk_output = adapter.trunk_forward(neg_input_ids)
-            neg_value_logits = adapter.value_forward(neg_trunk_output, detach=False)
-            del neg_trunk_output
+            neg_outputs = adapter(
+                neg_input_ids,
+                neg_attention_mask,
+                return_value_logits=True,
+                return_hidden_states=False
+            )
+            neg_value_logits = neg_outputs["value_logits"]
 
-            batch_size, seq_len = pos_input_ids.shape
-            n_future = adapter.model_args.n_future_tokens
-            vocab_size = adapter.model_args.vocab_size
+            batch_size, seq_len, n_future, vocab_size = pos_logits.shape
 
             # TD error (Positive만 - Policy weighting용)
             # Response 토큰 마스크 (labels != -100)
@@ -123,7 +131,7 @@ def validate_verifiable(
             td_errors = compute_td_errors(
                 value_logits=pos_value_logits,
                 rewards=pos_rewards,
-                attention_mask=pos_response_mask,
+                attention_mask=pos_attention_mask,
                 gamma=1.0,
             )
             weights = build_weights(
@@ -134,14 +142,13 @@ def validate_verifiable(
                 max_weight=weight_clip_max,
             )
 
-            # Policy Loss (Positive만, TD Weighted) - head별 순차 계산
+            # Policy Loss (Positive만, TD Weighted)
             batch_weighted_ce_loss = 0.0
             batch_unweighted_ce_loss = 0.0
 
-            for head_idx in range(n_future):
-                k = head_idx + 1
+            for k in range(1, n_future + 1):
                 valid_len = seq_len - k
-                logits_k = adapter.head_forward(trunk_output, head_idx)[:, :valid_len, :]
+                logits_k = pos_logits[:, :valid_len, k - 1, :]
                 labels_k = pos_labels[:, k : k + valid_len]
                 weights_k = weights[:, k : k + valid_len]
                 mask_k = pos_attention_mask[:, k : k + valid_len]
@@ -162,10 +169,6 @@ def validate_verifiable(
                 if mask_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
                     batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
-
-                del logits_k
-
-            del trunk_output
 
             weighted_ce_loss = batch_weighted_ce_loss / n_future
             unweighted_ce_loss = batch_unweighted_ce_loss / n_future
@@ -485,30 +488,42 @@ def run_verifiable_training(
             # Positive sample: reward=1 (correct)
             pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
 
-            # Forward (Positive) - 메모리 효율적 분리 실행
+            # Forward (Positive) - Policy Loss + Value Loss 사용
+            pos_outputs = adapter(
+                pos_input_ids,
+                pos_attention_mask,
+                return_value_logits=True,
+                return_hidden_states=True
+            )
+            pos_logits = pos_outputs["logits"]
+            pos_value_logits = pos_outputs["value_logits"]
+            pos_hidden_states = pos_outputs["hidden_states"]
+
+            # Value head용 value_logits (trunk gradient 차단)
             # trunk은 weighted_ce_loss로만 학습, value_head는 pairwise_loss로만 학습
-            # logits [B, S, 4, vocab]을 한 번에 유지하지 않고 head별 순차 처리 (8.4GB → 2.1GB)
-            trunk_output = adapter.trunk_forward(pos_input_ids)
-            pos_value_logits = adapter.value_forward(trunk_output, detach=True)
+            pos_hidden_detached = pos_hidden_states.detach()
+            pos_value_for_ranking = adapter.value_head(pos_hidden_detached)
 
             # Forward (Negative) - Value Loss만 사용 (no_grad로 메모리 절감)
             with torch.no_grad():
-                neg_trunk_output = adapter.trunk_forward(neg_input_ids)
-                neg_value_logits = adapter.value_forward(neg_trunk_output, detach=False)
-                del neg_trunk_output
+                neg_outputs = adapter(
+                    neg_input_ids,
+                    neg_attention_mask,
+                    return_value_logits=True,
+                    return_hidden_states=False
+                )
+            neg_value_logits = neg_outputs["value_logits"]
 
-            batch_size, seq_len = pos_input_ids.shape
-            n_future = adapter.model_args.n_future_tokens
-            vocab_size = adapter.model_args.vocab_size
+            batch_size, seq_len, n_future, vocab_size = pos_logits.shape
 
             # TD error 계산 (Positive만 - Policy weighting용)
-            # Response 토큰 마스크 (labels != -100) - instruction 제외
+            # Response 토큰 마스크 (labels != -100)
             pos_response_mask = (pos_labels != -100).long()
 
             td_errors = compute_td_errors(
                 value_logits=pos_value_logits,
                 rewards=pos_rewards,
-                attention_mask=pos_response_mask,  # response 토큰만 (terminal 위치 정확히 설정)
+                attention_mask=pos_attention_mask,
                 gamma=1.0,
             )
 
@@ -523,16 +538,13 @@ def run_verifiable_training(
             )
 
             # Policy Loss (Positive만, TD Weighted)
-            # head별 순차 계산으로 메모리 절약
             batch_weighted_ce_loss = 0.0
             batch_unweighted_ce_loss = 0.0
 
-            for head_idx in range(n_future):
-                k = head_idx + 1
+            for k in range(1, n_future + 1):
                 valid_len = seq_len - k
 
-                # 해당 head만 실행 → [B, S, vocab]
-                logits_k = adapter.head_forward(trunk_output, head_idx)[:, :valid_len, :]
+                logits_k = pos_logits[:, :valid_len, k - 1, :]
                 labels_k = pos_labels[:, k : k + valid_len]
                 weights_k = weights[:, k : k + valid_len]
                 mask_k = pos_attention_mask[:, k : k + valid_len]
@@ -555,18 +567,13 @@ def run_verifiable_training(
                     batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
                     batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
 
-                del logits_k  # 즉시 메모리 해제
-
-            # trunk_output 해제
-            del trunk_output
-
             weighted_ce_loss = batch_weighted_ce_loss / n_future
             unweighted_ce_loss = batch_unweighted_ce_loss / n_future
 
             # Pairwise Ranking Loss (value head만 학습, trunk gradient 차단됨)
             pos_mask = (pos_labels != -100).to(model_dtype)
             neg_mask = (neg_labels != -100).to(model_dtype)
-            value_loss = pairwise_ranking_loss(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
+            value_loss = pairwise_ranking_loss(pos_value_for_ranking, neg_value_logits, pos_mask, neg_mask)
 
             # Total Loss (trunk은 CE로만, value_head는 pairwise로만 학습)
             total_loss = weighted_ce_loss + value_loss
@@ -578,6 +585,7 @@ def run_verifiable_training(
             is_correct = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
             rewards = pos_rewards
             value_logits = pos_value_logits
+            logits = pos_logits
             valid_label_mask = pos_mask.unsqueeze(-1)
             # pairwise 모드에서는 rewards를 td_targets로 사용 (로깅용)
             td_targets = rewards.view(-1, 1, 1).expand_as(value_logits)

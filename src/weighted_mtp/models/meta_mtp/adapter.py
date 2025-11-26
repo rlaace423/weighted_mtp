@@ -165,15 +165,11 @@ class MetaLlamaMTPAdapter(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor] = None,
+        input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         return_value_logits: bool = False,
         return_hidden_states: bool = False,
         trunk_frozen: bool = False,
-        detach_hidden_for_value: bool = False,
-        mode: str = "full",
-        trunk_cache: Optional[dict] = None,
-        head_idx: Optional[int] = None,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
         """통일된 forward 인터페이스 (FSDP 호환)
 
@@ -181,31 +177,16 @@ class MetaLlamaMTPAdapter(nn.Module):
         FSDP hook이 정상 동작하여 parameter unshard 보장
 
         Args:
-            input_ids: [batch, seq] 입력 토큰 (mode="full", "trunk"에서 필수)
+            input_ids: [batch, seq] 입력 토큰
             attention_mask: [batch, seq] attention mask (현재 미사용, 향후 확장)
             return_value_logits: True면 value_logits 반환 (Critic/Verifiable용)
             return_hidden_states: True면 hidden_states 반환 (Verifiable용)
             trunk_frozen: True면 trunk forward를 no_grad로 실행하여 메모리 절감
                           (num_unfrozen_layers=0일 때 사용)
-            detach_hidden_for_value: True면 value_logits 계산 시 hidden_states를 detach
-                          (trunk gradient 차단, value_head만 학습)
-            mode: 실행 모드 (메모리 효율적 학습용)
-                - "full": 전체 forward (기본, 기존 동작)
-                - "trunk": trunk만 실행, trunk_cache 반환
-                - "head": 특정 MTP head만 실행 (trunk_cache, head_idx 필요)
-                - "value": value head만 실행 (trunk_cache 필요)
-            trunk_cache: mode="head"/"value"일 때 필수. trunk 실행 결과
-            head_idx: mode="head"일 때 필수. 실행할 head 인덱스
 
         Returns:
-            mode="full" + return_value_logits=False:
+            return_value_logits=False:
                 logits: [batch, seq, n_future_tokens, vocab]
-            mode="trunk":
-                dict {"h_trunk", "hidden_states", "freqs_cis", "mask"}
-            mode="head":
-                logits: [batch, seq, vocab]
-            mode="value":
-                value_logits: [batch, seq, 1]
 
             return_value_logits=True (Critic Stage 1: Value head만):
                 {
@@ -223,51 +204,11 @@ class MetaLlamaMTPAdapter(nn.Module):
         Raises:
             ValueError: return_value_logits=True인데 Value head가 없음
         """
-        # mode 분기: 메모리 효율적 학습용 (trunk/head/value 분리 실행)
-        if mode == "trunk":
-            if input_ids is None:
-                raise ValueError("input_ids required for mode='trunk'")
-            return self.transformer(input_ids, mode="trunk")
-
-        if mode == "head":
-            if trunk_cache is None or head_idx is None:
-                raise ValueError("mode='head' requires trunk_cache and head_idx")
-            return self.transformer(mode="head", trunk_cache=trunk_cache, head_idx=head_idx)
-
-        if mode == "value":
-            if trunk_cache is None:
-                raise ValueError("mode='value' requires trunk_cache")
-            if self.value_head is None:
-                raise ValueError("Value head not initialized.")
-            hidden_states = trunk_cache["hidden_states"]
-            if detach_hidden_for_value:
-                hidden_states = hidden_states.detach()
-            return self.value_head(hidden_states)
-
-        # mode="full": 기존 동작
         if return_value_logits and self.value_head is None:
             raise ValueError(
                 "Value head not initialized. "
                 "Set initialize_value_head=True in from_pretrained() or call attach_value_head()."
             )
-
-        # Verifiable Stage 2 (메모리 최적화): MTP + Value, hidden_states 반환 안 함
-        # 조건이 더 구체적이므로 먼저 평가해야 함
-        if return_value_logits and detach_hidden_for_value and not return_hidden_states:
-            logits, hidden_states = self.transformer(
-                input_ids,
-                start_pos=0,
-                return_all_heads=True,
-                return_hidden_states=True,
-            )
-            # value_head gradient가 trunk로 역전파되지 않음
-            value_logits = self.value_head(hidden_states.detach())
-            # hidden_states 반환 안 함 (메모리 절약)
-            del hidden_states
-            return {
-                "logits": logits,
-                "value_logits": value_logits,
-            }
 
         # Critic Stage 1: Value head만 학습 (MTP heads 계산 생략)
         if return_value_logits and not return_hidden_states:
@@ -305,11 +246,7 @@ class MetaLlamaMTPAdapter(nn.Module):
                 return_all_heads=True,
                 return_hidden_states=True,
             )
-            # detach_hidden_for_value=True: value_head gradient가 trunk로 역전파되지 않음
-            if detach_hidden_for_value:
-                value_logits = self.value_head(hidden_states.detach())
-            else:
-                value_logits = self.value_head(hidden_states)
+            value_logits = self.value_head(hidden_states)
             return {
                 "logits": logits,
                 "value_logits": value_logits,
@@ -323,69 +260,6 @@ class MetaLlamaMTPAdapter(nn.Module):
             return_all_heads=True,
         )
         return logits
-
-    def trunk_forward(self, input_ids: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Trunk만 실행, head_forward/value_forward용 캐시 반환 (FSDP 호환)
-
-        메모리 효율적 학습을 위해 trunk와 head를 분리 실행할 때 사용.
-        전체 logits [B, S, 4, vocab]을 한 번에 유지하지 않고
-        head별로 순차 처리하여 메모리 절약.
-
-        주의: FSDP 환경에서는 반드시 self()를 통해 호출해야 함.
-        직접 호출 시 self(input_ids, mode="trunk") 형태로 호출 권장.
-
-        Args:
-            input_ids: [batch, seq] 입력 토큰
-
-        Returns:
-            {
-                "h_trunk": [batch, seq, dim] trunk 출력,
-                "hidden_states": [batch, seq, dim] value_head용 (norm 적용됨),
-                "freqs_cis": RoPE 주파수,
-                "mask": causal mask 또는 None,
-            }
-        """
-        return self(input_ids, mode="trunk")
-
-    def head_forward(
-        self,
-        trunk_output: dict[str, torch.Tensor],
-        head_idx: int,
-    ) -> torch.Tensor:
-        """특정 MTP head만 실행 (FSDP 호환)
-
-        trunk_forward()로 얻은 캐시를 사용하여 특정 head의 logits만 계산.
-        [B, S, vocab] 크기만 유지하므로 메모리 효율적.
-
-        주의: FSDP 환경에서는 반드시 self()를 통해 호출해야 함.
-        직접 호출 시 self(mode="head", trunk_cache=..., head_idx=...) 형태로 호출 권장.
-
-        Args:
-            trunk_output: trunk_forward() 반환값
-            head_idx: head 인덱스 (0~3 for n_future_tokens=4)
-
-        Returns:
-            logits: [batch, seq, vocab]
-        """
-        return self(mode="head", trunk_cache=trunk_output, head_idx=head_idx)
-
-    def value_forward(
-        self,
-        trunk_output: dict[str, torch.Tensor],
-        detach: bool = True,
-    ) -> torch.Tensor:
-        """Value head만 실행
-
-        trunk_forward()로 얻은 hidden_states로 value_logits 계산.
-
-        Args:
-            trunk_output: trunk_forward() 반환값
-            detach: True면 hidden_states를 detach하여 trunk gradient 차단
-
-        Returns:
-            value_logits: [batch, seq, 1]
-        """
-        return self(mode="value", trunk_cache=trunk_output, detach_hidden_for_value=detach)
 
     @classmethod
     def _from_checkpoint(

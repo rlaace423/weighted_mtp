@@ -280,52 +280,27 @@ class Transformer(nn.Module):
 
     def forward(
         self,
-        tokens: Optional[torch.Tensor] = None,
+        tokens: torch.Tensor,
         start_pos: int = 0,
         return_all_heads: bool = False,
         return_hidden_states: bool = False,
-        mode: str = "full",
-        trunk_cache: Optional[dict] = None,
-        head_idx: Optional[int] = None,
     ):
-        """Forward pass (FSDP 호환)
+        """Forward pass
 
         Args:
-            tokens: [batch, seq] 입력 토큰 (mode="full", "trunk"에서 필수)
+            tokens: [batch, seq] 입력 토큰
             start_pos: KV cache 시작 위치 (학습 시 0)
             return_all_heads: True면 모든 MTP heads 반환
             return_hidden_states: True면 hidden_states도 함께 반환 (Value Head용)
-            mode: 실행 모드
-                - "full": 전체 forward (기본)
-                - "trunk": trunk만 실행, trunk_cache 반환
-                - "head": 특정 head만 실행 (trunk_cache, head_idx 필요)
-            trunk_cache: mode="head"일 때 필수. trunk_forward 반환값
-            head_idx: mode="head"일 때 필수. 실행할 head 인덱스
 
         Returns:
-            mode="full":
-                if return_hidden_states: (logits, hidden_states)
-                else: logits
-            mode="trunk":
-                dict {"h_trunk", "hidden_states", "freqs_cis", "mask"}
-            mode="head":
-                logits: [batch, seq, vocab]
+            if return_hidden_states:
+                (logits, hidden_states) tuple
+                - logits: [batch, seq, n_future_tokens, vocab] or [batch, seq, vocab]
+                - hidden_states: [batch, seq, hidden_size] (trunk 마지막 layer, norm 적용 후)
+            else:
+                logits: [batch, seq, n_future_tokens, vocab] or [batch, seq, vocab]
         """
-        # mode="head": trunk_cache 기반 특정 head만 실행
-        if mode == "head":
-            if trunk_cache is None or head_idx is None:
-                raise ValueError("mode='head' requires trunk_cache and head_idx")
-            prediction_heads = [self.layers[-1]] + list(self.extra_heads)
-            h = prediction_heads[head_idx](
-                trunk_cache["h_trunk"], 0, trunk_cache["freqs_cis"], trunk_cache["mask"]
-            )
-            h = self.norm(h)
-            return self.output(h)
-
-        # mode="full" 또는 "trunk": tokens 필수
-        if tokens is None:
-            raise ValueError("tokens required for mode='full' or 'trunk'")
-
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
 
@@ -347,16 +322,6 @@ class Transformer(nn.Module):
         for layer in self.layers[:-1]:
             h = layer(h, start_pos, freqs_cis, mask)
         h_trunk = h
-
-        # mode="trunk": trunk만 실행, cache 반환
-        if mode == "trunk":
-            hidden_states = self.norm(h_trunk)
-            return {
-                "h_trunk": h_trunk,
-                "hidden_states": hidden_states,
-                "freqs_cis": freqs_cis,
-                "mask": mask,
-            }
 
         # Prediction heads
         latents = []
