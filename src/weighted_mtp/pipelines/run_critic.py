@@ -664,8 +664,6 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     # incorrect 시퀀스 내 토큰 평균
                     incorrect_token_mask = batch_incorrect_mask.view(-1, 1).expand_as(valid_mask_2d_step) & valid_mask_2d_step
                     batch_mean_incorrect = value_logits.squeeze(-1)[incorrect_token_mask].mean().item() if incorrect_token_mask.any() else 0.0
-                    # 디버그: 배치별 평균값 로그
-                    logger.info(f"[Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}] 배치 평균 - correct: {batch_mean_correct:.4f}, incorrect: {batch_mean_incorrect:.4f}")
 
                     # Loss, std, mean_correct/incorrect all_reduce (1회 통신)
                     reduced = all_reduce_scalars({
