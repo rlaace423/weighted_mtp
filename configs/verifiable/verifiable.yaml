@@ -21,7 +21,7 @@ experiment:
 models:
   policy:
     name: meta-llama-mtp
-    path: storage/checkpoints/critic/critic-pretrain-linear-final/checkpoint_epoch_0.80.pt
+    path: storage/checkpoints/critic/critic-pretrain-linear-final/checkpoint_final.pt
     tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     params:
       dim: 4096
@@ -49,7 +49,7 @@ data_sampling:
   difficulty:
     n_samples: 200000
     auto_data_balancing: true
-    correct_ratio: 0.7  # Correct/Incorrect 균형
+    correct_ratio: 0.8  # Correct/Incorrect 균형
     bins:
       diff_7: [7, 7]    # 데이터 많음 (약 90만 -> 비중 축소 필요)
       else: [8, 25]     # 데이터 적당 (약 60만)
@@ -62,15 +62,15 @@ training:
   n_epochs: 1.0
   batch_size: 32  # Per GPU
   gradient_accumulation_steps: 1  # Effective batch size = 128
-  trunk_learning_rate: 5.0e-6  # Trunk peak LR
-  value_head_learning_rate: 2.0e-4  # Value head peak LR
+  trunk_learning_rate: 1.0e-5  # Trunk peak LR
+  value_head_learning_rate: 1.0e-3  # Value head peak LR
   max_grad_norm: 0.5
 
   # TD error weighting
   beta: 0.9  # TD error temperature
-  value_coef: 0.11  # Value loss coefficient
+  value_coef: 0.5  # Value loss coefficient
   weight_clip_min: 0  # 최소 가중치
-  weight_clip_max: 2  # 최대 가중치
+  weight_clip_max: 3  # 최대 가중치
   loss_type: mse
   gamma: 1.0
   lam: 1.0  # MC (Critic Stage 1과 동일)
@@ -80,7 +80,7 @@ training:
   # Learning rate scheduler
   lr_scheduler:
     type: cosine
-    warmup_ratio: 0.03
+    warmup_ratio: 0.1
     min_lr_ratio: 0.005
 
 # 체크포인트

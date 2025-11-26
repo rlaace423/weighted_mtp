@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: critic-pretrain-mlp-originsample
+  name: critic-pretrain-mlp-final
   description: "Value head pretraining for TD error calculation"
   stage: critic
   tags:
@@ -63,7 +63,7 @@ training:
   batch_size: 64
   gradient_accumulation_steps: 1
   trunk_learning_rate: 5e-6
-  value_head_learning_rate: 3e-4
+  value_head_learning_rate: 3.0e-4
   max_grad_norm: 1.0
   gamma: 1.0
   lam: 1.0  # MC (sigmoid value_head_type 필수 조건)
