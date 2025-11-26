@@ -54,11 +54,18 @@ def compute_td_targets(
     device = value_logits.device
     dtype = value_logits.dtype  # BFloat16 등 모델 dtype 유지
 
+    # Monte Carlo (lam=1.0, gamma=1.0): Target = R (벡터 연산으로 최적화)
+    # 수학적 증명: A_t = R - V(s_t), Target_t = V(s_t) + A_t = R
+    if lam == 1.0 and gamma == 1.0:
+        # rewards: [batch] → [batch, seq]
+        td_targets = rewards.view(-1, 1).expand(-1, seq_len).to(dtype)
+        td_targets = td_targets * attention_mask.to(dtype)
+        return td_targets.unsqueeze(-1)
+
     # Value logits squeeze 및 detach: [batch, seq, 1] → [batch, seq]
     values = value_logits.squeeze(-1).detach()
 
     # Terminal indices: 각 시퀀스의 마지막 유효 토큰 위치
-    # 왼쪽 패딩을 지원하기 위해 마지막 1의 인덱스를 직접 찾음
     seq_indices = torch.arange(seq_len, device=device).unsqueeze(0)
     masked_indices = seq_indices * attention_mask
     terminal_indices = masked_indices.max(dim=1).values.long()
@@ -66,7 +73,7 @@ def compute_td_targets(
     # TD targets 초기화 (모델 dtype 유지)
     td_targets = torch.zeros(batch_size, seq_len, device=device, dtype=dtype)
 
-    # GAE 기반 역방향 계산 (lam=0: TD(0), lam=0.95: GAE, lam=1: MC)
+    # GAE 기반 역방향 계산 (lam=0: TD(0), lam=0.95: GAE)
     for b in range(batch_size):
         last_gae = 0.0
         term_idx = terminal_indices[b].item()
