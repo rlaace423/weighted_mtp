@@ -239,6 +239,7 @@ class MetaLlamaMTPAdapter(nn.Module):
             }
 
         # Verifiable Stage 2: MTP + Value 동시 학습
+        # trunk은 CE loss로만 학습, value_head는 pairwise loss로만 학습
         if return_value_logits and return_hidden_states:
             logits, hidden_states = self.transformer(
                 input_ids,
@@ -246,11 +247,11 @@ class MetaLlamaMTPAdapter(nn.Module):
                 return_all_heads=True,
                 return_hidden_states=True,
             )
-            value_logits = self.value_head(hidden_states)
+            # hidden_states.detach()로 trunk gradient 차단, value_head만 학습
+            value_logits = self.value_head(hidden_states.detach())
             return {
                 "logits": logits,
                 "value_logits": value_logits,
-                "hidden_states": hidden_states,
             }
 
         # Baseline/Rho-1: MTP만 (Value head 없음)

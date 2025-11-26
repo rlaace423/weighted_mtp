@@ -497,12 +497,9 @@ def run_verifiable_training(
             )
             pos_logits = pos_outputs["logits"]
             pos_value_logits = pos_outputs["value_logits"]
-            pos_hidden_states = pos_outputs["hidden_states"]
 
-            # Value head용 value_logits (trunk gradient 차단)
-            # trunk은 weighted_ce_loss로만 학습, value_head는 pairwise_loss로만 학습
-            # FSDP 환경에서 adapter.value_head() 직접 호출 불가 → detach로 처리
-            pos_value_for_ranking = pos_value_logits.detach().requires_grad_(True)
+            # Pairwise loss용 value_logits (trunk gradient는 adapter에서 이미 차단됨)
+            pos_value_for_ranking = pos_value_logits
 
             # Forward (Negative) - Value Loss만 사용 (no_grad로 메모리 절감)
             with torch.no_grad():

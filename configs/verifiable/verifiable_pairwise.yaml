@@ -66,12 +66,12 @@ training:
   gradient_accumulation_steps: 1
   trunk_learning_rate: 1.0e-5
   value_head_learning_rate: 1.0e-4
-  max_grad_norm: 0.1
+  max_grad_norm: 0.5
 
   # TD error weighting
   beta: 1.0
   weight_clip_min: 0.1
-  weight_clip_max: 3
+  weight_clip_max: 2
   gamma: 1.0
   lam: 1.0
 
