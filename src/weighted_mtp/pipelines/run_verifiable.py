@@ -489,20 +489,17 @@ def run_verifiable_training(
             pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
 
             # Forward (Positive) - Policy Loss + Value Loss 사용
+            # detach_hidden_for_value=True: value_logits gradient가 trunk로 역전파되지 않음
+            # trunk은 weighted_ce_loss로만 학습, value_head는 pairwise_loss로만 학습
             pos_outputs = adapter(
                 pos_input_ids,
                 pos_attention_mask,
                 return_value_logits=True,
-                return_hidden_states=True
+                return_hidden_states=True,
+                detach_hidden_for_value=True,
             )
             pos_logits = pos_outputs["logits"]
-            pos_value_logits = pos_outputs["value_logits"]
-            pos_hidden_states = pos_outputs["hidden_states"]
-
-            # Value head용 value_logits (trunk gradient 차단)
-            # trunk은 weighted_ce_loss로만 학습, value_head는 pairwise_loss로만 학습
-            pos_hidden_detached = pos_hidden_states.detach()
-            pos_value_for_ranking = adapter.value_head(pos_hidden_detached)
+            pos_value_logits = pos_outputs["value_logits"]  # trunk gradient 차단됨
 
             # Forward (Negative) - Value Loss만 사용 (no_grad로 메모리 절감)
             with torch.no_grad():
@@ -573,7 +570,7 @@ def run_verifiable_training(
             # Pairwise Ranking Loss (value head만 학습, trunk gradient 차단됨)
             pos_mask = (pos_labels != -100).to(model_dtype)
             neg_mask = (neg_labels != -100).to(model_dtype)
-            value_loss = pairwise_ranking_loss(pos_value_for_ranking, neg_value_logits, pos_mask, neg_mask)
+            value_loss = pairwise_ranking_loss(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
 
             # Total Loss (trunk은 CE로만, value_head는 pairwise로만 학습)
             total_loss = weighted_ce_loss + value_loss

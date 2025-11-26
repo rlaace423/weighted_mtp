@@ -170,6 +170,7 @@ class MetaLlamaMTPAdapter(nn.Module):
         return_value_logits: bool = False,
         return_hidden_states: bool = False,
         trunk_frozen: bool = False,
+        detach_hidden_for_value: bool = False,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
         """통일된 forward 인터페이스 (FSDP 호환)
 
@@ -183,6 +184,8 @@ class MetaLlamaMTPAdapter(nn.Module):
             return_hidden_states: True면 hidden_states 반환 (Verifiable용)
             trunk_frozen: True면 trunk forward를 no_grad로 실행하여 메모리 절감
                           (num_unfrozen_layers=0일 때 사용)
+            detach_hidden_for_value: True면 value_logits 계산 시 hidden_states를 detach
+                          (trunk gradient 차단, value_head만 학습)
 
         Returns:
             return_value_logits=False:
@@ -246,7 +249,11 @@ class MetaLlamaMTPAdapter(nn.Module):
                 return_all_heads=True,
                 return_hidden_states=True,
             )
-            value_logits = self.value_head(hidden_states)
+            # detach_hidden_for_value=True: value_head gradient가 trunk로 역전파되지 않음
+            if detach_hidden_for_value:
+                value_logits = self.value_head(hidden_states.detach())
+            else:
+                value_logits = self.value_head(hidden_states)
             return {
                 "logits": logits,
                 "value_logits": value_logits,

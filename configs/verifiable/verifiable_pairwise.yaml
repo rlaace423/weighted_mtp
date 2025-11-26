@@ -64,13 +64,13 @@ training:
   n_epochs: 2.0
   batch_size: 32  # Per GPU (각 배치에 pos+neg 쌍 포함)
   gradient_accumulation_steps: 1
-  trunk_learning_rate: 5.0e-5
+  trunk_learning_rate: 1.0e-5
   value_head_learning_rate: 1.0e-4
-  max_grad_norm: 0.1
+  max_grad_norm: 1
 
   # TD error weighting
   beta: 1.0
-  weight_clip_min: 0
+  weight_clip_min: 0.1
   weight_clip_max: 3
   gamma: 1.0
   lam: 1.0
