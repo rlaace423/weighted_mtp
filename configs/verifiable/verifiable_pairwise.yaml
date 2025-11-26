@@ -22,7 +22,7 @@ experiment:
 models:
   policy:
     name: meta-llama-mtp
-    path: storage/checkpoints/critic/critic-pretrain-pairwise/checkpoint_epoch_2.00.pt
+    path: storage/checkpoints/critic/critic-pretrain-mlp-final/checkpoint_epoch_0.75.pt
     tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     params:
       dim: 4096
@@ -72,7 +72,7 @@ training:
   # 컴포넌트별 gradient clipping (trunk과 value_head 독립 적용)
   # trunk gradient scale ~1.5, value_head gradient scale ~25 이므로 분리 필요
   trunk_max_grad_norm: 1.0       # Trunk(MTP) gradient clipping
-  value_head_max_grad_norm: 5.0  # Value head gradient clipping
+  value_head_max_grad_norm: 1.0  # Value head gradient clipping
   max_grad_norm: 1.0             # fallback (컴포넌트별 설정 없을 때)
 
   # Value head 설정
@@ -89,13 +89,13 @@ training:
 
   # Value loss 스케일링 (컴포넌트별 clipping과 별개로 loss 비율 조정)
   # 이제 gradient clipping이 분리되어 있으므로 순수 loss 비율로만 사용
-  value_loss_coef: 0.3
+  value_loss_coef: 1.0
 
   # Value loss 모드 선택 (pairwise와 mc_mse 독립적 또는 동시 사용 가능)
   value_loss:
-    use_pairwise: true   # Pairwise ranking loss
-    use_mc_mse: false    # MC tokenwise MSE loss
-    pairwise_coef: 1.0   # Pairwise loss 계수
+    use_pairwise: false   # Pairwise ranking loss
+    use_mc_mse: true    # MC tokenwise MSE loss
+    pairwise_coef: 0.0   # Pairwise loss 계수
     mc_mse_coef: 1.0     # MC MSE loss 계수
 
   log_interval: 1

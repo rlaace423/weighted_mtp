@@ -193,11 +193,12 @@ class MetaLlamaMTPAdapter(nn.Module):
         """Trunk layers에 LoRA 적용
 
         FSDP wrapping 전에 호출해야 함
-        Trunk layers의 attention에만 적용 (extra_heads 제외)
+        Trunk layers의 attention 및 feed_forward에 적용 (extra_heads 제외)
 
         Args:
             lora_config: LoRA 설정 (rank, alpha, dropout, target_modules)
                 - None이면 DEFAULT_LORA_CONFIG 사용
+                - target_modules: attention (wq, wk, wv, wo), ffn (w1, w2, w3)
         """
         from weighted_mtp.models.lora import apply_lora_to_linear
 
@@ -211,15 +212,31 @@ class MetaLlamaMTPAdapter(nn.Module):
         lora_dropout = config["dropout"]
         target_modules = config["target_modules"]
 
-        # Trunk layers의 attention에 LoRA 적용
+        # Attention 모듈: wq, wk, wv, wo
+        attention_targets = [t for t in target_modules if t in ["wq", "wk", "wv", "wo"]]
+        # Feed-forward 모듈: w1, w2, w3
+        ffn_targets = [t for t in target_modules if t in ["w1", "w2", "w3"]]
+
+        # Trunk layers에 LoRA 적용
         for layer in self.transformer.layers:
-            apply_lora_to_linear(
-                module=layer.attention,
-                target_names=target_modules,
-                rank=rank,
-                alpha=alpha,
-                dropout=lora_dropout,
-            )
+            # Attention에 LoRA 적용
+            if attention_targets:
+                apply_lora_to_linear(
+                    module=layer.attention,
+                    target_names=attention_targets,
+                    rank=rank,
+                    alpha=alpha,
+                    dropout=lora_dropout,
+                )
+            # Feed-forward에 LoRA 적용
+            if ffn_targets:
+                apply_lora_to_linear(
+                    module=layer.feed_forward,
+                    target_names=ffn_targets,
+                    rank=rank,
+                    alpha=alpha,
+                    dropout=lora_dropout,
+                )
 
         # 원본 trunk 파라미터 frozen (LoRA 파라미터만 학습)
         for layer in self.transformer.layers:
@@ -269,9 +286,16 @@ class MetaLlamaMTPAdapter(nn.Module):
 
         # Trunk layers의 LoRA 병합
         for layer in self.transformer.layers:
+            # Attention 모듈
             for name in ["wq", "wk", "wv", "wo"]:
                 if hasattr(layer.attention, name):
                     module = getattr(layer.attention, name)
+                    if isinstance(module, LoRALinear):
+                        module.merge_weights()
+            # Feed-forward 모듈
+            for name in ["w1", "w2", "w3"]:
+                if hasattr(layer.feed_forward, name):
+                    module = getattr(layer.feed_forward, name)
                     if isinstance(module, LoRALinear):
                         module.merge_weights()
 
@@ -506,7 +530,72 @@ class MetaLlamaMTPAdapter(nn.Module):
             adapter.apply_lora(lora_config)
 
         # 10. state_dict 로드
-        adapter.load_state_dict(state_dict)
+        # checkpoint에 LoRA 가중치가 없고 use_lora=True인 경우:
+        # base weights만 로드하고 LoRA는 새로 초기화된 상태 유지
+        if use_lora and not has_lora_weights:
+            # LoRA 적용된 모듈의 키 변환: wq.weight → wq.linear.weight
+            # LoRALinear 내부 구조: linear (nn.Linear) + lora_A + lora_B
+            config = {**DEFAULT_LORA_CONFIG}
+            if lora_config:
+                config.update(lora_config)
+            target_modules = config["target_modules"]
+            
+            # Attention 모듈: wq, wk, wv, wo
+            attention_targets = [t for t in target_modules if t in ["wq", "wk", "wv", "wo"]]
+            # Feed-forward 모듈: w1, w2, w3
+            ffn_targets = [t for t in target_modules if t in ["w1", "w2", "w3"]]
+            
+            converted_state_dict = {}
+            for key, value in state_dict.items():
+                new_key = key
+                
+                # transformer.layers.X만 변환 (extra_heads는 LoRA 미적용이므로 변환 안함)
+                if not key.startswith("transformer.layers."):
+                    converted_state_dict[key] = value
+                    continue
+                
+                # Attention 모듈 변환 (layers만)
+                for target in attention_targets:
+                    old_pattern = f".attention.{target}.weight"
+                    new_pattern = f".attention.{target}.linear.weight"
+                    if old_pattern in key:
+                        new_key = key.replace(old_pattern, new_pattern)
+                        break
+                    old_bias = f".attention.{target}.bias"
+                    new_bias = f".attention.{target}.linear.bias"
+                    if old_bias in key:
+                        new_key = key.replace(old_bias, new_bias)
+                        break
+                
+                # Feed-forward 모듈 변환 (layers만)
+                for target in ffn_targets:
+                    old_pattern = f".feed_forward.{target}.weight"
+                    new_pattern = f".feed_forward.{target}.linear.weight"
+                    if old_pattern in key:
+                        new_key = key.replace(old_pattern, new_pattern)
+                        break
+                    old_bias = f".feed_forward.{target}.bias"
+                    new_bias = f".feed_forward.{target}.linear.bias"
+                    if old_bias in key:
+                        new_key = key.replace(old_bias, new_bias)
+                        break
+                
+                converted_state_dict[new_key] = value
+            
+            # 변환된 state_dict 로드
+            missing_keys, unexpected_keys = adapter.load_state_dict(converted_state_dict, strict=False)
+            
+            # LoRA 관련 missing keys는 정상 (새로 초기화됨)
+            lora_missing = [k for k in missing_keys if "lora_A" in k or "lora_B" in k]
+            other_missing = [k for k in missing_keys if "lora_A" not in k and "lora_B" not in k]
+            
+            if other_missing:
+                raise KeyError(f"Checkpoint에서 필수 키 누락: {other_missing[:5]}...")
+            
+            print(f"[LoRA] Base checkpoint 로드 완료. LoRA weights 새로 초기화됨 ({len(lora_missing)} keys)")
+        else:
+            # 일반 로드 (LoRA 포함 checkpoint 또는 LoRA 미사용)
+            adapter.load_state_dict(state_dict)
 
         # 11. Device 및 dtype 설정
         adapter = adapter.to(device_obj)
