@@ -811,9 +811,11 @@ def _reservoir_sample_pairs(
     n_samples: int,
     seed: int,
 ) -> list[dict]:
-    """Problem 리스트에서 쌍을 reservoir sampling
+    """Problem 리스트에서 쌍을 가중치 기반 샘플링
 
-    메모리 효율: 모든 조합을 생성하지 않고 스트리밍 샘플링
+    O(n_samples) 복잡도로 효율적 샘플링:
+    1. Problem을 n_pairs 비례 가중치로 샘플링
+    2. 선택된 problem에서 랜덤하게 (correct, incorrect) 쌍 생성
 
     Args:
         problems: [{problem_id, correct_indices, incorrect_indices, n_pairs}, ...]
@@ -824,6 +826,7 @@ def _reservoir_sample_pairs(
         [{"correct_idx": int, "incorrect_idx": int, "problem_id": str}, ...]
     """
     random.seed(seed)
+    np.random.seed(seed)
 
     # 총 가용 쌍 수 계산
     total_pairs = sum(p["n_pairs"] for p in problems)
@@ -841,32 +844,31 @@ def _reservoir_sample_pairs(
                     })
         return all_pairs
 
-    # Reservoir sampling
-    reservoir = []
-    seen = 0
+    # 가중치 계산 (n_pairs 비례)
+    weights = np.array([p["n_pairs"] for p in problems], dtype=np.float64)
+    weights /= weights.sum()
 
-    for p in problems:
-        for c_idx in p["correct_indices"]:
-            for i_idx in p["incorrect_indices"]:
-                seen += 1
+    # Problem 인덱스를 가중치 기반으로 n_samples개 샘플링
+    problem_indices = np.random.choice(
+        len(problems),
+        size=n_samples,
+        replace=True,
+        p=weights,
+    )
 
-                if len(reservoir) < n_samples:
-                    reservoir.append({
-                        "correct_idx": c_idx,
-                        "incorrect_idx": i_idx,
-                        "problem_id": p["problem_id"],
-                    })
-                else:
-                    # 확률적 교체
-                    j = random.randint(0, seen - 1)
-                    if j < n_samples:
-                        reservoir[j] = {
-                            "correct_idx": c_idx,
-                            "incorrect_idx": i_idx,
-                            "problem_id": p["problem_id"],
-                        }
+    # 각 선택된 problem에서 랜덤하게 쌍 생성
+    result = []
+    for p_idx in problem_indices:
+        p = problems[p_idx]
+        c_idx = random.choice(p["correct_indices"])
+        i_idx = random.choice(p["incorrect_indices"])
+        result.append({
+            "correct_idx": c_idx,
+            "incorrect_idx": i_idx,
+            "problem_id": p["problem_id"],
+        })
 
-    return reservoir
+    return result
 
 
 # ============================================================================

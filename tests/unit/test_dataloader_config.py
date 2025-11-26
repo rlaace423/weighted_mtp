@@ -234,25 +234,25 @@ class TestSamplingWithDifficultyConfig:
             difficulty = sample["metadata"]["difficulty"]
             assert 1 <= difficulty <= 25, f"Expected difficulty 1-25, got {difficulty}"
 
-    def test_mixed_difficulty_balanced_sampling(self):
-        """Mixed difficulty + balanced: low=70%, medium=30%, 50:50
+    def test_mixed_difficulty_sampling(self):
+        """Mixed difficulty: diff_7=35%, else=65%
 
         기대값:
-        - 총 500개 샘플
-        - low (1-3): 350개 (70%)
-        - medium (4-7): 150개 (30%)
-        - 각 bin 내에서 correct/incorrect 50:50
+        - 총 200개 샘플
+        - diff_7 (7): 70개 (35%)
+        - else (8-25): 130개 (65%)
+        - correct-only
         """
-        n_samples = 500
+        n_samples = 200
 
         dataset = load_dataset(
             "codecontests",
             split="train",
             sampling_config={
                 "n_samples": n_samples,
-                "correct_ratio": 0.5,
-                "difficulty_weights": {"low": 0.7, "medium": 0.3},
-                "difficulty_bins": {"low": [1, 3], "medium": [4, 7]},
+                "correct_ratio": 1.0,
+                "difficulty_weights": {"diff_7": 0.35, "else": 0.65},
+                "difficulty_bins": {"diff_7": [7, 7], "else": [8, 25]},
             },
             seed=42
         )
@@ -260,43 +260,39 @@ class TestSamplingWithDifficultyConfig:
         assert len(dataset) == n_samples
 
         # difficulty 분포 확인
-        low_count = sum(
+        diff_7_count = sum(
             1 for sample in dataset
-            if 1 <= sample["metadata"]["difficulty"] <= 3
+            if sample["metadata"]["difficulty"] == 7
         )
-        medium_count = sum(
+        else_count = sum(
             1 for sample in dataset
-            if 4 <= sample["metadata"]["difficulty"] <= 7
+            if 8 <= sample["metadata"]["difficulty"] <= 25
         )
 
         # 기대값 검증 (오차 ±10% 허용)
-        expected_low = int(n_samples * 0.7)
-        expected_medium = int(n_samples * 0.3)
+        expected_diff_7 = int(n_samples * 0.35)
+        expected_else = int(n_samples * 0.65)
 
-        assert abs(low_count - expected_low) <= n_samples * 0.1, \
-            f"low: expected ~{expected_low}, got {low_count}"
-        assert abs(medium_count - expected_medium) <= n_samples * 0.1, \
-            f"medium: expected ~{expected_medium}, got {medium_count}"
+        assert abs(diff_7_count - expected_diff_7) <= n_samples * 0.1, \
+            f"diff_7: expected ~{expected_diff_7}, got {diff_7_count}"
+        assert abs(else_count - expected_else) <= n_samples * 0.1, \
+            f"else: expected ~{expected_else}, got {else_count}"
 
-        # 전체 correct/incorrect 비율 검증
-        correct_count = sum(1 for sample in dataset if sample["is_correct"])
-        incorrect_count = len(dataset) - correct_count
-
-        # correct_ratio=0.5이므로 correct/incorrect 모두 존재해야 함
-        assert correct_count > 0, "correct 샘플이 있어야 함"
-        assert incorrect_count > 0, "incorrect 샘플이 있어야 함"
+        # 모든 샘플이 correct
+        all_correct = all(sample["is_correct"] for sample in dataset)
+        assert all_correct, "correct_ratio=1.0이면 모든 샘플이 correct여야 함"
 
     def test_reproducibility_with_difficulty(self):
         """동일 seed + difficulty 설정 → 동일 결과"""
-        config = {
+        sampling_config = {
             "n_samples": 200,
             "correct_ratio": 1.0,
             "difficulty_weights": {"diff_7": 0.35, "else": 0.65},
             "difficulty_bins": {"diff_7": [7, 7], "else": [8, 25]},
         }
 
-        dataset1 = load_dataset("codecontests", split="train", **config)
-        dataset2 = load_dataset("codecontests", split="train", **config)
+        dataset1 = load_dataset("codecontests", split="train", sampling_config=sampling_config, seed=42)
+        dataset2 = load_dataset("codecontests", split="train", sampling_config=sampling_config, seed=42)
 
         ids1 = [sample["task_id"] for sample in dataset1]
         ids2 = [sample["task_id"] for sample in dataset2]

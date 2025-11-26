@@ -368,13 +368,12 @@ class TestValidateConfigPathChecks:
                     "trunk_learning_rate": 1e-5,
                     "value_head_learning_rate": 3e-5,
                     "beta": 0.2,
-                    "value_coef": 0.5,
                     "weight_clip_min": 0.1,
                     "weight_clip_max": 3.0,
                 },
                 "data_sampling": {
+                    "use_pairwise": True,
                     "n_samples": 100,
-                    "correct_ratio": 0.5,
                 },
             }
         )

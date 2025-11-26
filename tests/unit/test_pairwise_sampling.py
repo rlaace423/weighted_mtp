@@ -234,7 +234,6 @@ class TestPairwiseDatasetLoading:
             "seed": 42,
             "use_pairwise": True,
             "n_samples": n_samples,
-            "correct_ratio": 0.5,
             "difficulty_bins": {
                 "diff_7": [7, 7],
                 "else": [8, 25],

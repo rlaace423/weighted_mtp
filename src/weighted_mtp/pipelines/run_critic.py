@@ -114,12 +114,16 @@ def validate_critic(
             neg_attention_mask = batch["neg_attention_mask"].to(device)
             neg_labels = batch["neg_labels"].to(device)
 
-            # Forward
-            pos_outputs = adapter(pos_input_ids, pos_attention_mask, return_value_logits=True)
-            neg_outputs = adapter(neg_input_ids, neg_attention_mask, return_value_logits=True)
+            # Batched Forward: pos+neg concat하여 1회 forward
+            batch_size = pos_input_ids.size(0)
+            combined_input_ids = torch.cat([pos_input_ids, neg_input_ids], dim=0)
+            combined_attention_mask = torch.cat([pos_attention_mask, neg_attention_mask], dim=0)
 
-            pos_value_logits = pos_outputs["value_logits"]
-            neg_value_logits = neg_outputs["value_logits"]
+            combined_outputs = adapter(combined_input_ids, combined_attention_mask, return_value_logits=True)
+            combined_value_logits = combined_outputs["value_logits"]
+
+            pos_value_logits = combined_value_logits[:batch_size]
+            neg_value_logits = combined_value_logits[batch_size:]
 
             # Mask (labels != -100)
             pos_mask = (pos_labels != -100).to(model_dtype)
@@ -501,12 +505,16 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             neg_attention_mask = batch["neg_attention_mask"].to(device)
             neg_labels = batch["neg_labels"].to(device)
 
-            # Forward
-            pos_outputs = adapter(pos_input_ids, pos_attention_mask, return_value_logits=True)
-            neg_outputs = adapter(neg_input_ids, neg_attention_mask, return_value_logits=True)
+            # Batched Forward: pos+neg concat하여 1회 forward (2배 속도 향상)
+            batch_size = pos_input_ids.size(0)
+            combined_input_ids = torch.cat([pos_input_ids, neg_input_ids], dim=0)
+            combined_attention_mask = torch.cat([pos_attention_mask, neg_attention_mask], dim=0)
 
-            pos_value_logits = pos_outputs["value_logits"]
-            neg_value_logits = neg_outputs["value_logits"]
+            combined_outputs = adapter(combined_input_ids, combined_attention_mask, return_value_logits=True)
+            combined_value_logits = combined_outputs["value_logits"]
+
+            pos_value_logits = combined_value_logits[:batch_size]
+            neg_value_logits = combined_value_logits[batch_size:]
 
             # Mask (labels != -100)
             pos_mask = (pos_labels != -100).to(model_dtype)

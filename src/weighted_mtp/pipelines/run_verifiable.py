@@ -135,6 +135,7 @@ def validate_verifiable(
             )
             weights = build_weights(
                 td_errors=td_errors,
+                attention_mask=pos_attention_mask,
                 beta=beta,
                 min_weight=weight_clip_min,
                 max_weight=weight_clip_max,
@@ -515,9 +516,10 @@ def run_verifiable_training(
                 gamma=1.0,
             )
 
-            # Weight 산출 (Positive에만 적용)
+            # Weight 산출 (Normalized IQL with Advantage Whitening)
             weights = build_weights(
                 td_errors=td_errors,
+                attention_mask=pos_attention_mask,
                 beta=config.training.beta,
                 min_weight=config.training.weight_clip_min,
                 max_weight=config.training.weight_clip_max,

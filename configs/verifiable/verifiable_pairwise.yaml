@@ -65,11 +65,11 @@ training:
   value_head_learning_rate: 1.0e-3
   max_grad_norm: 0.5
 
-  # TD error weighting
-  beta: 0.9
+  # Normalized IQL weighting (Advantage Whitening)
+  beta: 1.0  # Temperature (낮을수록 상위 토큰 집중)
   pairwise_coef: 0.1  # Pairwise ranking loss coefficient
-  weight_clip_min: 0
-  weight_clip_max: 3
+  weight_clip_min: 0.1  # 최소 가중치
+  weight_clip_max: 3.0  # 최대 가중치
 
   log_interval: 1
 

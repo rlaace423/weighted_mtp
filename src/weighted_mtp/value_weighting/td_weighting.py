@@ -177,43 +177,59 @@ def compute_td_errors(
 
 def build_weights(
     td_errors: torch.Tensor,
-    beta: float = 0.9,
+    attention_mask: torch.Tensor,
+    beta: float = 1.0,
     min_weight: float = 0.1,
-    max_weight: float = 3.0,
+    max_weight: float = 5.0,
 ) -> torch.Tensor:
-    """TD error 기반 exponential weighting (IQL/AWR 방식)
+    """Normalized IQL weighting (Advantage Whitening 적용)
 
-    IQL/AWR 방식: weight = exp(advantage / β)
-    WMTP 적용: weight = exp(td_error / β)
+    Pairwise Critic의 특성을 고려한 가중치 산정:
+    1. 배치 단위 표준화 (Whitening): 스케일 불변성 확보
+    2. exp(A_norm / beta): 중요도 변환
+    3. Clipping + 평균 정규화: 안정성 보장
 
-    직관:
-    - Positive TD error (td > 0): weight > 1 (중요 토큰 강화)
-    - Negative TD error (td < 0): weight < 1 (비중요 토큰 down-weight)
-    - Incorrect 샘플: reward=0, value>0 → td<0 → weight<1 (자동 필터링)
+    Pairwise Ranking Loss로 학습된 Critic은 절대적 값보다 상대적 차이에 특화됨.
+    Whitening으로 배치 내 상대적 중요도만 추출하여 일관된 가중치 산출.
 
     Args:
         td_errors: [batch, seq] TD error (compute_td_errors 출력)
-        beta: Temperature parameter (낮을수록 집중도 높음, 기본 0.9)
-        min_weight: 최소 가중치 (보수적 안정화, 기본 0.1)
-        max_weight: 최대 가중치 (극단 방지, 기본 3.0)
+        attention_mask: [batch, seq] 유효 토큰 마스크 (1: 유효, 0: padding)
+        beta: Temperature (낮을수록 상위 토큰 집중, 기본 1.0)
+        min_weight: 최소 가중치 (기본 0.1)
+        max_weight: 최대 가중치 (기본 5.0)
 
     Returns:
-        weights: [batch, seq] Token-level weights (clipped)
+        weights: [batch, seq] Token-level weights (평균 1, clipped)
 
     Examples:
-        >>> td_errors = torch.tensor([[0.2, -0.5, 0.1]])
-        >>> weights = build_weights(td_errors, beta=0.9)
-        >>> # exp(0.2 / 0.9) ≈ 1.25
-        >>> # exp(-0.5 / 0.9) ≈ 0.57
-        >>> # exp(0.1 / 0.9) ≈ 1.12
-        >>> weights
-        tensor([[1.25, 0.57, 1.12]])
+        >>> td_errors = torch.tensor([[0.5, -0.3, 0.1], [10.0, -5.0, 2.0]])
+        >>> mask = torch.ones_like(td_errors)
+        >>> weights = build_weights(td_errors, mask, beta=1.0)
+        >>> # Whitening 후 평균 1, 범위 [0.1, 5.0]
+        >>> weights.mean()  # ≈ 1.0
     """
-    # Exponential transformation: exp(td_error / beta)
-    weights = torch.exp(td_errors / beta)
+    # 유효 토큰만으로 통계 계산
+    mask = attention_mask.bool()
+    valid_td = td_errors[mask]
 
-    # Conservative clipping: [min_weight, max_weight]
+    # Advantage Whitening: (A - mean) / (std + eps)
+    mean = valid_td.mean()
+    std = valid_td.std()
+    td_normalized = (td_errors - mean) / (std + 1e-8)
+
+    # Exponential transformation
+    weights = torch.exp(td_normalized / beta)
+
+    # Clipping
     weights = torch.clamp(weights, min=min_weight, max=max_weight)
+
+    # 평균 1 정규화 (배치 전체 LR 스케일 유지)
+    valid_weights = weights[mask]
+    weights = weights / (valid_weights.mean() + 1e-8)
+
+    # Padding 위치는 0으로 마스킹
+    weights = weights * attention_mask.float()
 
     return weights
 
