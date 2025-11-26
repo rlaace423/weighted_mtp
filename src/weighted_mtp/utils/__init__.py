@@ -31,6 +31,7 @@ from weighted_mtp.utils.logging_utils import (
     compute_classification_metrics_from_counts,
     compute_critic_classification_counts,
     compute_gradient_clip_stats,
+    compute_gradient_norm_by_component,
     compute_value_function_stats,
     compute_weight_statistics,
 )
@@ -87,6 +88,7 @@ __all__ = [
     "compute_classification_metrics_from_counts",
     "compute_critic_classification_counts",
     "compute_gradient_clip_stats",
+    "compute_gradient_norm_by_component",
     "compute_value_function_stats",
     "compute_weight_statistics",
     # Scheduler utils

@@ -24,6 +24,7 @@ from weighted_mtp.utils import (
     cleanup_old_checkpoints,
     cleanup_s3_checkpoints,
     compute_gradient_clip_stats,
+    compute_gradient_norm_by_component,
     compute_mtp_ce_loss,
     compute_pairwise_accuracy,
     compute_value_function_stats,
@@ -575,6 +576,9 @@ def run_verifiable_training(
                         "grad_clip_ratio": 1.0,
                     }
 
+                # 컴포넌트별 gradient norm (trunk vs value_head 분리)
+                component_grad_stats = compute_gradient_norm_by_component(adapter)
+
                 optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
@@ -647,6 +651,8 @@ def run_verifiable_training(
                                 "train/grad_norm": avg_grad_norm_post,
                                 "train/grad_norm_pre_clip": avg_grad_norm_pre,
                                 "train/grad_clip_ratio": avg_grad_clip_ratio,
+                                "train/trunk_grad_norm": component_grad_stats["trunk_grad_norm"],
+                                "train/value_head_grad_norm": component_grad_stats["value_head_grad_norm"],
                                 "train/learning_rate": optimizer.param_groups[0]["lr"],
                                 "td/mean": avg_td_mean,
                                 "td/std": reduced["td_std"],

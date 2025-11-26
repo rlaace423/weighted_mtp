@@ -117,6 +117,62 @@ def compute_gradient_clip_stats(
     }
 
 
+def compute_gradient_norm_by_component(
+    model: torch.nn.Module,
+) -> dict[str, float]:
+    """컴포넌트별 gradient norm 계산 (trunk vs value_head 분리)
+
+    전체 모델의 gradient를 trunk과 value_head로 분리하여 각각의 norm 계산.
+    gradient 디버깅 및 학습 안정성 모니터링에 사용.
+
+    Args:
+        model: 모델 (FSDP wrapped 또는 일반 모델)
+
+    Returns:
+        통계 딕셔너리:
+            - trunk_grad_norm: Trunk 파라미터의 gradient L2 norm
+            - value_head_grad_norm: Value head 파라미터의 gradient L2 norm
+            - trunk_grad_count: Trunk gradient가 있는 파라미터 수
+            - value_head_grad_count: Value head gradient가 있는 파라미터 수
+    """
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+    # FSDP인 경우 내부 모듈 접근
+    if isinstance(model, FSDP):
+        model_to_inspect = model.module
+    else:
+        model_to_inspect = model
+
+    trunk_grads = []
+    value_head_grads = []
+
+    for name, param in model_to_inspect.named_parameters():
+        if param.grad is not None:
+            grad_flat = param.grad.detach().flatten()
+            if "value_head" in name:
+                value_head_grads.append(grad_flat)
+            else:
+                trunk_grads.append(grad_flat)
+
+    # L2 norm 계산
+    if trunk_grads:
+        trunk_norm = torch.cat(trunk_grads).norm().item()
+    else:
+        trunk_norm = 0.0
+
+    if value_head_grads:
+        value_head_norm = torch.cat(value_head_grads).norm().item()
+    else:
+        value_head_norm = 0.0
+
+    return {
+        "trunk_grad_norm": trunk_norm,
+        "value_head_grad_norm": value_head_norm,
+        "trunk_grad_count": len(trunk_grads),
+        "value_head_grad_count": len(value_head_grads),
+    }
+
+
 def compute_value_function_stats(
     values: torch.Tensor,
     returns: torch.Tensor,

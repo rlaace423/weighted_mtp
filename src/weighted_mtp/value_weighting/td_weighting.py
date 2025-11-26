@@ -142,7 +142,8 @@ def compute_td_errors(
     batch_size, seq_len, _ = value_logits.shape
 
     # Value logits squeeze: [batch, seq, 1] → [batch, seq]
-    values = value_logits.squeeze(-1)
+    # detach()로 gradient 차단: weight 계산 시 CE loss gradient가 value_head로 흐르는 것 방지
+    values = value_logits.squeeze(-1).detach()
 
     # Terminal indices 계산: 각 시퀀스의 마지막 유효 토큰 위치
     # 왼쪽 패딩을 지원하기 위해 마지막 1의 인덱스를 직접 찾음
