@@ -213,6 +213,24 @@ class MetaLlamaMTPAdapter(nn.Module):
                 "Set initialize_value_head=True in from_pretrained() or call attach_value_head()."
             )
 
+        # Verifiable Stage 2 (메모리 최적화): MTP + Value, hidden_states 반환 안 함
+        # 조건이 더 구체적이므로 먼저 평가해야 함
+        if return_value_logits and detach_hidden_for_value and not return_hidden_states:
+            logits, hidden_states = self.transformer(
+                input_ids,
+                start_pos=0,
+                return_all_heads=True,
+                return_hidden_states=True,
+            )
+            # value_head gradient가 trunk로 역전파되지 않음
+            value_logits = self.value_head(hidden_states.detach())
+            # hidden_states 반환 안 함 (메모리 절약)
+            del hidden_states
+            return {
+                "logits": logits,
+                "value_logits": value_logits,
+            }
+
         # Critic Stage 1: Value head만 학습 (MTP heads 계산 생략)
         if return_value_logits and not return_hidden_states:
             if trunk_frozen:
@@ -267,6 +285,81 @@ class MetaLlamaMTPAdapter(nn.Module):
             return_all_heads=True,
         )
         return logits
+
+    def trunk_forward(self, input_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Trunk만 실행, head_forward/value_forward용 캐시 반환
+
+        메모리 효율적 학습을 위해 trunk와 head를 분리 실행할 때 사용.
+        전체 logits [B, S, 4, vocab]을 한 번에 유지하지 않고
+        head별로 순차 처리하여 메모리 절약 (8.4GB → 2.1GB).
+
+        Args:
+            input_ids: [batch, seq] 입력 토큰
+
+        Returns:
+            {
+                "h_trunk": [batch, seq, dim] trunk 출력,
+                "hidden_states": [batch, seq, dim] value_head용 (norm 적용됨),
+                "freqs_cis": RoPE 주파수,
+                "mask": causal mask 또는 None,
+            }
+        """
+        h_trunk, freqs_cis, mask = self.transformer.trunk_forward(input_ids)
+        hidden_states = self.transformer.norm(h_trunk)
+        return {
+            "h_trunk": h_trunk,
+            "hidden_states": hidden_states,
+            "freqs_cis": freqs_cis,
+            "mask": mask,
+        }
+
+    def head_forward(
+        self,
+        trunk_output: dict[str, torch.Tensor],
+        head_idx: int,
+    ) -> torch.Tensor:
+        """특정 MTP head만 실행
+
+        trunk_forward()로 얻은 캐시를 사용하여 특정 head의 logits만 계산.
+        [B, S, vocab] 크기만 유지하므로 메모리 효율적.
+
+        Args:
+            trunk_output: trunk_forward() 반환값
+            head_idx: head 인덱스 (0~3 for n_future_tokens=4)
+
+        Returns:
+            logits: [batch, seq, vocab]
+        """
+        return self.transformer.head_forward(
+            trunk_output["h_trunk"],
+            head_idx,
+            trunk_output["freqs_cis"],
+            trunk_output["mask"],
+        )
+
+    def value_forward(
+        self,
+        trunk_output: dict[str, torch.Tensor],
+        detach: bool = True,
+    ) -> torch.Tensor:
+        """Value head만 실행
+
+        trunk_forward()로 얻은 hidden_states로 value_logits 계산.
+
+        Args:
+            trunk_output: trunk_forward() 반환값
+            detach: True면 hidden_states를 detach하여 trunk gradient 차단
+
+        Returns:
+            value_logits: [batch, seq, 1]
+        """
+        if self.value_head is None:
+            raise ValueError("Value head not initialized.")
+
+        hidden_states = trunk_output["hidden_states"]
+        if detach:
+            hidden_states = hidden_states.detach()
+        return self.value_head(hidden_states)
 
     @classmethod
     def _from_checkpoint(

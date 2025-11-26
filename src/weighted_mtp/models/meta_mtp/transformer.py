@@ -343,3 +343,66 @@ class Transformer(nn.Module):
             return output, hidden_states
 
         return output
+
+    def trunk_forward(
+        self,
+        tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Trunk layers만 실행 (메모리 효율적 학습용)
+
+        head_forward()와 함께 사용하여 MTP heads를 순차 실행 가능.
+        전체 logits [B, S, 4, vocab]을 한 번에 유지하지 않고
+        head별로 [B, S, vocab]씩 처리하여 메모리 절약.
+
+        Args:
+            tokens: [batch, seq] 입력 토큰
+
+        Returns:
+            h_trunk: [batch, seq, dim] trunk 출력 (prediction heads 입력용)
+            freqs_cis: [seq, head_dim/2] RoPE 주파수 (head_forward용)
+            mask: [seq, seq] causal mask 또는 None (head_forward용)
+        """
+        _bsz, seqlen = tokens.shape
+        h = self.tok_embeddings(tokens)
+
+        freqs_cis = self.freqs_cis[:seqlen].to(tokens.device)
+
+        mask = None
+        if seqlen > 1:
+            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device)
+            mask = torch.triu(mask, diagonal=1)
+            mask = torch.hstack([
+                torch.zeros((seqlen, 0), device=tokens.device),
+                mask
+            ]).type_as(h)
+
+        for layer in self.layers[:-1]:
+            h = layer(h, 0, freqs_cis, mask)
+
+        return h, freqs_cis, mask
+
+    def head_forward(
+        self,
+        h_trunk: torch.Tensor,
+        head_idx: int,
+        freqs_cis: torch.Tensor,
+        mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """특정 prediction head만 실행 (메모리 효율적 학습용)
+
+        trunk_forward()로 얻은 h_trunk를 입력받아 특정 MTP head만 실행.
+        [B, S, vocab] 크기의 logits만 반환하여 메모리 절약.
+
+        Args:
+            h_trunk: [batch, seq, dim] trunk 출력 (trunk_forward 반환값)
+            head_idx: head 인덱스 (0 = layers[-1], 1~3 = extra_heads[0~2])
+            freqs_cis: [seq, head_dim/2] RoPE 주파수 (trunk_forward 반환값)
+            mask: [seq, seq] causal mask 또는 None (trunk_forward 반환값)
+
+        Returns:
+            logits: [batch, seq, vocab] 해당 head의 예측
+        """
+        prediction_heads = [self.layers[-1]] + list(self.extra_heads)
+        h = prediction_heads[head_idx](h_trunk, 0, freqs_cis, mask)
+        h = self.norm(h)
+        return self.output(h)
