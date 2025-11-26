@@ -210,6 +210,11 @@ def validate_rho1(
                 if mask_sum_k > 0:
                     batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
 
+                # 메모리 최적화: 중간 텐서 즉시 삭제
+                del policy_logits_k, labels_k, weights_k, mask_k
+                del ce_loss_k, valid_label_mask_k, combined_mask_k
+                del weighted_ce_k, unweighted_ce_k
+
             weighted_ce_loss = batch_weighted_ce_loss / max(valid_heads, 1)
             unweighted_ce_loss = batch_unweighted_ce_loss / n_future
 
@@ -542,6 +547,11 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     valid_heads += 1
                 if mask_sum_k > 0:
                     batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
+
+                # 메모리 최적화: 중간 텐서 즉시 삭제
+                del policy_logits_k, labels_k, weights_k, mask_k
+                del ce_loss_k, valid_label_mask_k, combined_mask_k
+                del weighted_ce_k, unweighted_ce_k
 
             weighted_ce_loss = batch_weighted_ce_loss / max(valid_heads, 1)
             unweighted_ce_loss = batch_unweighted_ce_loss / n_future

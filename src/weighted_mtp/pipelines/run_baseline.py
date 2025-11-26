@@ -7,14 +7,11 @@
 """
 
 import argparse
-import logging
 import os
 from pathlib import Path
-from typing import Any
 
 import mlflow
 import torch
-import torch.nn.functional as F
 from omegaconf import OmegaConf, DictConfig
 from torch.utils.data import DataLoader
 
@@ -29,6 +26,7 @@ from weighted_mtp.utils import (
     cleanup_old_checkpoints,
     cleanup_s3_checkpoints,
     compute_gradient_clip_stats,
+    compute_mtp_ce_loss_unweighted,
     create_scheduler,
     get_model_size,
     get_system_info,
@@ -87,9 +85,6 @@ def validate_baseline(
     total_ce_loss = 0.0
     n_batches = 0
 
-    # 모델 dtype 감지
-    model_dtype = next(adapter.parameters()).dtype
-
     with torch.no_grad():
         for batch in dataloader:
             # 1. Batch를 device로 이동
@@ -101,35 +96,12 @@ def validate_baseline(
             logits = adapter(input_ids)
             # logits: [batch, seq, n_future, vocab]
 
-            batch_size, seq_len, n_future, vocab_size = logits.shape
-
-            # 3. Uniform CE loss (모든 토큰 weight=1.0)
-            batch_ce_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
-
-            for k in range(1, n_future + 1):
-                valid_len = seq_len - k
-
-                logits_k = logits[:, :valid_len, k - 1, :]
-                labels_k = labels[:, k : k + valid_len]
-                mask_k = attention_mask[:, k : k + valid_len]
-
-                ce_loss_k = F.cross_entropy(
-                    logits_k.reshape(-1, vocab_size),
-                    labels_k.reshape(-1),
-                    reduction="none",
-                    ignore_index=-100,
-                )
-
-                # Output 토큰만 학습 (instruction/input/padding 제외)
-                valid_label_mask_k = (labels_k != -100).float()
-                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
-                masked_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
-
-                mask_sum_k = combined_mask_k.sum()
-                if mask_sum_k > 0:
-                    batch_ce_loss += masked_ce_k.sum() / mask_sum_k
-
-            ce_loss = batch_ce_loss / n_future
+            # 3. Uniform CE loss - 메모리 최적화된 유틸리티 사용
+            ce_loss = compute_mtp_ce_loss_unweighted(
+                logits=logits,
+                labels=labels,
+                attention_mask=attention_mask,
+            )
 
             # 4. Metrics 수집
             total_ce_loss += ce_loss.item()
@@ -347,9 +319,6 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # Throughput tracker 초기화
     throughput_tracker = ThroughputTracker()
 
-    # 모델 dtype 감지
-    model_dtype = next(adapter.parameters()).dtype
-
     # 8. Training loop
     optimizer.zero_grad()
 
@@ -403,35 +372,12 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 logger.info(f"[Rank {rank}] Forward pass completed, logits shape: {logits.shape}")
             # logits: [batch, seq, n_future, vocab]
 
-            batch_size, seq_len, n_future, vocab_size = logits.shape
-
-            # Uniform CE loss (모든 토큰 weight=1.0)
-            batch_ce_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
-
-            for k in range(1, n_future + 1):
-                valid_len = seq_len - k
-
-                logits_k = logits[:, :valid_len, k - 1, :]
-                labels_k = labels[:, k : k + valid_len]
-                mask_k = attention_mask[:, k : k + valid_len]
-
-                ce_loss_k = F.cross_entropy(
-                    logits_k.reshape(-1, vocab_size),
-                    labels_k.reshape(-1),
-                    reduction="none",
-                    ignore_index=-100,
-                )
-
-                # Output 토큰만 학습 (instruction/input/padding 제외)
-                valid_label_mask_k = (labels_k != -100).float()
-                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
-                masked_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
-
-                mask_sum_k = combined_mask_k.sum()
-                if mask_sum_k > 0:
-                    batch_ce_loss += masked_ce_k.sum() / mask_sum_k
-
-            ce_loss = batch_ce_loss / n_future
+            # Uniform CE loss - 메모리 최적화된 유틸리티 사용
+            ce_loss = compute_mtp_ce_loss_unweighted(
+                logits=logits,
+                labels=labels,
+                attention_mask=attention_mask,
+            )
 
             # Loss scaling (gradient accumulation 적용)
             scaled_loss = ce_loss / gradient_accumulation_steps

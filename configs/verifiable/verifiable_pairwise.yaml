@@ -69,7 +69,7 @@ training:
   max_grad_norm: 0.5
 
   # TD error weighting
-  beta: 1.0
+  beta: 1.2
   weight_clip_min: 0.1
   weight_clip_max: 2
   gamma: 1.0

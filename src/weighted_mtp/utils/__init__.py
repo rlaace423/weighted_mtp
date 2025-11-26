@@ -51,6 +51,10 @@ from weighted_mtp.utils.pairwise_utils import (
     pairwise_ranking_loss,
     compute_pairwise_accuracy,
 )
+from weighted_mtp.utils.loss_utils import (
+    compute_mtp_ce_loss,
+    compute_mtp_ce_loss_unweighted,
+)
 
 __all__ = [
     # Checkpoint utils
@@ -90,4 +94,7 @@ __all__ = [
     "create_scheduler",
     "get_scheduler_state",
     "load_scheduler_state",
+    # Loss utils
+    "compute_mtp_ce_loss",
+    "compute_mtp_ce_loss_unweighted",
 ]

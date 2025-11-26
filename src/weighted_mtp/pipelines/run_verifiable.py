@@ -5,14 +5,11 @@
 """
 
 import argparse
-import logging
 import os
 from pathlib import Path
-from typing import Any
 
 import mlflow
 import torch
-import torch.nn.functional as F
 from omegaconf import OmegaConf, DictConfig
 from torch.utils.data import DataLoader
 
@@ -27,6 +24,7 @@ from weighted_mtp.utils import (
     cleanup_old_checkpoints,
     cleanup_s3_checkpoints,
     compute_gradient_clip_stats,
+    compute_mtp_ce_loss,
     compute_pairwise_accuracy,
     compute_value_function_stats,
     compute_weight_statistics,
@@ -122,7 +120,7 @@ def validate_verifiable(
             )
             neg_value_logits = neg_outputs["value_logits"]
 
-            batch_size, seq_len, n_future, vocab_size = pos_logits.shape
+            n_future = pos_logits.shape[2]
 
             # TD error (Positive만 - Policy weighting용)
             # Response 토큰 마스크 (labels != -100)
@@ -142,36 +140,16 @@ def validate_verifiable(
                 max_weight=weight_clip_max,
             )
 
-            # Policy Loss (Positive만, TD Weighted)
-            batch_weighted_ce_loss = 0.0
-            batch_unweighted_ce_loss = 0.0
-
-            for k in range(1, n_future + 1):
-                valid_len = seq_len - k
-                logits_k = pos_logits[:, :valid_len, k - 1, :]
-                labels_k = pos_labels[:, k : k + valid_len]
-                weights_k = weights[:, k : k + valid_len]
-                mask_k = pos_attention_mask[:, k : k + valid_len]
-
-                ce_loss_k = F.cross_entropy(
-                    logits_k.reshape(-1, vocab_size),
-                    labels_k.reshape(-1),
-                    reduction="none",
-                    ignore_index=-100,
-                )
-                valid_label_mask_k = (labels_k != -100).float()
-                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
-
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
-                unweighted_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
-
-                mask_sum_k = combined_mask_k.sum()
-                if mask_sum_k > 0:
-                    batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
-                    batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
-
-            weighted_ce_loss = batch_weighted_ce_loss / n_future
-            unweighted_ce_loss = batch_unweighted_ce_loss / n_future
+            # Policy Loss (Positive만, TD Weighted) - 메모리 최적화된 유틸리티 사용
+            ce_losses = compute_mtp_ce_loss(
+                logits=pos_logits,
+                labels=pos_labels,
+                attention_mask=pos_attention_mask,
+                weights=weights,
+                n_future=n_future,
+            )
+            weighted_ce_loss = ce_losses["weighted_ce_loss"]
+            unweighted_ce_loss = ce_losses["unweighted_ce_loss"]
 
             # Pairwise Ranking Loss (value head 학습)
             pos_mask = (pos_labels != -100).to(model_dtype)
@@ -511,8 +489,6 @@ def run_verifiable_training(
                 )
             neg_value_logits = neg_outputs["value_logits"]
 
-            batch_size, seq_len, n_future, vocab_size = pos_logits.shape
-
             # TD error 계산 (Positive만 - Policy weighting용)
             # Response 토큰 마스크 (labels != -100)
             pos_response_mask = (pos_labels != -100).long()
@@ -534,38 +510,15 @@ def run_verifiable_training(
                 max_weight=config.training.weight_clip_max,
             )
 
-            # Policy Loss (Positive만, TD Weighted)
-            batch_weighted_ce_loss = 0.0
-            batch_unweighted_ce_loss = 0.0
-
-            for k in range(1, n_future + 1):
-                valid_len = seq_len - k
-
-                logits_k = pos_logits[:, :valid_len, k - 1, :]
-                labels_k = pos_labels[:, k : k + valid_len]
-                weights_k = weights[:, k : k + valid_len]
-                mask_k = pos_attention_mask[:, k : k + valid_len]
-
-                ce_loss_k = F.cross_entropy(
-                    logits_k.reshape(-1, vocab_size),
-                    labels_k.reshape(-1),
-                    reduction="none",
-                    ignore_index=-100,
-                )
-
-                valid_label_mask_k = (labels_k != -100).float()
-                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
-
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
-                unweighted_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
-
-                mask_sum_k = combined_mask_k.sum()
-                if mask_sum_k > 0:
-                    batch_weighted_ce_loss += weighted_ce_k.sum() / mask_sum_k
-                    batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
-
-            weighted_ce_loss = batch_weighted_ce_loss / n_future
-            unweighted_ce_loss = batch_unweighted_ce_loss / n_future
+            # Policy Loss (Positive만, TD Weighted) - 메모리 최적화된 유틸리티 사용
+            ce_losses = compute_mtp_ce_loss(
+                logits=pos_logits,
+                labels=pos_labels,
+                attention_mask=pos_attention_mask,
+                weights=weights,
+            )
+            weighted_ce_loss = ce_losses["weighted_ce_loss"]
+            unweighted_ce_loss = ce_losses["unweighted_ce_loss"]
 
             # Pairwise Ranking Loss (value head만 학습, trunk gradient 차단됨)
             pos_mask = (pos_labels != -100).to(model_dtype)
@@ -579,10 +532,8 @@ def run_verifiable_training(
             input_ids = pos_input_ids
             attention_mask = pos_attention_mask
             labels = pos_labels
-            is_correct = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
             rewards = pos_rewards
             value_logits = pos_value_logits
-            logits = pos_logits
             valid_label_mask = pos_mask.unsqueeze(-1)
             # pairwise 모드에서는 rewards를 td_targets로 사용 (로깅용)
             td_targets = rewards.view(-1, 1, 1).expand_as(value_logits)
