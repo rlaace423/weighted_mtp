@@ -34,10 +34,14 @@ def _detect_transformer_layer_cls(model: torch.nn.Module) -> set:
     Returns:
         FSDP auto_wrap_policy에 사용할 transformer_layer_cls set
     """
-    # HuggingFace LlamaForCausalLM 감지
-    # model.model.layers 구조를 가짐
+    from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+
+    # HuggingFace LlamaForCausalLM 감지 (model.model.layers 구조)
     if hasattr(model, 'model') and hasattr(model.model, 'layers'):
-        from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+        return {LlamaDecoderLayer}
+
+    # ValueModel 감지 (model.backbone.layers 구조, LlamaModel 기반)
+    if hasattr(model, 'backbone') and hasattr(model.backbone, 'layers'):
         return {LlamaDecoderLayer}
 
     # MetaLlamaMTPAdapter (기본)

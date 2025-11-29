@@ -296,6 +296,9 @@ CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_
   -m weighted_mtp.pipelines.run_baseline \
   --config configs/production/baseline.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
+  
+# MLflow 로컬 파일 저장 경로 (EC2 서버 대신 사용)
+MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
 
 # Critic 사전학습
 CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
