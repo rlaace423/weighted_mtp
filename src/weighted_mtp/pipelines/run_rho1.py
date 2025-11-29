@@ -259,7 +259,7 @@ def validate_rho1(
         "val_unweighted_ce_loss": avg_unweighted_ce_loss,
         "val_head0_ce_loss": avg_head0_ce_loss,
         "val_excess_loss": avg_excess_loss,
-        "val_loss": avg_head0_ce_loss,  # Best tracking용 (Head0 CE loss)
+        "val_loss": avg_unweighted_ce_loss,  # Best checkpoint 기준: 전체 head unweighted CE
     }
 
     return metrics
@@ -655,13 +655,6 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     "weighted_ce": weighted_ce_loss.item(),
                     "unweighted_ce": unweighted_ce_loss.item(),
                     "selection_ratio": selection_stats['selection_ratio'],
-                    "head_0_ce_mean": selection_stats.get('head_0_ce_mean', 0.0),
-                    "head_1_ce_mean": selection_stats.get('head_1_ce_mean', 0.0),
-                    "head_2_ce_mean": selection_stats.get('head_2_ce_mean', 0.0),
-                    "head_3_ce_mean": selection_stats.get('head_3_ce_mean', 0.0),
-                    "head_1_excess_mean": selection_stats.get('head_1_excess_mean', 0.0),
-                    "head_2_excess_mean": selection_stats.get('head_2_excess_mean', 0.0),
-                    "head_3_excess_mean": selection_stats.get('head_3_excess_mean', 0.0),
                     "avg_heads_per_pos": selection_stats.get('avg_heads_per_position', 0.0),
                     "weight_mean": weight_dist_stats["weight_mean"],
                     "weight_std": weight_dist_stats["weight_std"],
@@ -681,13 +674,6 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                                 "train/unweighted_ce_loss": avg_unweighted_ce,
                                 "train/selection_ratio": avg_selection_ratio,
                                 "train/avg_heads_per_pos": reduced["avg_heads_per_pos"],
-                                "train/head_0_ce": reduced["head_0_ce_mean"],
-                                "train/head_1_ce": reduced["head_1_ce_mean"],
-                                "train/head_2_ce": reduced["head_2_ce_mean"],
-                                "train/head_3_ce": reduced["head_3_ce_mean"],
-                                "train/head_1_excess": reduced["head_1_excess_mean"],
-                                "train/head_2_excess": reduced["head_2_excess_mean"],
-                                "train/head_3_excess": reduced["head_3_excess_mean"],
                                 "train/grad_norm": avg_grad_norm_post,
                                 "train/grad_norm_pre_clip": avg_grad_norm_pre,
                                 "train/grad_clip_ratio": avg_grad_clip_ratio,
@@ -779,8 +765,9 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 )
 
             logger.info(
-                f"Validation - Head0 CE: {val_metrics['val_head0_ce_loss']:.4f}, "
-                f"Weighted CE: {val_metrics['val_weighted_ce_loss']:.4f}"
+                f"Validation - Unweighted CE: {val_metrics['val_unweighted_ce_loss']:.4f}, "
+                f"Weighted CE: {val_metrics['val_weighted_ce_loss']:.4f}, "
+                f"Head0 CE: {val_metrics['val_head0_ce_loss']:.4f}"
             )
 
         # Checkpoint 저장 (validation loss 개선 시만)
@@ -807,7 +794,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             barrier()
 
             if is_main_process():
-                logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
+                logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_unweighted_ce: {best_val_loss:.4f})")
 
                 # 오래된 checkpoint 정리
                 if config.checkpoint.get("save_total_limit"):
@@ -825,7 +812,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                             save_total_limit=config.checkpoint.save_total_limit,
                         )
         else:
-            logger.info(f"Validation loss did not improve ({val_metrics['val_loss']:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
+            logger.info(f"Validation unweighted CE did not improve ({val_metrics['val_loss']:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
 
         # 다음 checkpoint 경계 설정
         next_checkpoint_epoch += save_checkpoint_every

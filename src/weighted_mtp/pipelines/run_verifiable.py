@@ -214,7 +214,8 @@ def validate_verifiable(
         "val_weighted_ce_loss": avg_weighted_ce_loss,
         "val_unweighted_ce_loss": avg_unweighted_ce_loss,
         "val_value_loss": avg_value_loss,
-        "val_loss": avg_total_loss,
+        "val_total_loss": avg_total_loss,  # 모니터링용 (weighted CE + value loss)
+        "val_loss": avg_unweighted_ce_loss,  # Best checkpoint 기준: unweighted CE
         "val_pairwise_accuracy": total_pairwise_accuracy / n_batches,
         "val_margin": total_margin / n_batches,
     }
@@ -763,12 +764,7 @@ def run_verifiable_training(
                     "value_loss": value_loss.item(),
                     "total_loss": total_loss.item(),
                     "td_mean": td_stats["td_mean"],
-                    "td_std": td_stats["td_std"],
-                    "td_min": td_stats["td_min"],
-                    "td_max": td_stats["td_max"],
                     "value_mse": value_func_stats["value_mse"],
-                    "value_mean": value_func_stats["value_mean"],
-                    "value_std": value_func_stats["value_std"],
                     "weight_mean": weight_dist_stats["weight_mean"],
                     "weight_std": weight_dist_stats["weight_std"],
                     "weight_min": weight_dist_stats["weight_min"],
@@ -781,8 +777,6 @@ def run_verifiable_training(
                 avg_total_loss = reduced["total_loss"]
                 avg_td_mean = reduced["td_mean"]
                 avg_value_mse = reduced["value_mse"]
-                avg_value_mean = reduced["value_mean"]
-                avg_value_std = reduced["value_std"]
 
                 if is_main_process():
                     if use_mlflow:
@@ -796,14 +790,9 @@ def run_verifiable_training(
                             "train/grad_clip_ratio": avg_grad_clip_ratio,
                             "train/learning_rate": optimizer.param_groups[0]["lr"],
                             "td/mean": avg_td_mean,
-                            "td/std": reduced["td_std"],
-                            "td/min": reduced["td_min"],
-                            "td/max": reduced["td_max"],
                             "td/ema_mean": td_ema.ema_mean.item(),
                             "td/ema_std": td_ema.ema_std.item(),
                             "value/mse": avg_value_mse,
-                            "value/mean_prediction": avg_value_mean,
-                            "value/std_prediction": avg_value_std,
                             "weight/mean": reduced["weight_mean"],
                             "weight/std": reduced["weight_std"],
                             "weight/min": reduced["weight_min"],
@@ -896,18 +885,20 @@ def run_verifiable_training(
 
         # Validation metrics aggregation (1회 통신)
         val_reduce_dict = {
-            "val_total": val_metrics["val_loss"],
+            "val_total": val_metrics["val_total_loss"],  # weighted CE + value loss (모니터링용)
             "val_weighted_ce": val_metrics["val_weighted_ce_loss"],
-            "val_unweighted_ce": val_metrics["val_unweighted_ce_loss"],
+            "val_unweighted_ce": val_metrics["val_unweighted_ce_loss"],  # checkpoint 기준
             "val_value": val_metrics["val_value_loss"],
             "val_pairwise_accuracy": val_metrics["val_pairwise_accuracy"],
             "val_margin": val_metrics["val_margin"],
         }
         reduced_val = all_reduce_scalars(val_reduce_dict)
-        avg_val_total = reduced_val["val_total"]
+        avg_val_total = reduced_val["val_total"]  # 모니터링용
         avg_val_weighted_ce = reduced_val["val_weighted_ce"]
-        avg_val_unweighted_ce = reduced_val["val_unweighted_ce"]
+        avg_val_unweighted_ce = reduced_val["val_unweighted_ce"]  # checkpoint 기준
         avg_val_value = reduced_val["val_value"]
+        avg_val_pairwise_acc = reduced_val["val_pairwise_accuracy"]
+        avg_val_margin = reduced_val["val_margin"]
 
         # Epoch-level 로깅
         if is_main_process():
@@ -926,6 +917,8 @@ def run_verifiable_training(
                         "val/weighted_ce_loss": avg_val_weighted_ce,
                         "val/unweighted_ce_loss": avg_val_unweighted_ce,
                         "val/value_loss": avg_val_value,
+                        "val/pairwise_accuracy": avg_val_pairwise_acc,
+                        "val/margin": avg_val_margin,
                         "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
                         "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
                         "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
@@ -935,14 +928,15 @@ def run_verifiable_training(
                 )
 
         logger.info(
-            f"Validation - Total Loss: {avg_val_total:.4f}, "
+            f"Validation - Unweighted CE: {avg_val_unweighted_ce:.4f}, "
             f"Weighted CE: {avg_val_weighted_ce:.4f}, "
-            f"Value: {avg_val_value:.4f}"
+            f"Value: {avg_val_value:.4f}, "
+            f"Pairwise Acc: {avg_val_pairwise_acc:.2%}"
         )
 
-        # Checkpoint 저장 (validation loss 개선 시만)
-        if avg_val_total < best_val_loss:
-            best_val_loss = avg_val_total
+        # Checkpoint 저장 (unweighted CE loss 개선 시만)
+        if avg_val_unweighted_ce < best_val_loss:
+            best_val_loss = avg_val_unweighted_ce
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}.pt"
 
             # LoRA 사용 시 LoRA 전용 checkpoint 저장 옵션
@@ -988,7 +982,7 @@ def run_verifiable_training(
             barrier()
 
             if is_main_process():
-                logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
+                logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_unweighted_ce: {best_val_loss:.4f})")
 
                 # 오래된 checkpoint 정리
                 if config.checkpoint.get("save_total_limit"):
@@ -1006,7 +1000,7 @@ def run_verifiable_training(
                             save_total_limit=config.checkpoint.save_total_limit,
                         )
         else:
-            logger.info(f"Validation loss did not improve ({avg_val_total:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
+            logger.info(f"Validation unweighted CE did not improve ({avg_val_unweighted_ce:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
 
         # 다음 checkpoint 경계 설정
         next_checkpoint_epoch += save_checkpoint_every

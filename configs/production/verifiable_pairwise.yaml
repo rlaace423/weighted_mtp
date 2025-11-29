@@ -62,8 +62,8 @@ data_sampling:
 # 학습 설정 (H200 3-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 20  # Per GPU (Pairwise pos+neg 메모리 고려)
-  gradient_accumulation_steps: 2  # Effective batch size = 20 × 2 × 3 = 120
+  batch_size: 18  # Per GPU (Pairwise pos+neg 메모리 고려)
+  gradient_accumulation_steps: 2  # Effective batch size = 18 × 2 × 3 = 108
 
   # 컴포넌트별 학습률 (LoRA는 Full FT 대비 LR 10배 권장)
   trunk_learning_rate: 1.0e-4    # LoRA Trunk LR
@@ -78,14 +78,13 @@ training:
   # Value head 설정
   value_head_type: mlp  # linear (4096 → 1) 또는 mlp (4096 → 512 → 256 → 1)
   dropout: 0.3
-  trunk_frozen: true  # false면 value loss gradient가 trunk로 전파됨
+  trunk_frozen: false  # false면 value loss gradient가 trunk로 전파됨
 
-  # TD error weighting
-  beta: 0.8
+  # TD error weighting (Terminal-only binary reward이므로 MC 방식 사용)
+  # gamma, lambda는 코드에서 1.0 고정 (intermediate reward 없음)
+  beta: 0.9
   weight_clip_min: 0.1
-  weight_clip_max: 2
-  gamma: 1.0
-  lam: 1.0
+  weight_clip_max: 3
 
   # TD EMA 정규화 (Advantage Whitening 일관성 보장)
   td_ema_momentum: 0.1       # EMA 업데이트 계수 (0.1 = 90% 이전 + 10% 현재)
@@ -93,7 +92,7 @@ training:
 
   # Value loss 스케일링 (컴포넌트별 clipping과 별개로 loss 비율 조정)
   # 이제 gradient clipping이 분리되어 있으므로 순수 loss 비율로만 사용
-  value_loss_coef: 1.0
+  value_loss_coef: 0.5
 
   # Value loss 모드 선택 (pairwise와 mc_mse 독립적 또는 동시 사용 가능)
   value_loss:

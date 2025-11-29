@@ -71,7 +71,7 @@ training:
   value_head_type: mlp
   dropout: 0.3  # Shortcut Learning 방지
   trunk_frozen: true  # true면 value loss gradient가 trunk로 흐르지 않음
-  log_interval: 1
+  log_interval: 5
 
   # Value loss 모드 선택 (pairwise와 mc_mse 독립적 또는 동시 사용 가능)
   value_loss:

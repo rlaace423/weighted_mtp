@@ -1,5 +1,5 @@
-# Critic Pre-training (Stage 1) - Pairwise Ranking Loss
-# Shortcut Learning 방지를 위한 동일 instruction 내 상대 비교 학습
+# Rho-1 WMTP (Reference-based Weighting)
+# Excess loss weighting with Reference model
 # 프로덕션 설정 (VESSL H200 4-GPU)
 
 # 프로젝트 정보
@@ -9,14 +9,14 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: critic-pretrain-linear-final
-  description: "Linear value head pretraining for TD error calculation"
-  stage: critic
+  name: rho1-wmtp-signed
+  description: "Rho-1 Weighted MTP with Reference Model"
+  stage: rho1
   tags:
-    - critic
-    - pairwise-ranking
-    - mlp-value-head
-    - dropout-0.3
+    - rho1
+    - wmtp
+    - reference-based
+    - production
 
 # 모델 설정
 models:
@@ -34,6 +34,12 @@ models:
       vocab_size: 32000
     dtype: bfloat16
 
+  # Rho-1 Reference model (HuggingFace 형식)
+  reference:
+    name: ref-sheared-llama-2.7b
+    path: storage/checkpoints/ref-tuning/ref-tuning-codecontests/checkpoint_final
+    dtype: bfloat16
+
 # 데이터셋 설정
 dataset:
   name: codecontests
@@ -41,14 +47,15 @@ dataset:
   validation: storage/datasets/codecontests/processed/valid.jsonl
   max_length: 2048
 
-# 데이터 샘플링 (Pairwise)
+# 데이터 샘플링
 data_sampling:
   seed: 42
   val_n_samples: 500
-  use_pairwise: true
+  use_pairwise: false
+  correct_ratio: 1.0  # Rho-1은 correct 샘플만 사용
 
-  n_samples: 50000  # 학습용 (correct, incorrect) 쌍
-  max_pairs_per_problem: 20  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
+  n_samples: 100000
+  max_pairs_per_problem: 25  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
 
   difficulty_bins:
     zero: [0, 0]
@@ -59,34 +66,28 @@ data_sampling:
     diff_7: 0.3
     else: 0.3
 
-# 학습 설정 (H200 4-GPU 최적화)
+# 학습 설정 (H200 3-GPU 최적화)
 training:
-  n_epochs: 3.0
-  batch_size: 64  # Pairwise는 메모리 2배 소모 (pos + neg)
-  gradient_accumulation_steps: 1
-  trunk_learning_rate: 0
-  value_head_learning_rate: 1.0e-4
-  max_grad_norm: 1.0
-  num_unfrozen_layers: 0
-  value_head_type: linear
-  dropout: 0  # Shortcut Learning 방지
-  trunk_frozen: true  # true면 value loss gradient가 trunk로 흐르지 않음
+  n_epochs: 2.0
+  batch_size: 18  # Per GPU (Reference model 메모리 고려)
+  gradient_accumulation_steps: 2  # Effective batch size = 18 × 2 × 3 = 108
+  learning_rate: 1.0e-4  # LoRA 사용 시 Full FT 대비 LR 높여야 함
+  max_grad_norm: 0.1
+
+  # Rho-1 weighting
+  rho1_mode: "signed"  # "signed" (Policy > Ref만) / "absolute" (차이 큰 모든 토큰) / "difficult" (Ref가 어려워하는 토큰)
+  temperature: 1.0  # Rho-1 temperature
+  k_percent: 0.7  # Top-k threshold
+
   log_interval: 5
 
-  # Value loss 모드 선택 (pairwise와 mc_mse 독립적 또는 동시 사용 가능)
-  value_loss:
-    use_pairwise: false   # Pairwise ranking loss
-    use_mc_mse: true    # MC tokenwise MSE loss
-    pairwise_coef: 0   # Pairwise loss 계수
-    mc_mse_coef: 1.0     # MC MSE loss 계수
-
-  # LoRA 설정 (Critic은 trunk frozen으로 기본 비활성화)
-  use_lora: false
+  # LoRA 설정 (All-Linear LoRA for CodeContests)
+  use_lora: true
   lora:
-    rank: 64           # 활성화 시 사용할 설정
-    alpha: 128.0
-    dropout: 0.05
-    target_modules:
+    rank: 64           # 코드/논리 태스크는 64 권장
+    alpha: 128.0       # rank의 2배
+    dropout: 0.05      # 과적합 방지
+    target_modules:    # 모든 Linear Layer에 적용
       - wq
       - wk
       - wv
@@ -99,17 +100,17 @@ training:
   lr_scheduler:
     type: cosine
     warmup_ratio: 0.03
-    min_lr_ratio: 0.01
+    min_lr_ratio: 0.005
 
 # 체크포인트
 checkpoint:
-  save_dir: storage/checkpoints/critic/${experiment.name}
-  save_checkpoint_every: 0.25
+  save_dir: storage/checkpoints/rho1/${experiment.name}
+  save_checkpoint_every: 0.2
   save_best: true
   save_final: true
   save_total_limit: 3
   s3_upload: false
-  save_lora_only: false
+  save_lora_only: true
 
 # 런타임 설정
 runtime:
@@ -132,9 +133,9 @@ storage:
   datasets_dir: storage/datasets
   checkpoints_dir: storage/checkpoints
 
-# MLflow 추적
+# MLflow 추적 (로컬 파일 기반)
 mlflow:
-  tracking_uri: ""
+  tracking_uri: ""  # 빈 문자열 = ./mlruns 디렉터리 사용
   experiment: "weighted-mtp/production"
 
 # 로깅

@@ -154,7 +154,7 @@ training:
   gradient_accumulation_steps: 2  # Gradient accumulation
   learning_rate: 1.0e-5        # Learning rate
   max_grad_norm: 1.0           # Gradient clipping
-  log_interval: 1             # 로깅 간격 (steps)
+  log_interval: 5             # 로깅 간격 (steps)
 
   # Verifiable 전용 (TD error weighting)
   beta: 1.0                    # TD error temperature

@@ -58,14 +58,14 @@ data_sampling:
     diff_7: 0.3
     else: 0.3
 
-# 학습 설정 (H200 4-GPU 최적화)
+# 학습 설정 (H200 3-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 32  # Per GPU
-  gradient_accumulation_steps: 1  # Effective batch size = 128
+  batch_size: 40  # Per GPU
+  gradient_accumulation_steps: 1  # Effective batch size = 40 × 1 × 3 = 120
   learning_rate: 1.0e-4  # LoRA 사용 시 Full FT 대비 LR 높여야 함
   max_grad_norm: 0.1
-  log_interval: 1
+  log_interval: 5
 
   # LoRA 설정 (All-Linear LoRA for CodeContests)
   use_lora: true

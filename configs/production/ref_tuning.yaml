@@ -48,14 +48,14 @@ data_sampling:
     diff_7: 0.35
     else: 0.65
 
-# 학습 설정 (2.7B 모델, 2-GPU 최적화)
+# 학습 설정 (2.7B 모델, H200 3-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 32
-  gradient_accumulation_steps: 1
+  batch_size: 36  # Per GPU (2.7B 경량 모델)
+  gradient_accumulation_steps: 1  # Effective batch size = 36 × 1 × 3 = 108
   learning_rate: 2.0e-5
   max_grad_norm: 1
-  log_interval: 1
+  log_interval: 5
 
   # LoRA 설정: ref-tuning은 HuggingFace 모델 사용으로 현재 미지원
   # HuggingFace LoRA 필요 시 PEFT 라이브러리 사용 권장

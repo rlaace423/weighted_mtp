@@ -725,6 +725,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                             metrics_to_log = {
                                 "train/loss": avg_loss,
                                 "train/grad_norm": avg_grad_norm_post,
+                                "train/grad_norm_pre_clip": grad_clip_stats["grad_norm_pre_clip"],
+                                "train/grad_clip_ratio": grad_clip_stats["grad_clip_ratio"],
                                 "train/learning_rate": value_head_lr,
                                 "train/pairwise_accuracy": avg_pairwise_acc,
                                 "value/mean_pos": avg_mean_pos,
@@ -847,12 +849,12 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             if use_mlflow:
                 mlflow.log_metrics(
                     {
-                        # Train metrics
+                        # Train metrics (epoch 평균)
                         "train/epoch_loss": train_loss_avg,
-                        "train/pairwise_accuracy": train_pairwise_acc,
-                        "train/mean_pos": train_mean_pos,
-                        "train/mean_neg": train_mean_neg,
-                        "train/margin": train_margin,
+                        "train/epoch_pairwise_accuracy": train_pairwise_acc,
+                        "train/epoch_mean_pos": train_mean_pos,
+                        "train/epoch_mean_neg": train_mean_neg,
+                        "train/epoch_margin": train_margin,
                         # Validation metrics
                         "val/loss": avg_val_loss,
                         "val/pairwise_accuracy": avg_val_pairwise_acc,
