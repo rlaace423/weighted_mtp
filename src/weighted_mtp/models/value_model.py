@@ -156,11 +156,12 @@ class ValueModel(nn.Module):
         Returns:
             value_logits: [batch, seq, 1] 토큰별 value 예측
         """
-        # Backbone forward
+        # Backbone forward (use_cache=False로 activation checkpointing 호환성 확보)
         outputs = self.backbone(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=False,
+            use_cache=False,
         )
         hidden_states = outputs.last_hidden_state  # [batch, seq, hidden]
         
