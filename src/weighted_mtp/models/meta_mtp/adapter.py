@@ -1,7 +1,9 @@
 """Meta LLaMA MTP Adapter
 
-Transformer를 감싸서 trunk/full forward를 제공하는 Adapter
+Transformer를 감싸서 MTP 학습에 필요한 기능 제공
 LoRA (Low-Rank Adaptation) 적용 지원
+
+Value function은 별도 ValueModel에서 처리 (독립 모델)
 """
 
 from typing import Optional
@@ -10,7 +12,6 @@ import torch
 from torch import nn
 
 from .transformer import Transformer, ModelArgs
-from .value_head import ValueHeadType, create_value_head
 
 
 # LoRA 기본 설정
@@ -25,15 +26,12 @@ DEFAULT_LORA_CONFIG = {
 class MetaLlamaMTPAdapter(nn.Module):
     """Meta LLaMA MTP Adapter
 
-    Transformer를 감싸서 WMTP 학습에 필요한 기능 제공:
-    - trunk_forward(): Value head 학습 전용 (Stage 1)
-    - full_forward(): Weighted training 전용 (Stage 2)
-    - LoRA 적용: trunk layers에 low-rank adaptation 지원
+    순수 MTP 모델. Value head 없음.
+    Value function은 별도 ValueModel에서 처리.
 
     Args:
         transformer: Transformer 인스턴스
         model_args: ModelArgs (params.json)
-        value_head: ValueHead 인스턴스 (선택적, Stage 1에서 추가)
         lora_enabled: LoRA 적용 여부
     """
 
@@ -41,13 +39,11 @@ class MetaLlamaMTPAdapter(nn.Module):
         self,
         transformer: Transformer,
         model_args: ModelArgs,
-        value_head: Optional[ValueHeadType] = None,
         lora_enabled: bool = False,
     ):
         super().__init__()
         self.transformer = transformer
         self.model_args = model_args
-        self.value_head = value_head
         self.lora_enabled = lora_enabled
 
     @classmethod
@@ -56,9 +52,6 @@ class MetaLlamaMTPAdapter(nn.Module):
         model_path: str,
         device: str = "auto",
         dtype: Optional[str] = None,
-        initialize_value_head: bool = True,
-        value_head_type: str = "mlp",
-        dropout: float = 0.0,
         use_lora: bool = False,
         lora_config: Optional[dict] = None,
     ) -> "MetaLlamaMTPAdapter":
@@ -70,11 +63,6 @@ class MetaLlamaMTPAdapter(nn.Module):
                 - .pt 파일: checkpoint 형식 로드 (storage/checkpoints/.../checkpoint.pt)
             device: 디바이스 ("cuda", "mps", "cpu", "auto")
             dtype: 데이터 타입 ("float16", "bfloat16", None이면 safetensors 기본값 사용)
-            initialize_value_head: Value head 초기화 여부 (safetensors 로드 시에만 적용)
-                - True: Critic/Verifiable Stage용 (기본값)
-                - False: Rho-1 Stage용 (Value head 불필요)
-            value_head_type: Value head 타입 ("linear" 또는 "mlp")
-            dropout: Value head dropout 확률 (mlp 타입에만 적용)
             use_lora: LoRA 적용 여부 (trunk layers에만 적용)
             lora_config: LoRA 설정 (rank, alpha, dropout, target_modules)
                 - None이면 DEFAULT_LORA_CONFIG 사용
@@ -99,8 +87,6 @@ class MetaLlamaMTPAdapter(nn.Module):
                 checkpoint_path=model_path,
                 device=device,
                 dtype=dtype,
-                value_head_type=value_head_type,
-                dropout=dropout,
                 use_lora=use_lora,
                 lora_config=lora_config,
             )
@@ -148,46 +134,18 @@ class MetaLlamaMTPAdapter(nn.Module):
 
         model_args = ModelArgs(**params_dict)
 
-        # 3. Value Head 초기화 (선택적)
-        value_head = None
-        if initialize_value_head:
-            value_head = create_value_head(
-                hidden_size=model_args.dim,
-                head_type=value_head_type,
-                dropout=dropout,
-            )
-
-            # Device 이동 (Transformer와 동일 device)
-            device_obj = transformer.tok_embeddings.weight.device
-            value_head = value_head.to(device_obj)
-
-            # Dtype 설정 (Transformer dtype과 일치)
-            if dtype_obj is not None:
-                value_head = value_head.to(dtype_obj)
-            elif hasattr(transformer.tok_embeddings.weight, "dtype"):
-                value_head = value_head.to(transformer.tok_embeddings.weight.dtype)
-
-        # 4. Adapter 생성
+        # 3. Adapter 생성
         adapter = cls(
             transformer=transformer,
             model_args=model_args,
-            value_head=value_head,
             lora_enabled=use_lora,
         )
 
-        # 5. LoRA 적용 (FSDP wrapping 전에 적용해야 함)
+        # 4. LoRA 적용 (FSDP wrapping 전에 적용해야 함)
         if use_lora:
             adapter.apply_lora(lora_config)
 
         return adapter
-
-    def attach_value_head(self, value_head: ValueHeadType):
-        """Value head 추가 (Stage 1 시작 전)
-
-        Args:
-            value_head: ValueHead 인스턴스
-        """
-        self.value_head = value_head
 
     def apply_lora(self, lora_config: Optional[dict] = None) -> None:
         """Trunk layers에 LoRA 적용
@@ -261,7 +219,7 @@ class MetaLlamaMTPAdapter(nn.Module):
     def get_trainable_parameters(self) -> list[nn.Parameter]:
         """학습 대상 파라미터만 반환
 
-        LoRA 모드: LoRA 파라미터 + value_head 파라미터
+        LoRA 모드: LoRA 파라미터 + extra_heads 파라미터
         일반 모드: 모든 파라미터 (requires_grad=True인 것만)
 
         Returns:
@@ -303,98 +261,59 @@ class MetaLlamaMTPAdapter(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        return_value_logits: bool = False,
         return_hidden_states: bool = False,
-        trunk_frozen: bool = False,
+        compute_sequential_loss: bool = False,
+        labels: Optional[torch.Tensor] = None,
+        weights: Optional[torch.Tensor] = None,
+        loss_scale: float = 1.0,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
-        """통일된 forward 인터페이스 (FSDP 호환)
-
-        모든 파이프라인이 동일한 메서드를 통해 호출
-        FSDP hook이 정상 동작하여 parameter unshard 보장
+        """Forward pass
 
         Args:
             input_ids: [batch, seq] 입력 토큰
-            attention_mask: [batch, seq] attention mask (현재 미사용, 향후 확장)
-            return_value_logits: True면 value_logits 반환 (Critic/Verifiable용)
-            return_hidden_states: True면 hidden_states 반환 (Verifiable용)
-            trunk_frozen: True면 trunk forward를 no_grad로 실행하여 메모리 절감
-                          (num_unfrozen_layers=0일 때 사용)
+            attention_mask: [batch, seq] attention mask
+            return_hidden_states: True면 hidden_states도 함께 반환 (Value Head용)
+            compute_sequential_loss: True면 Sequential Unembedding으로 메모리 효율적 loss 계산
+            labels: [batch, seq] 타겟 토큰 (compute_sequential_loss=True 시 필수)
+            weights: 토큰별 가중치 (Weighted MTP용)
+                - [batch, seq]: Position-level (Verifiable TD weighting)
+                - [batch, seq, n_future]: Per-head (Rho1 selective weighting)
+            loss_scale: gradient accumulation을 위한 loss 스케일 (1/accumulation_steps)
 
         Returns:
-            return_value_logits=False:
+            compute_sequential_loss=True:
+                {"loss": scalar (detached), "n_heads": int}
+                backward()는 내부에서 이미 수행됨
+            return_hidden_states=True:
+                {"logits": tensor, "hidden_states": tensor}
+            기본:
                 logits: [batch, seq, n_future_tokens, vocab]
-
-            return_value_logits=True (Critic Stage 1: Value head만):
-                {
-                    "value_logits": [batch, seq, 1],
-                    "hidden_states": [batch, seq, hidden_size],
-                }
-
-            return_value_logits=True + return_hidden_states=True (Verifiable Stage 2):
-                {
-                    "logits": [batch, seq, n_future_tokens, vocab],
-                    "value_logits": [batch, seq, 1],
-                    "hidden_states": [batch, seq, hidden_size],
-                }
-
-        Raises:
-            ValueError: return_value_logits=True인데 Value head가 없음
         """
-        if return_value_logits and self.value_head is None:
-            raise ValueError(
-                "Value head not initialized. "
-                "Set initialize_value_head=True in from_pretrained() or call attach_value_head()."
+        if compute_sequential_loss:
+            return self.transformer(
+                input_ids,
+                start_pos=0,
+                return_all_heads=True,
+                compute_sequential_loss=True,
+                labels=labels,
+                attention_mask=attention_mask,
+                weights=weights,
+                loss_scale=loss_scale,
             )
 
-        # Critic Stage 1: Value head만 학습 (MTP heads 계산 생략)
-        if return_value_logits and not return_hidden_states:
-            if trunk_frozen:
-                # trunk 완전 frozen → no_grad로 activation 저장 방지 (메모리 절감)
-                with torch.no_grad():
-                    _, hidden_states = self.transformer(
-                        input_ids,
-                        start_pos=0,
-                        return_all_heads=False,
-                        return_hidden_states=True,
-                    )
-                # value_head 학습을 위해 gradient 연결점 생성
-                hidden_states = hidden_states.detach().requires_grad_(True)
-            else:
-                # trunk 일부 학습 → 기존 방식 (activation 저장 필요)
-                _, hidden_states = self.transformer(
-                    input_ids,
-                    start_pos=0,
-                    return_all_heads=False,
-                    return_hidden_states=True,
-                )
-
-            value_logits = self.value_head(hidden_states)
-            return {
-                "value_logits": value_logits,
-                "hidden_states": hidden_states,
-            }
-
-        # Verifiable Stage 2: MTP + Value 동시 학습
-        if return_value_logits and return_hidden_states:
+        if return_hidden_states:
             logits, hidden_states = self.transformer(
                 input_ids,
                 start_pos=0,
                 return_all_heads=True,
                 return_hidden_states=True,
             )
-            # trunk_frozen에 따라 value_head로의 gradient 흐름 제어
-            if trunk_frozen:
-                # trunk gradient 차단, value_head만 학습
-                value_logits = self.value_head(hidden_states.detach())
-            else:
-                # trunk gradient 허용, value loss가 trunk로 전파
-                value_logits = self.value_head(hidden_states)
             return {
                 "logits": logits,
-                "value_logits": value_logits,
+                "hidden_states": hidden_states,
             }
 
-        # Baseline/Rho-1: MTP만 (Value head 없음)
+        # 기본: MTP logits만 반환
         logits = self.transformer(
             input_ids,
             start_pos=0,
@@ -408,8 +327,6 @@ class MetaLlamaMTPAdapter(nn.Module):
         checkpoint_path,
         device: str = "auto",
         dtype: Optional[str] = None,
-        value_head_type: str = "mlp",
-        dropout: float = 0.0,
         use_lora: bool = False,
         lora_config: Optional[dict] = None,
     ) -> "MetaLlamaMTPAdapter":
@@ -419,7 +336,6 @@ class MetaLlamaMTPAdapter(nn.Module):
             checkpoint_path: .pt checkpoint 파일 경로
             device: 디바이스
             dtype: 데이터 타입
-            dropout: Value head dropout 확률
             use_lora: LoRA 적용 여부
             lora_config: LoRA 설정
 
@@ -495,41 +411,28 @@ class MetaLlamaMTPAdapter(nn.Module):
         # 5. Transformer 생성
         transformer = Transformer(model_args)
 
-        # 6. ValueHead 생성 (checkpoint에 있는 경우, 타입 자동 감지)
-        value_head = None
-        value_head_keys = [k for k in state_dict.keys() if k.startswith("value_head.")]
-        if value_head_keys:
-            # state_dict 키 구조로 value_head_type 자동 감지
-            if any("value_head.mlp." in k for k in value_head_keys):
-                detected_type = "mlp"
-            elif any("value_head.linear." in k for k in value_head_keys):
-                detected_type = "linear"
-            else:
-                detected_type = value_head_type  # fallback
-
-            value_head = create_value_head(
-                hidden_size=dim,
-                head_type=detected_type,
-                dropout=dropout,
-            )
-
-        # 7. LoRA 적용 결정
+        # 6. LoRA 적용 결정
         # checkpoint에 LoRA 가중치가 있거나 use_lora=True면 LoRA 적용
         apply_lora = has_lora_weights or use_lora
 
-        # 8. Adapter 생성
+        # 7. Adapter 생성
         adapter = cls(
             transformer=transformer,
             model_args=model_args,
-            value_head=value_head,
             lora_enabled=apply_lora,
         )
 
-        # 9. LoRA 적용 (state_dict 로드 전에 구조 생성 필요)
+        # 8. LoRA 적용 (state_dict 로드 전에 구조 생성 필요)
         if apply_lora:
             adapter.apply_lora(lora_config)
 
-        # 10. state_dict 로드
+        # 9. state_dict 로드
+        # value_head 관련 키 필터링 (기존 checkpoint 호환)
+        filtered_state_dict = {
+            k: v for k, v in state_dict.items() 
+            if not k.startswith("value_head.")
+        }
+
         # checkpoint에 LoRA 가중치가 없고 use_lora=True인 경우:
         # base weights만 로드하고 LoRA는 새로 초기화된 상태 유지
         if use_lora and not has_lora_weights:
@@ -546,7 +449,7 @@ class MetaLlamaMTPAdapter(nn.Module):
             ffn_targets = [t for t in target_modules if t in ["w1", "w2", "w3"]]
             
             converted_state_dict = {}
-            for key, value in state_dict.items():
+            for key, value in filtered_state_dict.items():
                 new_key = key
                 
                 # transformer.layers.X만 변환 (extra_heads는 LoRA 미적용이므로 변환 안함)
@@ -595,9 +498,9 @@ class MetaLlamaMTPAdapter(nn.Module):
             print(f"[LoRA] Base checkpoint 로드 완료. LoRA weights 새로 초기화됨 ({len(lora_missing)} keys)")
         else:
             # 일반 로드 (LoRA 포함 checkpoint 또는 LoRA 미사용)
-            adapter.load_state_dict(state_dict)
+            adapter.load_state_dict(filtered_state_dict, strict=False)
 
-        # 11. Device 및 dtype 설정
+        # 10. Device 및 dtype 설정
         adapter = adapter.to(device_obj)
         if dtype is not None:
             dtype_obj = getattr(torch, dtype)

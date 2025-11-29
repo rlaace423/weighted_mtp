@@ -51,8 +51,6 @@ class TestLoRAFSDPIntegration:
             model_path=MICRO_MODEL_PATH,
             device=device,
             dtype="float32",
-            initialize_value_head=True,
-            value_head_type="mlp",
             use_lora=True,
             lora_config=lora_config,
         )
@@ -130,8 +128,6 @@ class TestLoRAFSDPIntegration:
                 model_path=MICRO_MODEL_PATH,
                 device=device,
                 dtype="float32",
-                initialize_value_head=True,
-                value_head_type="mlp",
                 use_lora=True,
                 lora_config=lora_config,
             )
@@ -168,8 +164,6 @@ class TestLoRAFSDPIntegration:
             model_path=MICRO_MODEL_PATH,
             device=device,
             dtype="float32",
-            initialize_value_head=True,
-            value_head_type="mlp",
             use_lora=True,
             lora_config=lora_config,
         )
@@ -263,8 +257,6 @@ class TestLoRACheckpointUtils:
             model_path=MICRO_MODEL_PATH,
             device=device,
             dtype="float32",
-            initialize_value_head=True,
-            value_head_type="mlp",
             use_lora=True,
             lora_config=lora_config,
         )
@@ -300,8 +292,6 @@ class TestLoRACheckpointUtils:
             model_path=MICRO_MODEL_PATH,
             device=device,
             dtype="float32",
-            initialize_value_head=True,
-            value_head_type="mlp",
             use_lora=True,
             lora_config=lora_config,
         )
@@ -329,8 +319,6 @@ class TestLoRACheckpointUtils:
             model_path=MICRO_MODEL_PATH,
             device=device,
             dtype="float32",
-            initialize_value_head=True,
-            value_head_type="mlp",
             use_lora=True,
             lora_config=lora_config,
         )
@@ -354,8 +342,6 @@ class TestLoRACheckpointUtils:
             model_path=MICRO_MODEL_PATH,
             device=device,
             dtype="float32",
-            initialize_value_head=True,
-            value_head_type="mlp",
             use_lora=True,
             lora_config=lora_config,
         )
@@ -407,8 +393,6 @@ class TestLoRACheckpointUtils:
             model_path=MICRO_MODEL_PATH,
             device=device,
             dtype="float32",
-            initialize_value_head=True,
-            value_head_type="mlp",
             use_lora=True,
             lora_config=lora_config,
         )
@@ -448,8 +432,6 @@ class TestLoRACheckpointUtils:
                 model_path=MICRO_MODEL_PATH,
                 device=device,
                 dtype="float32",
-                initialize_value_head=True,
-                value_head_type="mlp",
                 use_lora=True,
                 lora_config=lora_config,
             )

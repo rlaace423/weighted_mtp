@@ -38,8 +38,9 @@ def load_tokenizer_from_config(config) -> AutoTokenizer:
     """Config 기반 tokenizer 로드
 
     우선순위:
-    1. config.models.policy.tokenizer_path (명시적 지정)
-    2. config.models.policy.path (기본값)
+    1. config.models.policy.tokenizer_path (Policy Model 있는 경우)
+    2. config.models.value_model.tokenizer_path (Value Model만 있는 경우)
+    3. 해당 모델의 path (fallback)
 
     Args:
         config: OmegaConf config 객체
@@ -48,15 +49,25 @@ def load_tokenizer_from_config(config) -> AutoTokenizer:
         AutoTokenizer 인스턴스
 
     Examples:
-        >>> config = OmegaConf.load("configs/baseline/baseline.yaml")
+        >>> config = OmegaConf.load("configs/production/baseline.yaml")
         >>> tokenizer = load_tokenizer_from_config(config)
     """
-    # tokenizer_path 명시적 지정 확인 (우선)
-    tokenizer_path = getattr(
-        config.models.policy,
-        "tokenizer_path",
-        config.models.policy.path  # fallback
-    )
+    # Policy Model 있는 경우 (Baseline, Rho1, NTP, Verifiable)
+    if hasattr(config.models, "policy"):
+        tokenizer_path = getattr(
+            config.models.policy,
+            "tokenizer_path",
+            config.models.policy.path  # fallback
+        )
+    # Value Model만 있는 경우 (Critic)
+    elif hasattr(config.models, "value_model"):
+        tokenizer_path = getattr(
+            config.models.value_model,
+            "tokenizer_path",
+            config.models.value_model.path  # fallback
+        )
+    else:
+        raise ValueError("Config에 models.policy 또는 models.value_model이 없습니다")
 
     return load_tokenizer(tokenizer_path)
 

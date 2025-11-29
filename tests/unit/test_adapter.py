@@ -1,4 +1,8 @@
-"""Meta Adapter Unit Tests"""
+"""Meta Adapter Unit Tests
+
+MetaLlamaMTPAdapter는 순수 MTP 모델 (value head 없음).
+Value Head 테스트는 test_value_model.py에서 수행.
+"""
 
 import pytest
 import torch
@@ -37,7 +41,7 @@ def micro_transformer():
 
 @pytest.fixture
 def micro_adapter(micro_transformer):
-    """Micro Adapter (Value head 포함)"""
+    """Micro Adapter (순수 MTP 모델)"""
     model_args = ModelArgs(
         dim=512,
         n_layers=4,
@@ -46,8 +50,7 @@ def micro_adapter(micro_transformer):
         vocab_size=32000,
         n_future_tokens=4,
     )
-    value_head = ValueHead(hidden_size=512)
-    adapter = MetaLlamaMTPAdapter(micro_transformer, model_args, value_head)
+    adapter = MetaLlamaMTPAdapter(micro_transformer, model_args)
     return adapter
 
 
@@ -71,7 +74,7 @@ def test_transformer_creation(micro_transformer):
 
 
 def test_value_head_forward():
-    """ValueHead forward 테스트"""
+    """ValueHead forward 테스트 (독립 클래스, ValueModel에서 사용)"""
     value_head = ValueHead(hidden_size=512)
     hidden_states = torch.randn(2, 10, 512)  # [batch=2, seq=10, hidden=512]
 
@@ -80,75 +83,45 @@ def test_value_head_forward():
     assert value_logits.shape == (2, 10, 1)
 
 
-def test_value_head_checkpoint_save_load(tmp_path):
-    """ValueHead checkpoint 저장/로드 테스트"""
+def test_value_head_state_dict_save_load(tmp_path):
+    """ValueHead state_dict 저장/로드 테스트"""
     value_head = ValueHead(hidden_size=512)
 
-    # 저장
+    # state_dict 저장
     ckpt_path = tmp_path / "value_head.pt"
-    value_head.save_checkpoint(ckpt_path)
+    torch.save(value_head.state_dict(), ckpt_path)
 
-    # 로드
-    loaded = ValueHead.load_checkpoint(ckpt_path, device="cpu")
+    # 새 인스턴스 생성 후 로드
+    loaded = ValueHead(hidden_size=512)
+    loaded.load_state_dict(torch.load(ckpt_path, weights_only=True))
 
-    # 검증
-    assert torch.allclose(value_head.linear.weight, loaded.linear.weight)
+    # 검증 (MLPValueHead의 첫 번째 레이어 비교)
+    assert torch.allclose(
+        value_head.mlp[0].weight, loaded.mlp[0].weight
+    )
     assert loaded.hidden_size == 512
 
 
-def test_forward_value_logits_shape(micro_adapter):
-    """forward(return_value_logits=True) 출력 shape 테스트"""
+def test_forward_logits_shape(micro_adapter):
+    """forward() 기본 출력 shape 테스트"""
     input_ids = torch.randint(0, 32000, (2, 10))  # [batch=2, seq=10]
 
-    outputs = micro_adapter(input_ids, return_value_logits=True)
+    logits = micro_adapter(input_ids)
 
-    assert "hidden_states" in outputs
-    assert "value_logits" in outputs
-    assert outputs["hidden_states"].shape == (2, 10, 512)
-    assert outputs["value_logits"].shape == (2, 10, 1)
+    # [batch, seq, n_future_tokens, vocab]
+    assert logits.shape == (2, 10, 4, 32000)
 
 
-def test_forward_full_shape(micro_adapter):
-    """forward(return_value_logits=True, return_hidden_states=True) 출력 shape 테스트"""
+def test_forward_with_hidden_states(micro_adapter):
+    """forward(return_hidden_states=True) 출력 shape 테스트"""
     input_ids = torch.randint(0, 32000, (2, 10))
 
-    outputs = micro_adapter(input_ids, return_value_logits=True, return_hidden_states=True)
+    outputs = micro_adapter(input_ids, return_hidden_states=True)
 
     assert "logits" in outputs
-    assert "value_logits" in outputs
     assert "hidden_states" in outputs
-    assert outputs["logits"].shape == (2, 10, 4, 32000)  # [batch, seq, n_future_tokens, vocab]
-    assert outputs["value_logits"].shape == (2, 10, 1)
+    assert outputs["logits"].shape == (2, 10, 4, 32000)
     assert outputs["hidden_states"].shape == (2, 10, 512)
-
-
-def test_forward_without_value_head():
-    """Value head 없이 return_value_logits=True 호출 시 에러"""
-    model_args = ModelArgs(dim=512, n_layers=4, n_heads=8, vocab_size=32000)
-    transformer = Transformer(model_args)
-    adapter = MetaLlamaMTPAdapter(transformer, model_args, value_head=None)
-
-    input_ids = torch.randint(0, 32000, (2, 10))
-
-    with pytest.raises(ValueError, match="Value head not initialized"):
-        adapter(input_ids, return_value_logits=True)
-
-
-def test_attach_value_head():
-    """Value head 추가 테스트"""
-    model_args = ModelArgs(dim=512, n_layers=4, n_heads=8, vocab_size=32000)
-    transformer = Transformer(model_args)
-    adapter = MetaLlamaMTPAdapter(transformer, model_args, value_head=None)
-
-    # Value head 추가
-    value_head = ValueHead(hidden_size=512)
-    adapter.attach_value_head(value_head)
-
-    # 이제 forward(return_value_logits=True) 가능
-    input_ids = torch.randint(0, 32000, (2, 10))
-    outputs = adapter(input_ids, return_value_logits=True)
-
-    assert outputs["value_logits"].shape == (2, 10, 1)
 
 
 def test_load_micro_model(micro_model_dir):
@@ -201,8 +174,7 @@ class TestLoRAIntegration:
             n_future_tokens=4,
         )
         transformer = Transformer(model_args)
-        value_head = ValueHead(hidden_size=512)
-        adapter = MetaLlamaMTPAdapter(transformer, model_args, value_head)
+        adapter = MetaLlamaMTPAdapter(transformer, model_args)
 
         # LoRA 적용
         adapter.apply_lora({"rank": 8, "alpha": 16.0})
@@ -230,7 +202,7 @@ class TestLoRAIntegration:
 
         # 전체 파라미터
         total_params = sum(p.numel() for p in adapter.parameters())
-        # 학습 가능 파라미터 (LoRA + extra_heads + value_head)
+        # 학습 가능 파라미터 (LoRA + extra_heads)
         trainable_params = sum(p.numel() for p in adapter.get_trainable_parameters())
 
         # trunk layers에서 학습 파라미터 (LoRA만)
@@ -246,30 +218,30 @@ class TestLoRAIntegration:
         # trunk에서 LoRA 효과: 학습 파라미터가 전체의 10% 미만
         assert trunk_trainable < trunk_total * 0.1
 
-        # 전체 모델에서도 학습 파라미터 감소 (extra_heads, value_head 제외하면)
-        assert trainable_params < total_params  # 최소 감소 확인
+        # 전체 모델에서도 학습 파라미터 감소
+        assert trainable_params < total_params
 
     def test_lora_forward_shape_unchanged(self, micro_adapter_with_lora):
         """LoRA 적용 후 forward 출력 shape 동일"""
         adapter = micro_adapter_with_lora
         input_ids = torch.randint(0, 32000, (2, 10))
 
-        # Value logits 모드
-        outputs = adapter(input_ids, return_value_logits=True)
-        assert outputs["value_logits"].shape == (2, 10, 1)
+        # 기본 출력
+        logits = adapter(input_ids)
+        assert logits.shape == (2, 10, 4, 32000)
 
-        # Full 모드
-        outputs = adapter(input_ids, return_value_logits=True, return_hidden_states=True)
+        # hidden_states 포함 출력
+        outputs = adapter(input_ids, return_hidden_states=True)
         assert outputs["logits"].shape == (2, 10, 4, 32000)
-        assert outputs["value_logits"].shape == (2, 10, 1)
+        assert outputs["hidden_states"].shape == (2, 10, 512)
 
     def test_lora_gradient_flow(self, micro_adapter_with_lora):
         """LoRA 파라미터에만 gradient 흐름"""
         adapter = micro_adapter_with_lora
         input_ids = torch.randint(0, 32000, (2, 10))
 
-        outputs = adapter(input_ids, return_value_logits=True, return_hidden_states=True)
-        loss = outputs["logits"].sum() + outputs["value_logits"].sum()
+        logits = adapter(input_ids)
+        loss = logits.sum()
         loss.backward()
 
         # LoRA 파라미터에 gradient 있음
@@ -308,17 +280,6 @@ class TestLoRAIntegration:
 
         assert trainable_numel == total_params
 
-    def test_lora_with_value_head(self, micro_adapter_with_lora):
-        """LoRA + Value head 동시 학습"""
-        adapter = micro_adapter_with_lora
-        trainable = adapter.get_trainable_parameters()
-
-        # Value head 파라미터도 포함됨
-        value_head_param_count = sum(
-            p.numel() for p in adapter.value_head.parameters() if p.requires_grad
-        )
-        assert value_head_param_count > 0
-
     def test_lora_config_custom(self):
         """커스텀 LoRA config 테스트"""
         model_args = ModelArgs(
@@ -330,7 +291,7 @@ class TestLoRAIntegration:
             n_future_tokens=4,
         )
         transformer = Transformer(model_args)
-        adapter = MetaLlamaMTPAdapter(transformer, model_args, value_head=None)
+        adapter = MetaLlamaMTPAdapter(transformer, model_args)
 
         # 커스텀 설정으로 LoRA 적용
         custom_config = {
@@ -354,3 +315,142 @@ class TestLoRAIntegration:
             # rank 검증
             assert layer.attention.wq.rank == 16
             assert layer.attention.wq.alpha == 32.0
+
+
+class TestSequentialLoss:
+    """Sequential Unembedding 테스트"""
+
+    @pytest.fixture
+    def micro_adapter_for_seq(self):
+        """Sequential loss 테스트용 Adapter"""
+        model_args = ModelArgs(
+            dim=512,
+            n_layers=4,
+            n_heads=8,
+            n_kv_heads=8,
+            vocab_size=32000,
+            n_future_tokens=4,
+        )
+        transformer = Transformer(model_args)
+        adapter = MetaLlamaMTPAdapter(transformer, model_args)
+        return adapter
+
+    def test_sequential_loss_returns_dict(self, micro_adapter_for_seq):
+        """compute_sequential_loss=True 시 dict 반환"""
+        batch, seq = 2, 10
+        input_ids = torch.randint(0, 32000, (batch, seq))
+        labels = torch.randint(0, 32000, (batch, seq))
+        attention_mask = torch.ones(batch, seq)
+
+        result = micro_adapter_for_seq(
+            input_ids,
+            attention_mask=attention_mask,
+            compute_sequential_loss=True,
+            labels=labels,
+        )
+
+        assert isinstance(result, dict)
+        assert "loss" in result
+        assert "n_heads" in result
+        assert result["n_heads"] == 4  # n_future_tokens
+
+    def test_sequential_loss_value_valid(self, micro_adapter_for_seq):
+        """loss 값이 유효한 scalar인지 확인"""
+        batch, seq = 2, 10
+        input_ids = torch.randint(0, 32000, (batch, seq))
+        labels = torch.randint(0, 32000, (batch, seq))
+        attention_mask = torch.ones(batch, seq)
+
+        result = micro_adapter_for_seq(
+            input_ids,
+            attention_mask=attention_mask,
+            compute_sequential_loss=True,
+            labels=labels,
+        )
+
+        loss = result["loss"]
+        assert loss.dim() == 0  # scalar
+        assert not loss.isnan()
+        assert not loss.isinf()
+        assert loss.item() > 0  # cross-entropy는 양수
+
+    def test_sequential_loss_with_weights_2d(self, micro_adapter_for_seq):
+        """2D weights (Verifiable) 테스트"""
+        batch, seq = 2, 10
+        input_ids = torch.randint(0, 32000, (batch, seq))
+        labels = torch.randint(0, 32000, (batch, seq))
+        attention_mask = torch.ones(batch, seq)
+        weights = torch.ones(batch, seq)  # [batch, seq]
+
+        result = micro_adapter_for_seq(
+            input_ids,
+            attention_mask=attention_mask,
+            compute_sequential_loss=True,
+            labels=labels,
+            weights=weights,
+        )
+
+        assert "loss" in result
+        assert not result["loss"].isnan()
+
+    def test_sequential_loss_with_weights_3d(self, micro_adapter_for_seq):
+        """3D weights (Rho1) 테스트"""
+        batch, seq = 2, 10
+        n_future = 4
+        input_ids = torch.randint(0, 32000, (batch, seq))
+        labels = torch.randint(0, 32000, (batch, seq))
+        attention_mask = torch.ones(batch, seq)
+        weights = torch.ones(batch, seq, n_future)  # [batch, seq, n_future]
+
+        result = micro_adapter_for_seq(
+            input_ids,
+            attention_mask=attention_mask,
+            compute_sequential_loss=True,
+            labels=labels,
+            weights=weights,
+        )
+
+        assert "loss" in result
+        assert not result["loss"].isnan()
+
+    def test_sequential_loss_gradients_accumulated(self, micro_adapter_for_seq):
+        """backward()가 내부에서 수행되어 gradient가 누적됨"""
+        adapter = micro_adapter_for_seq
+        batch, seq = 2, 10
+        input_ids = torch.randint(0, 32000, (batch, seq))
+        labels = torch.randint(0, 32000, (batch, seq))
+        attention_mask = torch.ones(batch, seq)
+
+        # gradient 초기화
+        for p in adapter.parameters():
+            if p.grad is not None:
+                p.grad.zero_()
+
+        result = adapter(
+            input_ids,
+            attention_mask=attention_mask,
+            compute_sequential_loss=True,
+            labels=labels,
+        )
+
+        # backward()는 내부에서 이미 수행됨 → gradient 존재
+        has_grad = False
+        for p in adapter.parameters():
+            if p.grad is not None and p.grad.abs().sum() > 0:
+                has_grad = True
+                break
+
+        assert has_grad, "Sequential loss 모드에서 gradient가 누적되어야 함"
+
+    def test_basic_forward_still_works(self, micro_adapter_for_seq):
+        """기존 forward 동작 유지"""
+        input_ids = torch.randint(0, 32000, (2, 10))
+
+        # 기본 호출
+        logits = micro_adapter_for_seq(input_ids)
+        assert logits.shape == (2, 10, 4, 32000)
+
+        # hidden_states 포함
+        outputs = micro_adapter_for_seq(input_ids, return_hidden_states=True)
+        assert "logits" in outputs
+        assert "hidden_states" in outputs

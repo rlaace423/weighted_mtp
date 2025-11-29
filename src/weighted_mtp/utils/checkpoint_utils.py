@@ -108,7 +108,6 @@ def save_checkpoint(
 def load_checkpoint_for_evaluation(
     checkpoint_path: Path,
     device: torch.device,
-    initialize_value_head: bool = False,
 ):
     """평가용 checkpoint 로드 (전체 adapter 로드)
 
@@ -184,7 +183,6 @@ def load_checkpoint_for_evaluation(
     model = MetaLlamaMTPAdapter.from_pretrained(
         model_path=config_info["model"]["path"],
         device=device,
-        initialize_value_head=initialize_value_head,
     )
 
     # State dict 로드

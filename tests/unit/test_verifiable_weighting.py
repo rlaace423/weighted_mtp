@@ -25,12 +25,12 @@ class TestComputeTDErrors:
 
         value_logits = torch.randn(batch_size, seq_len, 1)
         rewards = torch.tensor([1.0, 0.0])
-        attention_mask = torch.ones(batch_size, seq_len)
+        loss_mask = torch.ones(batch_size, seq_len, dtype=torch.bool)
 
         td_errors = compute_td_errors(
             value_logits=value_logits,
             rewards=rewards,
-            attention_mask=attention_mask,
+            loss_mask=loss_mask,
             gamma=1.0,
         )
 
@@ -41,9 +41,9 @@ class TestComputeTDErrors:
         # R - V(s_T)
         value_logits = torch.tensor([[[0.5], [0.7], [0.9]]])  # [1, 3, 1]
         rewards = torch.tensor([1.0])  # Correct
-        attention_mask = torch.tensor([[1, 1, 1]])
+        loss_mask = torch.tensor([[True, True, True]])
 
-        td_errors = compute_td_errors(value_logits, rewards, attention_mask, gamma=1.0)
+        td_errors = compute_td_errors(value_logits, rewards, loss_mask, gamma=1.0)
 
         # Terminal (position 2): 1.0 - 0.9 = 0.1
         assert td_errors[0, 2].item() == pytest.approx(0.1, rel=0.01)
@@ -51,12 +51,11 @@ class TestComputeTDErrors:
     def test_intermediate_td_error(self):
         """Intermediate TD error 계산 검증"""
         # δ_t = γV(s_t) - V(s_{t-1})
-        # td_errors[t]는 토큰 t의 가중치
         value_logits = torch.tensor([[[0.5], [0.7], [0.9]]])  # [1, 3, 1]
         rewards = torch.tensor([1.0])
-        attention_mask = torch.tensor([[1, 1, 1]])
+        loss_mask = torch.tensor([[True, True, True]])
 
-        td_errors = compute_td_errors(value_logits, rewards, attention_mask, gamma=1.0)
+        td_errors = compute_td_errors(value_logits, rewards, loss_mask, gamma=1.0)
 
         # Position 0: 이전 value 없음 → td_errors[0] = 0
         assert td_errors[0, 0].item() == pytest.approx(0.0, rel=0.01)
@@ -67,9 +66,9 @@ class TestComputeTDErrors:
         """Padding 토큰 처리 검증"""
         value_logits = torch.tensor([[[0.5], [0.7], [0.9], [0.8]]])  # [1, 4, 1]
         rewards = torch.tensor([1.0])
-        attention_mask = torch.tensor([[1, 1, 1, 0]])  # 마지막은 padding
+        loss_mask = torch.tensor([[True, True, True, False]])  # 마지막은 padding
 
-        td_errors = compute_td_errors(value_logits, rewards, attention_mask, gamma=1.0)
+        td_errors = compute_td_errors(value_logits, rewards, loss_mask, gamma=1.0)
 
         # Padding 위치는 0
         assert td_errors[0, 3].item() == 0.0
@@ -80,9 +79,9 @@ class TestComputeTDErrors:
         """Incorrect 샘플의 TD error 검증"""
         value_logits = torch.tensor([[[0.5], [0.7], [0.9]]])  # [1, 3, 1]
         rewards = torch.tensor([0.0])  # Incorrect
-        attention_mask = torch.tensor([[1, 1, 1]])
+        loss_mask = torch.tensor([[True, True, True]])
 
-        td_errors = compute_td_errors(value_logits, rewards, attention_mask, gamma=1.0)
+        td_errors = compute_td_errors(value_logits, rewards, loss_mask, gamma=1.0)
 
         # Terminal (position 2): 0.0 - 0.9 = -0.9
         assert td_errors[0, 2].item() == pytest.approx(-0.9, rel=0.01)
@@ -98,12 +97,12 @@ class TestComputeTDTargets:
 
         value_logits = torch.randn(batch_size, seq_len, 1)
         rewards = torch.tensor([1.0, 0.0])
-        attention_mask = torch.ones(batch_size, seq_len)
+        loss_mask = torch.ones(batch_size, seq_len, dtype=torch.bool)
 
         td_targets = compute_td_targets(
             value_logits=value_logits,
             rewards=rewards,
-            attention_mask=attention_mask,
+            loss_mask=loss_mask,
             gamma=1.0,
             lam=0.0,
         )
@@ -114,10 +113,10 @@ class TestComputeTDTargets:
         """TD(0) targets 검증 (lam=0)"""
         value_logits = torch.tensor([[[0.5], [0.7], [0.9]]])  # [1, 3, 1]
         rewards = torch.tensor([1.0])
-        attention_mask = torch.tensor([[1, 1, 1]])
+        loss_mask = torch.tensor([[True, True, True]])
 
         td_targets = compute_td_targets(
-            value_logits, rewards, attention_mask, gamma=1.0, lam=0.0
+            value_logits, rewards, loss_mask, gamma=1.0, lam=0.0
         )
 
         # TD(0): Target_t = V(s_t) + δ_t = γV(s_{t+1})
@@ -132,10 +131,10 @@ class TestComputeTDTargets:
         """Monte Carlo targets 검증 (lam=1)"""
         value_logits = torch.tensor([[[0.5], [0.7], [0.9]]])  # [1, 3, 1]
         rewards = torch.tensor([1.0])
-        attention_mask = torch.tensor([[1, 1, 1]])
+        loss_mask = torch.tensor([[True, True, True]])
 
         td_targets = compute_td_targets(
-            value_logits, rewards, attention_mask, gamma=1.0, lam=1.0
+            value_logits, rewards, loss_mask, gamma=1.0, lam=1.0
         )
 
         # MC: 모든 위치의 target이 R
@@ -150,16 +149,18 @@ class TestBuildWeights:
     def test_basic_shape(self):
         """기본 출력 shape 검증"""
         td_errors = torch.randn(2, 10)
+        loss_mask = torch.ones(2, 10, dtype=torch.bool)
 
-        weights = build_weights(td_errors, beta=0.9)
+        weights = build_weights(td_errors, loss_mask=loss_mask, beta=0.9)
 
         assert weights.shape == (2, 10)
 
     def test_positive_td_high_weight(self):
         """Positive TD error → 높은 weight"""
         td_errors = torch.tensor([[0.5, 0.0, -0.5]])
+        loss_mask = torch.ones(1, 3, dtype=torch.bool)
 
-        weights = build_weights(td_errors, beta=1.0, min_weight=0.1, max_weight=3.0)
+        weights = build_weights(td_errors, loss_mask=loss_mask, beta=1.0, min_weight=0.1, max_weight=3.0)
 
         # exp(0.5) ≈ 1.65, exp(0) = 1.0, exp(-0.5) ≈ 0.61
         assert weights[0, 0].item() > 1.0
@@ -169,11 +170,16 @@ class TestBuildWeights:
     def test_clipping(self):
         """Weight clipping 검증"""
         td_errors = torch.tensor([[5.0, -5.0]])  # 극단값
+        loss_mask = torch.ones(1, 2, dtype=torch.bool)
 
-        weights = build_weights(td_errors, beta=0.5, min_weight=0.1, max_weight=3.0)
+        weights = build_weights(td_errors, loss_mask=loss_mask, beta=0.5, min_weight=0.1, max_weight=3.0)
 
-        assert weights[0, 0].item() == pytest.approx(3.0, rel=0.01)  # max clip
-        assert weights[0, 1].item() == pytest.approx(0.1, rel=0.01)  # min clip
+        # Advantage Whitening이 적용되어 정규화 후 weight 계산
+        # 극단값에서도 clipping 범위 내에 있어야 함
+        assert weights[0, 0].item() <= 3.0  # max clip 이하
+        assert weights[0, 1].item() >= 0.1  # min clip 이상
+        # positive error → higher weight
+        assert weights[0, 0].item() > weights[0, 1].item()
 
 
 class TestWeightMapping:
@@ -194,10 +200,10 @@ class TestWeightMapping:
         torch.manual_seed(42)
         value_logits = torch.randn(batch_size, seq_len, 1)
         rewards = torch.tensor([1.0])
-        attention_mask = torch.ones(batch_size, seq_len)
+        loss_mask = torch.ones(batch_size, seq_len, dtype=torch.bool)
 
-        td_errors = compute_td_errors(value_logits, rewards, attention_mask, gamma=1.0)
-        weights = build_weights(td_errors, beta=1.0)
+        td_errors = compute_td_errors(value_logits, rewards, loss_mask, gamma=1.0)
+        weights = build_weights(td_errors, loss_mask=loss_mask, beta=1.0)
 
         # 각 head k에 대해 올바른 weight 적용 확인
         for k in range(1, n_future + 1):

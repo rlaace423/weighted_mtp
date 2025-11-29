@@ -1,19 +1,22 @@
 """Meta LLaMA MTP Adapter
 
-순수 PyTorch 구현:
+순수 PyTorch 구현 (MTP Policy Model):
 - transformer.py: Meta 구조 참고, fairscale 제거, FSDP 호환
 - checkpoints.py: safetensors 로딩
-- value_head.py: Linear/MLP value head
-- adapter.py: trunk/full forward wrapper
+- adapter.py: MTP forward wrapper (value head 없음)
+
+Value Head는 models/value_head.py에서 정의 (독립 ValueModel에서 사용)
 """
 
 from .adapter import MetaLlamaMTPAdapter
 from .checkpoints import load_meta_mtp_model
 from .transformer import ModelArgs, Transformer
-from .value_head import (
+
+# Value Head는 상위 모듈에서 re-export (ValueModel에서 사용)
+from ..value_head import (
     LinearValueHead,
     MLPValueHead,
-    ValueHead,  # 하위 호환성 alias
+    ValueHead,
     ValueHeadType,
     create_value_head,
 )

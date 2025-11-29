@@ -16,7 +16,7 @@ class TestValidateConfigBasic:
 
     def test_valid_baseline_config(self, project_root: Path):
         """유효한 baseline config 검증 통과"""
-        config_path = project_root / "configs" / "baseline" / "baseline_local.yaml"
+        config_path = project_root / "configs" / "local" / "baseline_local.yaml"
         config = OmegaConf.load(config_path)
 
         # 검증 통과 (예외 없음)
@@ -24,7 +24,7 @@ class TestValidateConfigBasic:
 
     def test_valid_verifiable_config(self, project_root: Path):
         """유효한 verifiable config 검증 통과"""
-        config_path = project_root / "configs" / "verifiable" / "verifiable.yaml"
+        config_path = project_root / "configs" / "production" / "verifiable_pairwise.yaml"
         config = OmegaConf.load(config_path)
 
         # 검증 통과 (예외 없음)
@@ -300,7 +300,7 @@ class TestLoadAndValidateConfig:
 
     def test_load_valid_config(self, project_root: Path):
         """유효한 config 로드 및 검증"""
-        config_path = project_root / "configs" / "baseline" / "baseline_local.yaml"
+        config_path = project_root / "configs" / "local" / "baseline_local.yaml"
         config = load_and_validate_config(str(config_path))
 
         assert config.experiment.stage == "baseline"
@@ -365,8 +365,7 @@ class TestValidateConfigPathChecks:
                 "training": {
                     "n_epochs": 1,
                     "batch_size": 4,
-                    "trunk_learning_rate": 1e-5,
-                    "value_head_learning_rate": 3e-5,
+                    "learning_rate": 1e-4,
                     "beta": 0.2,
                     "weight_clip_min": 0.1,
                     "weight_clip_max": 3.0,

@@ -57,6 +57,7 @@ from weighted_mtp.utils.pairwise_utils import (
     pairwise_ranking_loss,
 )
 from weighted_mtp.utils.loss_utils import (
+    compute_head_ce_loss,
     compute_mtp_ce_loss,
     compute_mtp_ce_loss_unweighted,
 )
@@ -104,6 +105,7 @@ __all__ = [
     "get_scheduler_state",
     "load_scheduler_state",
     # Loss utils
+    "compute_head_ce_loss",
     "compute_mc_value_loss",
     "compute_mtp_ce_loss",
     "compute_mtp_ce_loss_unweighted",

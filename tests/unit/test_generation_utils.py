@@ -14,7 +14,6 @@ def micro_model():
     model = MetaLlamaMTPAdapter.from_pretrained(
         model_path="storage/models/micro-mtp",
         device="cpu",
-        initialize_value_head=False,  # Generation에는 불필요
     )
     model.eval()
     return model

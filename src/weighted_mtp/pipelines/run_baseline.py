@@ -67,7 +67,6 @@ def load_adapter(
         model_path=config.models.policy.path,
         device=device,
         dtype=config.models.policy.dtype,
-        initialize_value_head=False,
         use_lora=use_lora,
         lora_config=lora_config,
     )
@@ -392,34 +391,22 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            # Forward (MTP만, Value head 없음)
-            # Debug: Forward 시작
+            # Forward + Sequential Unembedding (메모리 효율적 loss 계산 + backward)
+            # backward()는 adapter 내부에서 수행됨
             if batch_count == 0:
-                logger.info(f"[Rank {rank}] Data moved to device, starting forward pass")
+                logger.info(f"[Rank {rank}] Data moved to device, starting sequential forward")
 
-            logits = adapter(input_ids)
-
-            # Debug: Forward 완료
-            if batch_count == 0:
-                logger.info(f"[Rank {rank}] Forward pass completed, logits shape: {logits.shape}")
-            # logits: [batch, seq, n_future, vocab]
-
-            # Uniform CE loss - 메모리 최적화된 유틸리티 사용
-            ce_loss = compute_mtp_ce_loss_unweighted(
-                logits=logits,
-                labels=labels,
+            loss_result = adapter(
+                input_ids,
                 attention_mask=attention_mask,
+                compute_sequential_loss=True,
+                labels=labels,
+                loss_scale=1.0 / gradient_accumulation_steps,
             )
+            ce_loss = loss_result["loss"]  # detached scalar
 
-            # Loss scaling (gradient accumulation 적용)
-            scaled_loss = ce_loss / gradient_accumulation_steps
-
-            # 유효 토큰이 있는 경우에만 backward (grad_fn 체크)
-            if scaled_loss.grad_fn is not None:
-                scaled_loss.backward()
-            else:
-                # 모든 label이 -100인 경우 (학습 대상 토큰 없음)
-                logger.warning(f"Batch {batch_count}: No valid tokens for training, skipping backward")
+            if batch_count == 0:
+                logger.info(f"[Rank {rank}] Sequential forward completed, n_heads: {loss_result['n_heads']}")
 
             accumulation_counter += 1
             batch_count += 1

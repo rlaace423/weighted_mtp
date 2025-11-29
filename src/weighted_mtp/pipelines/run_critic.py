@@ -1,7 +1,10 @@
-"""Critic Pre-training Runner (Stage 1)
+"""Critic Pre-training Runner (독립 Value Model)
+
+독립 ValueModel (HuggingFace 기반)을 학습하는 파이프라인.
+Policy Model과 완전 분리된 별도 모델 사용.
 
 독립 실행:
-    python -m weighted_mtp.pipelines.run_critic --config configs/critic/critic.yaml
+    python -m weighted_mtp.pipelines.run_critic --config configs/production/critic_mlp.yaml
 """
 
 import argparse
@@ -18,7 +21,7 @@ from torch.utils.data import DataLoader
 from weighted_mtp.core.env import ensure_env_loaded
 from weighted_mtp.core.logging import setup_logging
 from weighted_mtp.data.dataloader import create_dataloader
-from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
+from weighted_mtp.models.value_model import ValueModel
 from weighted_mtp.models.tokenizer_utils import load_tokenizer_from_config
 from weighted_mtp.utils import (
     GPUMonitor,
@@ -26,17 +29,14 @@ from weighted_mtp.utils import (
     cleanup_old_checkpoints,
     cleanup_s3_checkpoints,
     compute_gradient_clip_stats,
-    compute_gradient_clip_stats_by_component,
     compute_gradient_norm,
     compute_mc_value_loss,
     compute_pairwise_accuracy,
-    create_param_groups,
     create_scheduler,
     get_model_size,
     get_system_info,
     pairwise_ranking_loss,
     s3_upload_executor,
-    save_checkpoint,
     shutdown_s3_executor,
 )
 from weighted_mtp.runtime import (
@@ -50,47 +50,81 @@ from weighted_mtp.runtime import (
 )
 
 
-def load_adapter(
-    config: dict,
+def load_value_model(
+    config: DictConfig,
     device: torch.device,
-    use_lora: bool = False,
-    lora_config: dict | None = None,
-) -> MetaLlamaMTPAdapter:
-    """Adapter 로드
-
+) -> ValueModel:
+    """독립 Value Model 로드
+    
     Args:
-        config: 모델 설정
+        config: 설정 (models.value_model 포함)
         device: 디바이스
-        use_lora: LoRA 사용 여부
-        lora_config: LoRA 설정 (rank, alpha, dropout, target_modules)
-
+    
     Returns:
-        MetaLlamaMTPAdapter 인스턴스
+        ValueModel 인스턴스
     """
-    # value_head_type 설정 (기본값: mlp)
+    # Value head 설정
     value_head_type = getattr(config.training, "value_head_type", "mlp")
-    # dropout 설정 (기본값: 0.0)
     dropout = getattr(config.training, "dropout", 0.0)
-
-    adapter = MetaLlamaMTPAdapter.from_pretrained(
-        model_path=config.models.policy.path,
-        device=device,
-        dtype=config.models.policy.dtype,
+    
+    # Value Model 로드
+    value_model = ValueModel.from_pretrained(
+        model_path=config.models.value_model.path,
         value_head_type=value_head_type,
         dropout=dropout,
-        use_lora=use_lora,
-        lora_config=lora_config,
+        device=str(device),
+        dtype=config.models.value_model.dtype,
     )
-    return adapter
+    
+    return value_model
 
 
+def save_value_model_checkpoint(
+    value_model: ValueModel,
+    optimizer: torch.optim.Optimizer,
+    epoch: float,
+    train_metrics: dict,
+    val_metrics: dict,
+    checkpoint_path: Path,
+    config: DictConfig = None,
+) -> None:
+    """Value Model checkpoint 저장
+    
+    저장 내용:
+    - backbone_state_dict: HuggingFace LlamaModel weights
+    - value_head_state_dict: Value head weights
+    - optimizer_state_dict
+    - config (모델 경로 포함, 로드 시 필요)
+    
+    Args:
+        value_model: ValueModel 인스턴스
+        optimizer: Optimizer
+        epoch: 현재 epoch
+        train_metrics: Train metrics
+        val_metrics: Validation metrics
+        checkpoint_path: 저장 경로
+        config: Config (OmegaConf DictConfig)
+    """
+    # FSDP unwrap
+    unwrapped = unwrap_model(value_model)
+    
+    checkpoint = {
+        "epoch": epoch,
+        "backbone_state_dict": unwrapped.backbone.state_dict(),
+        "value_head_state_dict": unwrapped.value_head.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "train_metrics": train_metrics,
+        "val_metrics": val_metrics,
+        "config": OmegaConf.to_container(config, resolve=True) if config else None,
+    }
+    
+    torch.save(checkpoint, checkpoint_path)
 
 
 def validate_critic(
-    adapter: MetaLlamaMTPAdapter,
+    value_model: ValueModel,
     dataloader: DataLoader,
     device: torch.device,
-    trunk_frozen: bool = True,
     use_pairwise: bool = True,
     use_mc_mse: bool = False,
     pairwise_coef: float = 1.0,
@@ -100,10 +134,9 @@ def validate_critic(
     """Pairwise Validation 수행
 
     Args:
-        adapter: Adapter
+        value_model: ValueModel 인스턴스
         dataloader: Validation DataLoader (pairwise format)
         device: 디바이스
-        trunk_frozen: True면 value loss gradient가 trunk로 흐르지 않음
         use_pairwise: Pairwise ranking loss 사용 여부
         use_mc_mse: MC tokenwise MSE loss 사용 여부
         pairwise_coef: Pairwise loss 계수
@@ -113,7 +146,7 @@ def validate_critic(
     Returns:
         Validation metrics (pairwise_accuracy, mean_pos, mean_neg, margin, loss)
     """
-    adapter.eval()
+    value_model.eval()
 
     total_loss = 0.0
     n_batches = 0
@@ -123,7 +156,7 @@ def validate_critic(
     total_mean_neg = 0.0
 
     # 모델 dtype 감지
-    model_dtype = next(adapter.parameters()).dtype
+    model_dtype = next(value_model.parameters()).dtype
 
     with torch.no_grad():
         for batch in dataloader:
@@ -140,13 +173,7 @@ def validate_critic(
             combined_input_ids = torch.cat([pos_input_ids, neg_input_ids], dim=0)
             combined_attention_mask = torch.cat([pos_attention_mask, neg_attention_mask], dim=0)
 
-            combined_outputs = adapter(
-                combined_input_ids,
-                combined_attention_mask,
-                return_value_logits=True,
-                trunk_frozen=trunk_frozen,
-            )
-            combined_value_logits = combined_outputs["value_logits"]
+            combined_value_logits = value_model(combined_input_ids, combined_attention_mask)
 
             pos_value_logits = combined_value_logits[:batch_size]
             neg_value_logits = combined_value_logits[batch_size:]
@@ -224,7 +251,7 @@ def validate_critic(
 
 
 def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
-    """Critic pre-training 실행
+    """Critic pre-training 실행 (독립 Value Model)
 
     Args:
         config: 완전한 config 객체 (OmegaConf DictConfig)
@@ -249,7 +276,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     else:
         logger.info("Local training (single device)")
 
-    logger.info("=== Critic Pre-training (Stage 1) ===")
+    logger.info("=== Critic Pre-training (독립 Value Model) ===")
     logger.info(f"Experiment: {config.experiment.name}")
     logger.info(f"Description: {config.experiment.description}")
 
@@ -260,7 +287,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # 5. MLflow 초기화 (Rank 0만, experiment 이름이 있는 경우만)
     use_mlflow = bool(config.mlflow.experiment)
     use_s3_upload = config.checkpoint.get("s3_upload", True) and use_mlflow
-    mlflow_run_id = None  # S3 업로드 시 스레드 안전을 위해 명시적 run_id 저장
+    mlflow_run_id = None
     if is_main_process() and use_mlflow:
         mlflow.set_tracking_uri(config.mlflow.tracking_uri)
         mlflow.set_experiment(config.mlflow.experiment)
@@ -268,88 +295,41 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             run_name=config.experiment.name,
             tags={tag: "true" for tag in config.experiment.tags},
         )
-        # Config 로깅
         mlflow.log_params(OmegaConf.to_container(config, resolve=True))
         mlflow_run_id = mlflow.active_run().info.run_id
         logger.info(f"MLflow Run ID: {mlflow_run_id}")
 
-    # 6. LoRA 설정 파싱
-    use_lora = getattr(config.training, "use_lora", False)
-    lora_config = None
-    if use_lora:
-        lora_section = config.training.get("lora", {})
-        lora_config = {
-            "rank": lora_section.get("rank", 8),
-            "alpha": lora_section.get("alpha", 16.0),
-            "dropout": lora_section.get("dropout", 0.0),
-            "target_modules": lora_section.get(
-                "target_modules", ["wq", "wk", "wv", "wo"]
-            ),
-        }
-        logger.info(f"LoRA enabled: rank={lora_config['rank']}, alpha={lora_config['alpha']}")
+    # 6. Value Model 로드
+    value_model = load_value_model(config, device)
+    logger.info(f"Value Model loaded: {config.models.value_model.path}")
 
-    # 7. Resource 로딩
-    adapter = load_adapter(config, device, use_lora=use_lora, lora_config=lora_config)
-
-    # Transformer trunk freeze 설정
-    # LoRA 사용 시: 원본 파라미터는 이미 frozen, LoRA 파라미터만 학습
-    # LoRA 미사용 시: num_unfrozen_layers에 따라 freeze/unfreeze
-    num_unfrozen = config.training.get("num_unfrozen_layers", 0)
-    n_layers = len(adapter.transformer.layers)
-
-    if use_lora:
-        # LoRA 사용 시 원본 trunk는 이미 frozen됨 (adapter._apply_lora에서 처리)
-        logger.info("LoRA enabled: training LoRA parameters + value head")
-    elif num_unfrozen > 0:
-        # 마지막 N개 블록만 학습
-        logger.info(f"Unfreezing last {num_unfrozen} transformer blocks (out of {n_layers})")
-
-        # 전체 frozen
-        for param in adapter.transformer.parameters():
-            param.requires_grad = False
-
-        # 마지막 N개 블록 unfreeze
-        for layer in adapter.transformer.layers[-num_unfrozen:]:
-            for param in layer.parameters():
-                param.requires_grad = True
-
-        # final norm도 unfreeze (마지막 블록 출력에 영향)
-        for param in adapter.transformer.norm.parameters():
-            param.requires_grad = True
+    # Backbone freeze 설정
+    backbone_frozen = getattr(config.training, "backbone_frozen", True)
+    if backbone_frozen:
+        value_model.freeze_backbone()
+        logger.info("Backbone frozen: training value head only")
     else:
-        # 기존 동작: value head만 학습
-        logger.info("Freezing transformer trunk (training value head only)")
-        for param in adapter.transformer.parameters():
-            param.requires_grad = False
+        logger.info("Backbone unfrozen: training entire model")
 
-    # Value head는 항상 학습
-    for param in adapter.value_head.parameters():
-        param.requires_grad = True
+    # Model size 로깅 (FSDP wrapping 전에 계산)
+    model_size = get_model_size(value_model)
 
-    # Model size 로깅 (FSDP wrapping 전에 계산해야 정확함)
-    model_size = get_model_size(adapter)
-
-    # Trainable params breakdown 계산 (FSDP wrapping 전에 계산)
+    # Trainable params breakdown
     trainable_breakdown = {
-        "value_head": sum(p.numel() for p in adapter.value_head.parameters() if p.requires_grad),
-        "trunk_blocks": sum(
-            p.numel() for layer in adapter.transformer.layers[-num_unfrozen:]
-            for p in layer.parameters() if p.requires_grad
-        ) if num_unfrozen > 0 else 0,
-        "norm": sum(
-            p.numel() for p in adapter.transformer.norm.parameters() if p.requires_grad
-        ) if num_unfrozen > 0 else 0,
+        "value_head": sum(p.numel() for p in value_model.value_head.parameters() if p.requires_grad),
+        "backbone": sum(p.numel() for p in value_model.backbone.parameters() if p.requires_grad),
     }
 
     # FSDP wrapping
-    adapter = wrap_model_fsdp(
-        adapter,
+    value_model = wrap_model_fsdp(
+        value_model,
         device,
         sharding_strategy=config.distributed.fsdp.sharding_strategy,
         mixed_precision=config.distributed.fsdp.mixed_precision,
         cpu_offload=config.distributed.fsdp.cpu_offload,
         activation_checkpointing=config.distributed.fsdp.get("activation_checkpointing", False),
     )
+    
     tokenizer = load_tokenizer_from_config(config)
 
     if is_main_process():
@@ -359,10 +339,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     "model_total_params": model_size["total_params"],
                     "model_trainable_params": model_size["trainable_params"],
                     "model_non_trainable_params": model_size["non_trainable_params"],
-                    "model_num_unfrozen_layers": num_unfrozen,
                     "model_trainable_value_head": trainable_breakdown["value_head"],
-                    "model_trainable_trunk_blocks": trainable_breakdown["trunk_blocks"],
-                    "model_trainable_norm": trainable_breakdown["norm"],
+                    "model_trainable_backbone": trainable_breakdown["backbone"],
+                    "backbone_frozen": backbone_frozen,
                 }
             )
         logger.info(
@@ -371,8 +350,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         )
         logger.info(
             f"Trainable breakdown - value_head: {trainable_breakdown['value_head']:,}, "
-            f"trunk_blocks: {trainable_breakdown['trunk_blocks']:,}, "
-            f"norm: {trainable_breakdown['norm']:,}"
+            f"backbone: {trainable_breakdown['backbone']:,}"
         )
 
         # System info 로깅
@@ -385,7 +363,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 }
             )
 
-    # GPU monitor 초기화 (모든 rank에서 필요)
+    # GPU monitor 초기화
     gpu_monitor = GPUMonitor(device)
 
     # 5. Dataset & DataLoader 생성
@@ -436,21 +414,17 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             }
         )
 
-    # 6. Optimizer (param groups: trunk/value_head 분리)
-    # learning_rate fallback (하위 호환성)
-    default_lr = config.training.get("learning_rate", 1e-5)
-    trunk_lr = config.training.get("trunk_learning_rate", default_lr)
-    value_head_lr = config.training.get("value_head_learning_rate", default_lr)
-
-    # FSDP wrapping 후에도 원본 모델 구조에 접근하여 param groups 생성
-    param_groups = create_param_groups(
-        adapter=unwrap_model(adapter),
-        trunk_lr=trunk_lr,
-        value_head_lr=value_head_lr,
-    )
-
+    # 6. Optimizer (단순화: value_model 전체)
+    learning_rate = config.training.get("learning_rate", 1e-4)
+    
+    # Backbone frozen인 경우 value_head만 학습
+    trainable_params = value_model.parameters() if not backbone_frozen else [
+        p for p in unwrap_model(value_model).value_head.parameters() if p.requires_grad
+    ]
+    
     optimizer = torch.optim.AdamW(
-        param_groups,
+        trainable_params,
+        lr=learning_rate,
         betas=(0.9, 0.95),
         weight_decay=0.01,
     )
@@ -495,19 +469,15 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     current_epoch = 0.0
     batch_count = 0
     next_checkpoint_epoch = save_checkpoint_every
-    train_loss_avg = 0.0  # 초기화 (0 batch 케이스 대응)
+    train_loss_avg = 0.0
 
-    # Throughput tracker 초기화 (모든 rank에서 필요)
+    # Throughput tracker 초기화
     throughput_tracker = ThroughputTracker()
 
     # 모델 dtype 감지
-    model_dtype = next(adapter.parameters()).dtype
+    model_dtype = next(value_model.parameters()).dtype
 
-    # trunk_frozen 설정 (config에서 직접 설정 가능, 기본값은 num_unfrozen_layers 기반)
-    trunk_frozen = getattr(config.training, "trunk_frozen", num_unfrozen == 0)
-    logger.info(f"Trunk frozen: {trunk_frozen}")
-
-    # value_loss 설정 (기본값: pairwise만 사용)
+    # value_loss 설정
     value_loss_config = config.training.get("value_loss", {})
     use_pairwise = value_loss_config.get("use_pairwise", True)
     use_mc_mse = value_loss_config.get("use_mc_mse", False)
@@ -515,25 +485,16 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     mc_mse_coef = value_loss_config.get("mc_mse_coef", 1.0)
     logger.info(f"Value loss: use_pairwise={use_pairwise}, use_mc_mse={use_mc_mse}")
 
-    # 컴포넌트별 gradient clipping 설정
-    # trunk과 value_head에 각각 다른 max_grad_norm 적용하여 gradient scale 불균형 해소
-    fallback_max_grad_norm = config.training.get("max_grad_norm", 1.0)
-    trunk_max_grad_norm = config.training.get("trunk_max_grad_norm", fallback_max_grad_norm)
-    value_head_max_grad_norm = config.training.get("value_head_max_grad_norm", fallback_max_grad_norm)
-    use_component_clipping = (
-        "trunk_max_grad_norm" in config.training or "value_head_max_grad_norm" in config.training
-    )
-    logger.info(
-        f"Gradient clipping: trunk={trunk_max_grad_norm}, value_head={value_head_max_grad_norm} "
-        f"(component_clipping={use_component_clipping})"
-    )
+    # Gradient clipping
+    max_grad_norm = config.training.get("max_grad_norm", 1.0)
+    logger.info(f"Gradient clipping: max_grad_norm={max_grad_norm}")
 
-    # Optimizer 초기화 (gradient accumulation을 위해 while loop 시작 전)
+    # Optimizer 초기화
     optimizer.zero_grad()
 
-    # 7. Training loop (모든 rank 실행)
+    # 7. Training loop
     while batch_count < batches_to_run:
-        # Train 1 epoch (또는 checkpoint 경계까지)
+        # Train until checkpoint boundary
         target_epoch = min(next_checkpoint_epoch, n_epochs)
         target_batches = int(target_epoch * total_batches)
         batches_this_period = target_batches - batch_count
@@ -558,12 +519,11 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             try:
                 batch = next(epoch_train_loader)
             except StopIteration:
-                # DataLoader 재시작
                 epoch_train_loader = iter(train_loader)
                 batch = next(epoch_train_loader)
 
             # 1 batch 훈련
-            adapter.train()
+            value_model.train()
 
             # Pairwise batch 구조
             pos_input_ids = batch["pos_input_ids"].to(device)
@@ -573,22 +533,21 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             neg_attention_mask = batch["neg_attention_mask"].to(device)
             neg_labels = batch["neg_labels"].to(device)
 
-            # Batched Forward: pos+neg concat하여 1회 forward (2배 속도 향상)
+            # Batched Forward: pos+neg concat
             batch_size = pos_input_ids.size(0)
             combined_input_ids = torch.cat([pos_input_ids, neg_input_ids], dim=0)
             combined_attention_mask = torch.cat([pos_attention_mask, neg_attention_mask], dim=0)
 
-            combined_outputs = adapter(combined_input_ids, combined_attention_mask, return_value_logits=True, trunk_frozen=trunk_frozen)
-            combined_value_logits = combined_outputs["value_logits"]
+            combined_value_logits = value_model(combined_input_ids, combined_attention_mask)
 
             pos_value_logits = combined_value_logits[:batch_size]
             neg_value_logits = combined_value_logits[batch_size:]
 
-            # 학습 대상 토큰 마스크 (labels != -100)
+            # 학습 대상 토큰 마스크
             pos_loss_mask = (pos_labels != -100)
             neg_loss_mask = (neg_labels != -100)
 
-            # Value Loss 계산 (조건부)
+            # Value Loss 계산
             value_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
 
             if use_pairwise:
@@ -601,12 +560,10 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 value_loss = value_loss + pairwise_coef * pairwise_loss_val
 
             if use_mc_mse:
-                # Positive: reward=1
                 pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
                 pos_mc_loss = compute_mc_value_loss(
                     pos_value_logits, pos_rewards, pos_attention_mask, pos_loss_mask
                 )
-                # Negative: reward=0
                 neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
                 neg_mc_loss = compute_mc_value_loss(
                     neg_value_logits, neg_rewards, neg_attention_mask, neg_loss_mask
@@ -614,7 +571,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 mc_mse_loss_val = (pos_mc_loss + neg_mc_loss) / 2
                 value_loss = value_loss + mc_mse_coef * mc_mse_loss_val
 
-            # Pairwise 메트릭 누적 (항상 계산 - 메트릭용)
+            # Pairwise 메트릭 누적
             pairwise_metrics = compute_pairwise_accuracy(
                 v_pos=pos_value_logits,
                 v_neg=neg_value_logits,
@@ -627,10 +584,10 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             train_mean_neg_sum += pairwise_metrics["mean_neg"]
 
             # Throughput용 변수
-            batch_size_actual = pos_input_ids.size(0) * 2  # pos + neg
+            batch_size_actual = pos_input_ids.size(0) * 2
             n_tokens = pos_attention_mask.sum().item() + neg_attention_mask.sum().item()
 
-            # Loss scaling (gradient accumulation 적용)
+            # Loss scaling
             scaled_loss = value_loss / gradient_accumulation_steps
             scaled_loss.backward()
 
@@ -638,52 +595,21 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             batch_count += 1
             period_batches += 1
 
-            # Throughput tracking (batch 단위)
             throughput_tracker.update(batch_size_actual, int(n_tokens))
-
-            # Period metrics 누적 (batch 단위)
             period_metrics_sum["train_loss"] += value_loss.item()
 
-            # Optimizer step (accumulation 완료 시에만)
+            # Optimizer step
             if accumulation_counter >= gradient_accumulation_steps:
-                # 컴포넌트별 gradient clipping (trunk과 value_head 분리)
-                if use_component_clipping:
-                    # trunk과 value_head에 각각 다른 max_grad_norm 적용
-                    component_clip_stats = compute_gradient_clip_stats_by_component(
-                        adapter,
-                        trunk_max_grad_norm=trunk_max_grad_norm,
-                        value_head_max_grad_norm=value_head_max_grad_norm,
-                    )
-                    # 하위 호환성: 기존 grad_clip_stats 형식으로 변환 (전체 norm 근사)
-                    grad_clip_stats = {
-                        "grad_norm_pre_clip": (
-                            component_clip_stats["trunk_grad_norm_pre"] ** 2
-                            + component_clip_stats["value_head_grad_norm_pre"] ** 2
-                        ) ** 0.5,
-                        "grad_norm_post_clip": (
-                            component_clip_stats["trunk_grad_norm_post"] ** 2
-                            + component_clip_stats["value_head_grad_norm_post"] ** 2
-                        ) ** 0.5,
-                        "grad_clip_ratio": min(
-                            component_clip_stats["trunk_clip_ratio"],
-                            component_clip_stats["value_head_clip_ratio"],
-                        ),
-                    }
-                elif fallback_max_grad_norm > 0:
-                    # 기존 방식: 전체 모델에 단일 max_grad_norm 적용
-                    grad_clip_stats = compute_gradient_clip_stats(
-                        adapter,
-                        fallback_max_grad_norm,
-                    )
-                    component_clip_stats = None
+                # Gradient clipping
+                if max_grad_norm > 0:
+                    grad_clip_stats = compute_gradient_clip_stats(value_model, max_grad_norm)
                 else:
-                    grad_norm_dict = compute_gradient_norm(adapter)
+                    grad_norm_dict = compute_gradient_norm(value_model)
                     grad_clip_stats = {
                         "grad_norm_pre_clip": grad_norm_dict["grad_norm"],
                         "grad_norm_post_clip": grad_norm_dict["grad_norm"],
                         "grad_clip_ratio": 1.0,
                     }
-                    component_clip_stats = None
 
                 optimizer.step()
                 if scheduler is not None:
@@ -693,18 +619,11 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 global_step += 1
                 accumulation_counter = 0
 
-                # Step-level logging (optimizer step 시에만)
+                # Step-level logging
                 if global_step % config.training.log_interval == 0:
-                    # GPU metrics
                     gpu_metrics = gpu_monitor.get_metrics()
+                    current_lr = optimizer.param_groups[0]["lr"]
 
-                    # Metric aggregation (분산 환경)
-                    avg_grad_norm_post = grad_clip_stats["grad_norm_post_clip"]
-
-                    # Value head LR 가져오기 (param_groups[1]이 value_head)
-                    value_head_lr = optimizer.param_groups[1]["lr"] if len(optimizer.param_groups) > 1 else optimizer.param_groups[0]["lr"]
-
-                    # Pairwise 메트릭 로깅
                     batch_pairwise_acc = pairwise_metrics["pairwise_accuracy"]
                     batch_mean_pos = pairwise_metrics["mean_pos"]
                     batch_mean_neg = pairwise_metrics["mean_neg"]
@@ -715,61 +634,37 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         "mean_pos": batch_mean_pos,
                         "mean_neg": batch_mean_neg,
                     })
-                    avg_loss = reduced["loss"]
-                    avg_pairwise_acc = reduced["pairwise_accuracy"]
-                    avg_mean_pos = reduced["mean_pos"]
-                    avg_mean_neg = reduced["mean_neg"]
 
                     if is_main_process():
                         if use_mlflow:
-                            metrics_to_log = {
-                                "train/loss": avg_loss,
-                                "train/grad_norm": avg_grad_norm_post,
-                                "train/grad_norm_pre_clip": grad_clip_stats["grad_norm_pre_clip"],
-                                "train/grad_clip_ratio": grad_clip_stats["grad_clip_ratio"],
-                                "train/learning_rate": value_head_lr,
-                                "train/pairwise_accuracy": avg_pairwise_acc,
-                                "value/mean_pos": avg_mean_pos,
-                                "value/mean_neg": avg_mean_neg,
-                                "value/margin": avg_mean_pos - avg_mean_neg,
-                                "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
-                                "system/gpu_utilization_pct": gpu_metrics["gpu_utilization_pct"],
-                            }
-                            # 컴포넌트별 gradient clipping 사용 시 개별 norm 로깅
-                            if component_clip_stats is not None:
-                                metrics_to_log.update({
-                                    "train/trunk_grad_norm_pre": component_clip_stats["trunk_grad_norm_pre"],
-                                    "train/trunk_grad_norm_post": component_clip_stats["trunk_grad_norm_post"],
-                                    "train/trunk_clip_ratio": component_clip_stats["trunk_clip_ratio"],
-                                    "train/value_head_grad_norm_pre": component_clip_stats["value_head_grad_norm_pre"],
-                                    "train/value_head_grad_norm_post": component_clip_stats["value_head_grad_norm_post"],
-                                    "train/value_head_clip_ratio": component_clip_stats["value_head_clip_ratio"],
-                                })
-                            mlflow.log_metrics(metrics_to_log, step=global_step)
+                            mlflow.log_metrics(
+                                {
+                                    "train/loss": reduced["loss"],
+                                    "train/grad_norm": grad_clip_stats["grad_norm_post_clip"],
+                                    "train/learning_rate": current_lr,
+                                    "train/pairwise_accuracy": reduced["pairwise_accuracy"],
+                                    "value/mean_pos": reduced["mean_pos"],
+                                    "value/mean_neg": reduced["mean_neg"],
+                                    "value/margin": reduced["mean_pos"] - reduced["mean_neg"],
+                                    "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
+                                },
+                                step=global_step,
+                            )
                     logger.info(
                         f"Step {global_step}/{total_optimization_steps}, "
-                        f"Loss: {avg_loss:.4f}, "
-                        f"Pairwise Acc: {avg_pairwise_acc:.3f}, "
-                        f"Margin: {avg_mean_pos - avg_mean_neg:.4f}, "
-                        f"LR: {value_head_lr:.2e}"
+                        f"Loss: {reduced['loss']:.4f}, "
+                        f"Pairwise Acc: {reduced['pairwise_accuracy']:.3f}, "
+                        f"Margin: {reduced['mean_pos'] - reduced['mean_neg']:.4f}, "
+                        f"LR: {current_lr:.2e}"
                     )
 
-        # Period loop 종료
+        # Period 종료
 
-        # Incomplete accumulation 처리 (validation 전)
+        # Incomplete accumulation 처리
         if accumulation_counter > 0:
-            logger.info(f"Processing incomplete accumulation ({accumulation_counter} batches before validation)")
-
-            # Gradient clipping (컴포넌트별 또는 전체)
-            if use_component_clipping:
-                compute_gradient_clip_stats_by_component(
-                    adapter,
-                    trunk_max_grad_norm=trunk_max_grad_norm,
-                    value_head_max_grad_norm=value_head_max_grad_norm,
-                )
-            elif fallback_max_grad_norm > 0:
-                compute_gradient_clip_stats(adapter, fallback_max_grad_norm)
-
+            logger.info(f"Processing incomplete accumulation ({accumulation_counter} batches)")
+            if max_grad_norm > 0:
+                compute_gradient_clip_stats(value_model, max_grad_norm)
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
@@ -777,19 +672,14 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             global_step += 1
             accumulation_counter = 0
 
-        # Epoch 경계 도달
         current_epoch = batch_count / total_batches
 
-        # Period-level metrics 계산
+        # Period metrics
         train_loss_avg = period_metrics_sum["train_loss"] / period_batches
-
-        # Throughput metrics 계산
         throughput_metrics = throughput_tracker.get_epoch_metrics()
-
-        # GPU metrics (epoch-level)
         gpu_metrics_epoch = gpu_monitor.get_metrics()
 
-        # Pairwise 메트릭 계산
+        # Pairwise 메트릭 aggregation
         reduced_train_pairwise = all_reduce_scalars({
             "train_loss": train_loss_avg,
             "train_correct_pairs": train_correct_pairs,
@@ -806,7 +696,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         train_margin = train_mean_pos - train_mean_neg
 
         logger.info(
-            f"Epoch {current_epoch:.2f} 도달 - "
+            f"Epoch {current_epoch:.2f} - "
             f"Train Loss: {train_loss_avg:.4f}, "
             f"Pairwise Acc: {train_pairwise_acc:.3f}, "
             f"Margin: {train_margin:.4f}"
@@ -816,10 +706,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         logger.info(f"--- Validation at epoch {current_epoch:.2f} ---")
 
         val_metrics = validate_critic(
-            adapter=adapter,
+            value_model=value_model,
             dataloader=val_loader,
             device=device,
-            trunk_frozen=trunk_frozen,
             use_pairwise=use_pairwise,
             use_mc_mse=use_mc_mse,
             pairwise_coef=pairwise_coef,
@@ -827,7 +716,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             return_raw_counts=True,
         )
 
-        # Validation raw counts all_reduce
+        # Validation aggregation
         raw_counts = val_metrics["_raw_counts"]
         reduced_val_counts = all_reduce_scalars({
             "loss_sum": raw_counts["loss_sum"],
@@ -849,22 +738,14 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             if use_mlflow:
                 mlflow.log_metrics(
                     {
-                        # Train metrics (epoch 평균)
                         "train/epoch_loss": train_loss_avg,
                         "train/epoch_pairwise_accuracy": train_pairwise_acc,
-                        "train/epoch_mean_pos": train_mean_pos,
-                        "train/epoch_mean_neg": train_mean_neg,
                         "train/epoch_margin": train_margin,
-                        # Validation metrics
                         "val/loss": avg_val_loss,
                         "val/pairwise_accuracy": avg_val_pairwise_acc,
-                        "val/mean_pos": avg_val_mean_pos,
-                        "val/mean_neg": avg_val_mean_neg,
                         "val/margin": avg_val_margin,
-                        # Performance metrics
                         "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
                         "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
-                        "perf/tokens_per_sec": throughput_metrics["tokens_per_sec"],
                         "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
                     },
                     step=global_step,
@@ -876,7 +757,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             f"Margin: {avg_val_margin:.4f}"
         )
 
-        # Aggregated validation metrics (checkpoint 저장용)
+        # Aggregated validation metrics
         aggregated_val_metrics = {
             "val_loss": avg_val_loss,
             "val_pairwise_accuracy": avg_val_pairwise_acc,
@@ -885,62 +766,46 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             "val_margin": avg_val_margin,
         }
 
-        # Checkpoint 저장 (validation loss 개선 시만)
+        # Checkpoint 저장
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}.pt"
 
-            save_checkpoint(
-                adapter=adapter,
+            save_value_model_checkpoint(
+                value_model=value_model,
                 optimizer=optimizer,
                 epoch=current_epoch,
                 train_metrics={"train_loss": train_loss_avg},
                 val_metrics=aggregated_val_metrics,
                 checkpoint_path=checkpoint_path,
-                config={"model": {"path": config.models.policy.path}},
-                s3_upload=use_s3_upload,
-                mlflow_run_id=mlflow_run_id,
+                config=config,
             )
 
-            # 모든 GPU가 checkpoint 저장 완료까지 대기
             barrier()
 
             if is_main_process():
                 logger.info(f"Checkpoint saved: {checkpoint_path.name} (val_loss: {best_val_loss:.4f})")
 
-                # 오래된 checkpoint 정리
                 if config.checkpoint.save_total_limit:
                     cleanup_old_checkpoints(
                         checkpoint_dir=checkpoint_dir,
                         save_total_limit=config.checkpoint.save_total_limit,
                     )
-
-                    # S3 정리 (비동기)
-                    if use_s3_upload:
-                        s3_upload_executor.submit(
-                            cleanup_s3_checkpoints,
-                            experiment_id=mlflow.active_run().info.experiment_id,
-                            run_id=mlflow.active_run().info.run_id,
-                            save_total_limit=config.checkpoint.save_total_limit,
-                        )
         else:
-            logger.info(f"Validation loss did not improve ({avg_val_loss:.4f} >= {best_val_loss:.4f}), skipping checkpoint save")
+            logger.info(f"Validation loss did not improve ({avg_val_loss:.4f} >= {best_val_loss:.4f})")
 
-        # 다음 checkpoint 경계 설정
         next_checkpoint_epoch += save_checkpoint_every
 
     # 8. Final checkpoint
     if config.checkpoint.save_final:
         final_path = checkpoint_dir / "checkpoint_final.pt"
 
-        # 최종 validation 실행
         logger.info("--- Final Validation ---")
 
         final_val_raw = validate_critic(
-            adapter=adapter,
+            value_model=value_model,
             dataloader=val_loader,
             device=device,
-            trunk_frozen=trunk_frozen,
             use_pairwise=use_pairwise,
             use_mc_mse=use_mc_mse,
             pairwise_coef=pairwise_coef,
@@ -972,46 +837,41 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             "val_margin": final_margin,
         }
 
-        save_checkpoint(
-            adapter=adapter,
+        save_value_model_checkpoint(
+            value_model=value_model,
             optimizer=optimizer,
             epoch=current_epoch,
             train_metrics={"train_loss": train_loss_avg},
             val_metrics=final_val_metrics,
             checkpoint_path=final_path,
-            config={"model": {"path": config.models.policy.path}},
-            s3_upload=use_s3_upload,
-            mlflow_run_id=mlflow_run_id,
+            config=config,
         )
 
-        # 모든 GPU가 final checkpoint 저장 완료까지 대기
         barrier()
 
         if is_main_process():
             logger.info(f"Final checkpoint saved: {final_path.name}")
 
-    # 9. 모든 S3 업로드 완료 대기 및 MLflow 종료
+    # 9. 종료
     shutdown_s3_executor()
     if is_main_process() and use_mlflow:
         mlflow.end_run()
 
-    # 최신 checkpoint 경로 반환
     epoch_checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
     latest_checkpoint_path = str(epoch_checkpoints[-1]) if epoch_checkpoints else None
 
     logger.info(f"Critic pre-training 완료! Latest checkpoint: {latest_checkpoint_path}")
 
-    # final_val_metrics가 정의되지 않은 경우 마지막 aggregated_val_metrics 사용
     final_metrics = final_val_metrics if config.checkpoint.save_final else aggregated_val_metrics
     return final_metrics, latest_checkpoint_path
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Critic Pre-training (Stage 1)")
+    parser = argparse.ArgumentParser(description="Critic Pre-training (독립 Value Model)")
     parser.add_argument(
         "--config",
         required=True,
-        help="Config path (e.g., configs/critic/critic.yaml)",
+        help="Config path (e.g., configs/production/critic_mlp.yaml)",
     )
     parser.add_argument(
         "--override",
@@ -1021,10 +881,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Config 로드
     config = OmegaConf.load(args.config)
 
-    # Override 적용
     if args.overrides:
         from weighted_mtp.utils.config_utils import apply_overrides
         config = apply_overrides(config, args.overrides)

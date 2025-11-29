@@ -1,6 +1,7 @@
-# Verifiable WMTP + Pairwise Auxiliary Loss (Stage 2)
-# TD Weighting + Pairwise Ranking Loss
-# 프로덕션 설정 (VESSL H200 4-GPU)
+# Verifiable WMTP (TD Weighting with Independent Value Model)
+# Policy Model: MTP 학습 대상 (LoRA)
+# Value Model: Critic checkpoint에서 로드, eval only
+# 프로덕션 설정 (VESSL H200 3-GPU)
 
 # 프로젝트 정보
 project:
@@ -10,19 +11,20 @@ project:
 # 실험 메타정보
 experiment:
   name: verifiable-pairwise
-  description: "WMTP with TD weighting + Pairwise auxiliary loss"
+  description: "WMTP with TD weighting using independent Value Model"
   stage: verifiable
   tags:
     - verifiable
-    - pairwise-auxiliary
     - td-weighting
+    - independent-value-model
     - production
 
 # 모델 설정
 models:
+  # Policy Model (학습 대상, value_head 없음)
   policy:
     name: meta-llama-mtp
-    path: storage/checkpoints/critic/critic-pretrain-mlp-final/checkpoint_epoch_0.75.pt
+    path: storage/models/meta-llama-mtp
     tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     params:
       dim: 4096
@@ -33,6 +35,10 @@ models:
       rope_theta: 10000.0
       vocab_size: 32000
     dtype: bfloat16
+
+  # Value Model (Critic checkpoint에서 로드, eval only)
+  value_model:
+    checkpoint_path: storage/checkpoints/critic/critic-pretrain-mlp-final/checkpoint_final.pt
 
 # 데이터셋 설정
 dataset:
@@ -47,8 +53,8 @@ data_sampling:
   val_n_samples: 500
   use_pairwise: true
 
-  n_samples: 100000  # 학습용 (correct, incorrect) 쌍
-  max_pairs_per_problem: 25  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
+  n_samples: 100000
+  max_pairs_per_problem: 25
 
   difficulty_bins:
     zero: [0, 0]
@@ -62,54 +68,33 @@ data_sampling:
 # 학습 설정 (H200 3-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 18  # Per GPU (Pairwise pos+neg 메모리 고려)
-  gradient_accumulation_steps: 2  # Effective batch size = 18 × 2 × 3 = 108
+  batch_size: 18
+  gradient_accumulation_steps: 2  # Effective batch size = 18 x 2 x 3 = 108
 
-  # 컴포넌트별 학습률 (LoRA는 Full FT 대비 LR 10배 권장)
-  trunk_learning_rate: 1.0e-4    # LoRA Trunk LR
-  value_head_learning_rate: 1.0e-4  # Head와 Trunk 보폭 맞춤
+  # 학습률 (Policy Model LoRA)
+  learning_rate: 1.0e-4
 
-  # 컴포넌트별 gradient clipping (trunk과 value_head 독립 적용)
-  # trunk gradient scale ~1.5, value_head gradient scale ~25 이므로 분리 필요
-  trunk_max_grad_norm: 1.0       # Trunk(MTP) gradient clipping
-  value_head_max_grad_norm: 1.0  # Value head gradient clipping
-  max_grad_norm: 1.0             # fallback (컴포넌트별 설정 없을 때)
-
-  # Value head 설정
-  value_head_type: mlp  # linear (4096 → 1) 또는 mlp (4096 → 512 → 256 → 1)
-  dropout: 0.3
-  trunk_frozen: false  # false면 value loss gradient가 trunk로 전파됨
+  # Gradient clipping
+  max_grad_norm: 1.0
 
   # TD error weighting (Terminal-only binary reward이므로 MC 방식 사용)
-  # gamma, lambda는 코드에서 1.0 고정 (intermediate reward 없음)
   beta: 0.9
   weight_clip_min: 0.1
   weight_clip_max: 3
 
-  # TD EMA 정규화 (Advantage Whitening 일관성 보장)
-  td_ema_momentum: 0.1       # EMA 업데이트 계수 (0.1 = 90% 이전 + 10% 현재)
-  td_ema_warmup_steps: 10    # 초기 warmup step 수
-
-  # Value loss 스케일링 (컴포넌트별 clipping과 별개로 loss 비율 조정)
-  # 이제 gradient clipping이 분리되어 있으므로 순수 loss 비율로만 사용
-  value_loss_coef: 0.5
-
-  # Value loss 모드 선택 (pairwise와 mc_mse 독립적 또는 동시 사용 가능)
-  value_loss:
-    use_pairwise: false   # Pairwise ranking loss
-    use_mc_mse: true    # MC tokenwise MSE loss
-    pairwise_coef: 0.0   # Pairwise loss 계수
-    mc_mse_coef: 1.0     # MC MSE loss 계수
+  # TD EMA 정규화
+  td_ema_momentum: 0.1
+  td_ema_warmup_steps: 10
 
   log_interval: 5
 
-  # LoRA 설정 (All-Linear LoRA for CodeContests)
+  # LoRA 설정
   use_lora: true
   lora:
-    rank: 64           # 코드/논리 태스크는 64 권장
-    alpha: 128.0       # rank의 2배
-    dropout: 0.05      # 과적합 방지
-    target_modules:    # 모든 Linear Layer에 적용
+    rank: 64
+    alpha: 128.0
+    dropout: 0.05
+    target_modules:
       - wq
       - wk
       - wv
@@ -127,12 +112,12 @@ training:
 # 체크포인트
 checkpoint:
   save_dir: storage/checkpoints/verifiable/${experiment.name}
-  save_checkpoint_every: 0.25
+  save_checkpoint_every: 0.2
   save_best: true
   save_final: true
   save_total_limit: 4
   s3_upload: false
-  save_lora_only: true  # LoRA 사용 시 LoRA + value head만 저장 (메모리 효율)
+  save_lora_only: true
 
 # 런타임 설정
 runtime:

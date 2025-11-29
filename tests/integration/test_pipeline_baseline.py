@@ -24,7 +24,7 @@ def test_baseline_pipeline_micro_mtp():
         pytest.skip("MPS not available on this machine")
 
     # Test config 경로
-    config_path = "configs/baseline/baseline_local.yaml"
+    config_path = "configs/local/baseline_local.yaml"
     assert Path(config_path).exists(), f"Config not found: {config_path}"
 
     # Override 파라미터 (초경량 테스트 설정)
@@ -100,7 +100,7 @@ def test_baseline_pipeline_micro_mtp():
 @pytest.mark.integration
 def test_baseline_config_validation():
     """Baseline config 파일 유효성 검증"""
-    config_path = Path("configs/baseline/baseline_local.yaml")
+    config_path = Path("configs/local/baseline_local.yaml")
     assert config_path.exists(), f"Config not found: {config_path}"
 
     config = OmegaConf.load(str(config_path))

@@ -29,7 +29,7 @@ def test_verifiable_pipeline_micro_mtp():
         pytest.skip(f"Critic checkpoint not found: {critic_checkpoint_path}. Run critic training first.")
 
     # Test config 경로
-    config_path = "configs/verifiable/verifiable_local.yaml"
+    config_path = "configs/local/verifiable_local.yaml"
     assert Path(config_path).exists(), f"Config not found: {config_path}"
 
     # Override 파라미터 (초경량 테스트 설정)
@@ -67,11 +67,10 @@ def test_verifiable_pipeline_micro_mtp():
     try:
         final_metrics, best_checkpoint_path = run_verifiable_training(config)
 
-        # 검증
+        # 검증 (Value Model 분리 후: value_loss 없음)
         assert final_metrics is not None, "Final metrics should not be None"
         assert "val_loss" in final_metrics, "Should have val_loss"
         assert "val_weighted_ce_loss" in final_metrics, "Should have weighted CE loss"
-        assert "val_value_loss" in final_metrics, "Should have value loss"
 
         assert isinstance(final_metrics["val_loss"], float), "val_loss should be float"
         assert final_metrics["val_loss"] > 0, "val_loss should be positive"
@@ -89,7 +88,6 @@ def test_verifiable_pipeline_micro_mtp():
         print(f"\n✓ Verifiable pipeline test passed")
         print(f"  Final val_loss: {final_metrics['val_loss']:.4f}")
         print(f"  Final weighted CE loss: {final_metrics['val_weighted_ce_loss']:.4f}")
-        print(f"  Final value loss: {final_metrics['val_value_loss']:.4f}")
         print(f"  Checkpoints saved: {len(checkpoints)}")
         print(f"  Best checkpoint: {best_checkpoint_path}")
 
@@ -105,7 +103,7 @@ def test_verifiable_pipeline_micro_mtp():
 @pytest.mark.integration
 def test_verifiable_config_validation():
     """Verifiable config 파일 유효성 검증"""
-    config_path = Path("configs/verifiable/verifiable_local.yaml")
+    config_path = Path("configs/local/verifiable_local.yaml")
     assert config_path.exists(), f"Config not found: {config_path}"
 
     config = OmegaConf.load(str(config_path))
@@ -119,7 +117,7 @@ def test_verifiable_config_validation():
     assert hasattr(config, "checkpoint"), "Config should have checkpoint"
     assert hasattr(config, "runtime"), "Config should have runtime"
 
-    # Verifiable 특화 검증
+    # Verifiable 특화 검증 (독립 Value Model 구조)
     assert config.experiment.stage == "verifiable", "Should be verifiable stage"
     assert config.data_sampling.use_pairwise is True, "Verifiable uses pairwise mode"
     assert config.runtime.device == "mps", "Should use MPS for local test"
@@ -129,16 +127,17 @@ def test_verifiable_config_validation():
     assert hasattr(config.training, "weight_clip_min"), "Should have weight_clip_min"
     assert hasattr(config.training, "weight_clip_max"), "Should have weight_clip_max"
 
-    # Learning rate 검증 (trunk/value_head 분리)
-    assert hasattr(config.training, "trunk_learning_rate"), "Should have trunk_learning_rate"
-    assert hasattr(config.training, "value_head_learning_rate"), "Should have value_head_learning_rate"
-
-    # 모델 경로 검증 (checkpoint 파일)
+    # Policy Model 경로 검증
+    assert hasattr(config.models, "policy"), "Should have policy model config"
     model_path = Path(config.models.policy.path)
-    # checkpoint는 critic 학습 후 생성되므로 경로 형식만 확인
-    assert str(model_path).endswith(".pt"), f"Model path should be .pt checkpoint: {model_path}"
+    assert model_path.exists(), f"Policy model path should exist: {model_path}"
 
     tokenizer_path = Path(config.models.policy.tokenizer_path)
     assert tokenizer_path.exists(), f"Tokenizer path should exist: {tokenizer_path}"
+
+    # Value Model checkpoint 검증 (critic 학습 후 생성)
+    assert hasattr(config.models, "value_model"), "Should have value_model config"
+    value_checkpoint = config.models.value_model.checkpoint_path
+    assert value_checkpoint.endswith(".pt"), f"Value model checkpoint should be .pt: {value_checkpoint}"
 
     print(f"\n✓ Verifiable config validation passed")

@@ -70,7 +70,6 @@ def load_adapter(
         model_path=config.models.policy.path,
         device=device,
         dtype=config.models.policy.dtype,
-        initialize_value_head=False,  # Rho-1은 Value Head 불필요
         use_lora=use_lora,
         lora_config=lora_config,
     )
@@ -528,73 +527,35 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 ref_outputs = ref_model(input_ids)
                 ref_logits = ref_outputs.logits  # [batch, seq, vocab]
 
-            # Policy forward (MTP만)
-            policy_logits = adapter(input_ids)
+            # Pass 1: Policy forward (no_grad) - weights 계산용
+            with torch.no_grad():
+                policy_logits_for_weights = adapter(input_ids)
 
-            batch_size, seq_len, n_future, vocab_size = policy_logits.shape
-
-            # MTP selective weights (per-head binary selection)
-            weights, selection_stats = compute_mtp_selective_weights(
-                policy_logits=policy_logits,
-                ref_logits=ref_logits,
-                labels=labels,
-                loss_mask=loss_mask,
-                k_percent=config.training.k_percent,
-                mode=config.training.rho1_mode,
-            )
-
-            # Weighted CE loss + Unweighted CE loss (per-head)
-            batch_weighted_ce_loss = 0.0
-            batch_unweighted_ce_loss = 0.0
-            valid_heads = 0
-
-            for k in range(1, n_future + 1):
-                valid_len = seq_len - k
-
-                if valid_len <= 0:
-                    continue
-
-                policy_logits_k = policy_logits[:, :valid_len, k - 1, :]
-                labels_k = labels[:, k : k + valid_len]
-                weights_k = weights[:, :valid_len, k - 1]  # Per-head weights
-                loss_mask_k = loss_mask[:, k : k + valid_len]
-
-                ce_loss_k = F.cross_entropy(
-                    policy_logits_k.reshape(-1, vocab_size),
-                    labels_k.reshape(-1),
-                    reduction="none",
-                    ignore_index=-100,
+                # MTP selective weights (per-head binary selection)
+                weights, selection_stats = compute_mtp_selective_weights(
+                    policy_logits=policy_logits_for_weights,
+                    ref_logits=ref_logits,
+                    labels=labels,
+                    loss_mask=loss_mask,
+                    k_percent=config.training.k_percent,
+                    mode=config.training.rho1_mode,
                 )
 
-                # loss_mask_k는 이미 labels != -100 조건 포함
-                loss_mask_k_float = loss_mask_k.to(model_dtype)
+                del policy_logits_for_weights  # 메모리 즉시 해제
 
-                # Weighted CE (선택된 토큰만)
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * loss_mask_k_float.reshape(-1)
-                # Unweighted CE (모든 valid 토큰)
-                unweighted_ce_k = ce_loss_k * loss_mask_k_float.reshape(-1)
+            # Pass 2: Sequential Unembedding (grad + backward 내부 수행)
+            loss_result = adapter(
+                input_ids,
+                attention_mask=attention_mask,
+                compute_sequential_loss=True,
+                labels=labels,
+                weights=weights,  # [batch, seq, n_future] 3D weights
+                loss_scale=1.0 / gradient_accumulation_steps,
+            )
+            weighted_ce_loss = loss_result["loss"]  # detached scalar
 
-                # 선택된 토큰 수로 나눠서 정확한 평균 계산
-                selected_sum_k = (weights_k.reshape(-1) * loss_mask_k_float.reshape(-1)).sum()
-                mask_sum_k = loss_mask_k_float.sum()
-
-                if selected_sum_k > 0:
-                    batch_weighted_ce_loss += weighted_ce_k.sum() / selected_sum_k
-                    valid_heads += 1
-                if mask_sum_k > 0:
-                    batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
-
-                # 메모리 최적화: 중간 텐서 즉시 삭제
-                del policy_logits_k, labels_k, weights_k, loss_mask_k
-                del ce_loss_k, loss_mask_k_float
-                del weighted_ce_k, unweighted_ce_k
-
-            weighted_ce_loss = batch_weighted_ce_loss / max(valid_heads, 1)
-            unweighted_ce_loss = batch_unweighted_ce_loss / n_future
-
-            # Loss scaling (gradient accumulation 적용)
-            scaled_loss = weighted_ce_loss / gradient_accumulation_steps
-            scaled_loss.backward()
+            # unweighted_ce_loss는 Sequential 모드에서 별도 계산 안함 (메모리 효율 우선)
+            unweighted_ce_loss = weighted_ce_loss
 
             accumulation_counter += 1
             batch_count += 1

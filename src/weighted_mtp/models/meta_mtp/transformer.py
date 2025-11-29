@@ -284,6 +284,11 @@ class Transformer(nn.Module):
         start_pos: int = 0,
         return_all_heads: bool = False,
         return_hidden_states: bool = False,
+        compute_sequential_loss: bool = False,
+        labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        weights: Optional[torch.Tensor] = None,
+        loss_scale: float = 1.0,
     ):
         """Forward pass
 
@@ -292,20 +297,26 @@ class Transformer(nn.Module):
             start_pos: KV cache 시작 위치 (학습 시 0)
             return_all_heads: True면 모든 MTP heads 반환
             return_hidden_states: True면 hidden_states도 함께 반환 (Value Head용)
+            compute_sequential_loss: True면 Sequential Unembedding으로 메모리 효율적 loss 계산
+            labels: [batch, seq] 타겟 토큰 (compute_sequential_loss=True 시 필수)
+            attention_mask: [batch, seq] 유효 토큰 마스크
+            weights: 토큰별 가중치 (Weighted MTP용)
+                - [batch, seq]: Position-level (Verifiable TD weighting)
+                - [batch, seq, n_future]: Per-head (Rho1 selective weighting)
+            loss_scale: gradient accumulation을 위한 loss 스케일 (1/accumulation_steps)
 
         Returns:
-            if return_hidden_states:
+            compute_sequential_loss=True:
+                {"loss": scalar (detached), "n_heads": int}
+                backward()는 내부에서 이미 수행됨
+            return_hidden_states=True:
                 (logits, hidden_states) tuple
-                - logits: [batch, seq, n_future_tokens, vocab] or [batch, seq, vocab]
-                - hidden_states: [batch, seq, hidden_size] (trunk 마지막 layer, norm 적용 후)
-            else:
+            기본:
                 logits: [batch, seq, n_future_tokens, vocab] or [batch, seq, vocab]
         """
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
 
-        # freqs_cis를 입력 tokens와 동일한 device로 이동
-        # 일반 속성이므로 명시적으로 device 이동 필요
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen].to(tokens.device)
 
         # Causal mask 생성
@@ -323,7 +334,49 @@ class Transformer(nn.Module):
             h = layer(h, start_pos, freqs_cis, mask)
         h_trunk = h
 
-        # Prediction heads
+        # Sequential Unembedding: head별로 output projection + loss + backward
+        # FSDP forward 컨텍스트 내에서 실행되어 호환성 보장
+        if compute_sequential_loss:
+            from weighted_mtp.utils.loss_utils import compute_head_ce_loss
+
+            prediction_heads = [self.layers[-1]] + list(self.extra_heads)
+            n_future = self.n_future_tokens
+            total_loss = torch.tensor(0.0, device=tokens.device, dtype=h_trunk.dtype)
+
+            for head_idx, layer in enumerate(prediction_heads, start=1):
+                # 1. Head forward
+                h = layer(h_trunk, start_pos, freqs_cis, mask)
+                h = self.norm(h)
+
+                # 2. Output projection (단일 head)
+                logits_k = self.output(h)  # [batch, seq, vocab]
+
+                # 3. Loss 계산
+                loss_k = compute_head_ce_loss(
+                    logits=logits_k,
+                    labels=labels,
+                    attention_mask=attention_mask,
+                    head_idx=head_idx,
+                    weights=weights,
+                )
+
+                # 4. Scaled backward (gradient 누적, 마지막 head 전까지 graph 유지)
+                scaled_loss = (loss_k * loss_scale) / n_future
+                if scaled_loss.requires_grad:
+                    scaled_loss.backward(retain_graph=(head_idx < n_future))
+
+                # 5. 메모리 해제
+                del logits_k, h
+
+                # Logging용 loss 누적 (detached)
+                total_loss = total_loss + loss_k.detach()
+
+            return {
+                "loss": total_loss / n_future,
+                "n_heads": n_future,
+            }
+
+        # 기존 로직: 모든 head의 logits를 한 번에 생성
         latents = []
         n_heads_to_use = self.n_future_tokens if return_all_heads else 1
         prediction_heads = [self.layers[-1]] + list(self.extra_heads)
@@ -331,14 +384,11 @@ class Transformer(nn.Module):
             h = layer(h_trunk, start_pos, freqs_cis, mask)
             latents.append(h)
 
-        # Stack and normalize
         h = torch.stack(latents, dim=-2)  # [batch, seq, n_heads_to_use, dim]
         h = self.norm(h)
         output = self.output(h)  # [batch, seq, n_heads_to_use, vocab]
 
         if return_hidden_states:
-            # Value Head용 hidden_states 반환
-            # h_trunk의 마지막 layer 출력에 norm 적용
             hidden_states = self.norm(h_trunk.unsqueeze(-2)).squeeze(-2)
             return output, hidden_states
 

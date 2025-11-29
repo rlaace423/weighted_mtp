@@ -85,11 +85,12 @@ class SigmoidValueHead(nn.Module):
 
 
 class MLPValueHead(nn.Module):
-    """2-layer MLP value head (DIAL style)
+    """2-layer MLP value head
 
-    DIAL 논문 기반: bottleneck MLP로 표현력 증가 + 과적합 방지
-    구조: hidden_size → hidden_size//8 → hidden_size//16 → 1
-    Dropout으로 instruction ID 암기 방지
+    2.7B Value Model의 표현력 보완을 위한 넓은 bottleneck 구조
+    구조: hidden_size → hidden_size//4 → hidden_size//8 → 1
+    (2560 → 640 → 320 → 1)
+    Dropout으로 과적합 방지
 
     Args:
         hidden_size: Transformer hidden dimension
@@ -102,9 +103,9 @@ class MLPValueHead(nn.Module):
         self.hidden_size = hidden_size
         self.head_type = "mlp"
 
-        # DIAL 스타일 2-layer MLP (4096 → 512 → 256 → 1)
-        hidden1 = hidden_size // 8   # 512 for 4096 dim
-        hidden2 = hidden_size // 16  # 256 for 4096 dim
+        # 넓은 bottleneck MLP (2560 → 640 → 320 → 1)
+        hidden1 = hidden_size // 4   # 640 for 2560 dim
+        hidden2 = hidden_size // 8   # 320 for 2560 dim
 
         self.mlp = nn.Sequential(
             nn.Linear(hidden_size, hidden1, bias=bias),

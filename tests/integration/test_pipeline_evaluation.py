@@ -25,7 +25,6 @@ def create_dummy_checkpoint(checkpoint_dir: Path) -> Path:
     model = MetaLlamaMTPAdapter.from_pretrained(
         model_path="storage/models/micro-mtp",
         device=torch.device("cpu"),
-        initialize_value_head=False,
     )
 
     # Checkpoint 저장

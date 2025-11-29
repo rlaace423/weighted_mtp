@@ -17,7 +17,7 @@ from weighted_mtp.pipelines.run_verifiable import run_verifiable_training, valid
 
 @pytest.fixture
 def verifiable_pairwise_test_config():
-    """Verifiable Pairwise 테스트용 config 생성"""
+    """Verifiable Pairwise 테스트용 config 생성 (독립 Value Model 구조)"""
     config = {
         "project": {
             "name": "weighted-mtp",
@@ -25,11 +25,12 @@ def verifiable_pairwise_test_config():
         },
         "experiment": {
             "name": "test-verifiable-pairwise",
-            "description": "Verifiable + Pairwise auxiliary loss test",
+            "description": "Verifiable with separate Value Model test",
             "stage": "verifiable",
             "tags": ["verifiable", "pairwise", "test"],
         },
         "models": {
+            # Policy Model (학습 대상)
             "policy": {
                 "name": "micro-mtp",
                 "path": "storage/models/micro-mtp",
@@ -40,20 +41,24 @@ def verifiable_pairwise_test_config():
                     "n_heads": 8,
                     "n_future_tokens": 4,
                 },
-                "dtype": "float32",  # MPS 호환
+                "dtype": "float32",
+            },
+            # Value Model (Critic checkpoint에서 로드)
+            "value_model": {
+                "checkpoint_path": "storage/checkpoints/critic/test-pairwise-integration/checkpoint_final.pt",
             },
         },
         "dataset": {
             "name": "codecontests",
             "train": "storage/datasets/codecontests/processed/train.jsonl",
             "validation": "storage/datasets/codecontests/processed/valid.jsonl",
-            "max_length": 1024,  # 충분한 길이
+            "max_length": 512,
         },
         "data_sampling": {
             "seed": 42,
             "val_n_samples": 50,
-            "use_pairwise": True,  # Pairwise 모드 활성화
-            "n_samples": 200,  # 최종 쌍 수
+            "use_pairwise": True,
+            "n_samples": 100,
             "difficulty_bins": {
                 "diff_7": [7, 7],
                 "else": [8, 25],
@@ -64,15 +69,16 @@ def verifiable_pairwise_test_config():
             },
         },
         "training": {
-            "n_epochs": 0.1,  # 빠른 테스트
-            "batch_size": 2,
+            "n_epochs": 0.1,
+            "batch_size": 1,
             "gradient_accumulation_steps": 1,
-            "trunk_learning_rate": 1e-5,
-            "value_head_learning_rate": 1e-3,
+            "learning_rate": 1e-4,
             "max_grad_norm": 1.0,
             "beta": 1.0,
             "weight_clip_min": 0,
             "weight_clip_max": 3,
+            "td_ema_momentum": 0.1,
+            "td_ema_warmup_steps": 5,
             "log_interval": 1,
             "lr_scheduler": {
                 "type": "constant",
@@ -82,7 +88,7 @@ def verifiable_pairwise_test_config():
         },
         "checkpoint": {
             "save_dir": "storage/checkpoints/verifiable/test-pairwise-integration",
-            "save_checkpoint_every": 1.0,
+            "save_checkpoint_every": 0.1,
             "save_best": True,
             "save_final": True,
             "save_total_limit": 2,
@@ -121,14 +127,13 @@ def verifiable_pairwise_test_config():
 
 @pytest.mark.integration
 def test_verifiable_pairwise_loss_structure():
-    """Verifiable Pairwise loss 구조 테스트
+    """Verifiable loss 구조 테스트 (독립 Value Model 구조)
 
-    total_loss = weighted_ce_loss + value_loss
-    (trunk은 CE만, value_head는 pairwise loss만 학습)
+    total_loss = weighted_ce_loss
+    (Value Model은 분리되어 Critic에서 학습, Verifiable은 eval만)
     """
     import torch
     import torch.nn.functional as F
-    from weighted_mtp.utils import pairwise_ranking_loss
 
     batch_size = 2
     seq_len = 64
@@ -140,12 +145,6 @@ def test_verifiable_pairwise_loss_structure():
     pos_labels = torch.randint(0, vocab_size, (batch_size, seq_len))
     pos_labels[:, :10] = -100  # Instruction masked
 
-    pos_value_logits = torch.randn(batch_size, seq_len, 1)
-    neg_value_logits = torch.randn(batch_size, seq_len, 1)
-
-    pos_mask = (pos_labels != -100).float()
-    neg_mask = pos_mask.clone()
-
     # Weighted policy loss (simplified)
     weighted_ce_loss = F.cross_entropy(
         pos_logits[:, :, 0, :].reshape(-1, vocab_size),
@@ -154,53 +153,56 @@ def test_verifiable_pairwise_loss_structure():
         ignore_index=-100,
     )
 
-    # Pairwise ranking loss (value head만 학습)
-    value_loss = pairwise_ranking_loss(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
-
-    # Total loss = weighted_ce_loss + value_loss (계수 없음)
-    total_loss = weighted_ce_loss + value_loss
+    # Total loss = weighted_ce_loss (Value Model 분리 후)
+    total_loss = weighted_ce_loss
 
     # Assertions
     assert total_loss.dim() == 0, "Total loss should be scalar"
     assert not torch.isnan(total_loss), "Total loss should not be NaN"
     assert total_loss.item() > 0, "Total loss should be positive"
 
-    print(f"\n[Verifiable Pairwise Loss Structure]")
+    print(f"\n[Verifiable Loss Structure (Separate Value Model)]")
     print(f"  Weighted CE loss: {weighted_ce_loss.item():.4f}")
-    print(f"  Value loss (pairwise): {value_loss.item():.4f}")
     print(f"  Total loss: {total_loss.item():.4f}")
 
 
 @pytest.mark.integration
-def test_verifiable_pairwise_gradient_flow():
-    """Pairwise 모드에서 pairwise loss가 gradient를 역전파하는지 검증"""
+def test_verifiable_gradient_flow():
+    """Policy Model의 weighted CE loss gradient 역전파 검증"""
     import torch
-    from weighted_mtp.utils import pairwise_ranking_loss
+    import torch.nn.functional as F
 
     batch_size = 2
     seq_len = 32
+    vocab_size = 100
 
     # requires_grad=True
-    pos_value_logits = torch.randn(batch_size, seq_len, 1, requires_grad=True)
-    neg_value_logits = torch.randn(batch_size, seq_len, 1, requires_grad=True)
+    logits = torch.randn(batch_size, seq_len, vocab_size, requires_grad=True)
+    labels = torch.randint(0, vocab_size, (batch_size, seq_len))
+    labels[:, :10] = -100  # Instruction masked
 
-    pos_mask = torch.ones(batch_size, seq_len)
-    neg_mask = torch.ones(batch_size, seq_len)
+    # Weights from TD error (시뮬레이션)
+    weights = torch.rand(batch_size, seq_len)
+    weights = weights * (labels != -100).float()
 
-    # Pairwise auxiliary loss
-    pairwise_loss = pairwise_ranking_loss(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
+    # Weighted CE loss
+    ce_per_token = F.cross_entropy(
+        logits.reshape(-1, vocab_size),
+        labels.reshape(-1),
+        reduction="none",
+        ignore_index=-100,
+    ).reshape(batch_size, seq_len)
+
+    weighted_loss = (ce_per_token * weights).sum() / weights.sum().clamp(min=1e-8)
 
     # Backward
-    pairwise_loss.backward()
+    weighted_loss.backward()
 
-    assert pos_value_logits.grad is not None, "pos_value_logits gradient not computed"
-    assert neg_value_logits.grad is not None, "neg_value_logits gradient not computed"
-    assert not torch.isnan(pos_value_logits.grad).any(), "pos gradient has NaN"
-    assert not torch.isnan(neg_value_logits.grad).any(), "neg gradient has NaN"
+    assert logits.grad is not None, "logits gradient not computed"
+    assert not torch.isnan(logits.grad).any(), "logits gradient has NaN"
 
     print(f"\n[Gradient Flow Test]")
-    print(f"  pos_value grad norm: {pos_value_logits.grad.norm().item():.4f}")
-    print(f"  neg_value grad norm: {neg_value_logits.grad.norm().item():.4f}")
+    print(f"  logits grad norm: {logits.grad.norm().item():.4f}")
 
 
 @pytest.mark.integration
@@ -315,18 +317,24 @@ def test_verifiable_pairwise_batch_structure():
 @pytest.mark.integration
 @pytest.mark.slow
 def test_verifiable_pairwise_pipeline_micro_mtp(verifiable_pairwise_test_config):
-    """Verifiable Pairwise 파이프라인 end-to-end 테스트 (micro-mtp + MPS)"""
+    """Verifiable 파이프라인 end-to-end 테스트 (micro-mtp + MPS, 독립 Value Model)"""
 
     if not torch.backends.mps.is_available():
         pytest.skip("MPS not available on this machine")
 
+    # Policy Model 경로 확인
     model_path = Path(verifiable_pairwise_test_config.models.policy.path)
     if not model_path.exists():
-        pytest.skip(f"Model not found: {model_path}")
+        pytest.skip(f"Policy Model not found: {model_path}")
 
     tokenizer_path = Path(verifiable_pairwise_test_config.models.policy.tokenizer_path)
     if not tokenizer_path.exists():
         pytest.skip(f"Tokenizer not found: {tokenizer_path}")
+
+    # Value Model checkpoint 확인
+    value_checkpoint_path = Path(verifiable_pairwise_test_config.models.value_model.checkpoint_path)
+    if not value_checkpoint_path.exists():
+        pytest.skip(f"Value Model checkpoint not found: {value_checkpoint_path}. Run critic training first.")
 
     train_path = Path(verifiable_pairwise_test_config.dataset.train)
     if not train_path.exists():

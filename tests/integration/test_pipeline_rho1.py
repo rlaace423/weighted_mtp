@@ -29,7 +29,7 @@ def test_rho1_pipeline_micro_mtp():
         pytest.skip("MPS not available on this machine")
 
     # Test config 경로
-    config_path = "configs/rho1/rho1_local.yaml"
+    config_path = "configs/local/rho1_local.yaml"
     assert Path(config_path).exists(), f"Config not found: {config_path}"
 
     # Reference model 경로 확인 (HuggingFace 모델 필요)
@@ -114,7 +114,7 @@ def test_rho1_pipeline_micro_mtp():
 @pytest.mark.integration
 def test_rho1_config_validation():
     """Rho-1 config 파일 유효성 검증"""
-    config_path = Path("configs/rho1/rho1_local.yaml")
+    config_path = Path("configs/local/rho1_local.yaml")
     assert config_path.exists(), f"Config not found: {config_path}"
 
     config = OmegaConf.load(str(config_path))

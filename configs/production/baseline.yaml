@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: baseline-mtp-final
+  name: lora-mtp-baseline
   description: "Baseline MTP with uniform weights (all tokens weight=1.0)"
   stage: baseline
   tags:
@@ -54,9 +54,9 @@ data_sampling:
     diff_7: [7, 7]
     else: [8, 25]
   difficulty_weights:
-    zero: 0.4
-    diff_7: 0.3
-    else: 0.3
+    zero: 0.5
+    diff_7: 0.25
+    else: 0.25
 
 # 학습 설정 (H200 3-GPU 최적화)
 training:
@@ -90,7 +90,7 @@ training:
 
 # 체크포인트
 checkpoint:
-  save_dir: storage/checkpoints/baseline/${experiment.name}
+  save_dir: storage/lora-checkpoints/baseline/${experiment.name}
   save_checkpoint_every: 0.2
   save_best: true
   save_final: true

@@ -1,38 +1,44 @@
-# Verifiable WMTP Local Test (Micro model)
-# M3 Mac 경량 테스트용
+# Verifiable WMTP Local Test (독립 Value Model)
+# 로컬 테스트용
 
 project:
   name: weighted-mtp
-  version: "0.2.0"
+  version: "2.0.0"
 
 experiment:
   name: verifiable-wmtp-local
-  description: "Local test with micro model"
+  description: "Local test with independent Value Model"
   stage: verifiable
   tags:
     - verifiable
     - local
-    - micro-model
+    - independent-value-model
 
+# 모델 설정
 models:
+  # Policy Model (학습 대상)
   policy:
     name: micro-mtp
-    path: storage/checkpoints/critic/critic-pretrain-local/checkpoint_final.pt
+    path: storage/models/micro-mtp
     tokenizer_path: storage/models/meta-llama-mtp/tokenizer
     dtype: float32
+
+  # Value Model (Critic checkpoint에서 로드)
+  value_model:
+    checkpoint_path: storage/checkpoints/critic/critic-pretrain-local/checkpoint_final.pt
 
 dataset:
   name: codecontests
   train: storage/datasets/codecontests/processed/train.jsonl
   validation: storage/datasets/codecontests/processed/valid.jsonl
-  max_length: 1024
+  max_length: 512
 
 data_sampling:
   seed: 42
-  val_n_samples: 100
+  val_n_samples: 50
   use_pairwise: true
 
-  n_samples: 500  # 최종 쌍 수 (pairwise 모드)
+  n_samples: 100
 
   difficulty_bins:
     diff_7: [7, 7]
@@ -42,21 +48,25 @@ data_sampling:
     else: 0.65
 
 training:
-  n_epochs: 0.2
-  batch_size: 2
+  n_epochs: 0.1
+  batch_size: 1
   gradient_accumulation_steps: 2
-  trunk_learning_rate: 1.0e-4  # LoRA Trunk LR
-  value_head_learning_rate: 1.0e-4  # Head와 Trunk 보폭 맞춤
+
+  learning_rate: 1.0e-4
+
   max_grad_norm: 1.0
   beta: 1.0
   weight_clip_min: 0
   weight_clip_max: 3.0
+  
+  td_ema_momentum: 0.1
+  td_ema_warmup_steps: 5
+  
   log_interval: 5
 
-  # LoRA 설정 (All-Linear LoRA)
   use_lora: true
   lora:
-    rank: 16           # 로컬 테스트용
+    rank: 16
     alpha: 32.0
     dropout: 0.05
     target_modules:
@@ -68,7 +78,6 @@ training:
       - w2
       - w3
 
-  # Learning rate scheduler
   lr_scheduler:
     type: cosine
     warmup_ratio: 0.05
@@ -76,7 +85,7 @@ training:
 
 checkpoint:
   save_dir: storage/checkpoints/verifiable/${experiment.name}
-  save_checkpoint_every: 0.2
+  save_checkpoint_every: 0.1
   save_best: true
   save_final: true
   save_total_limit: 2
@@ -98,13 +107,10 @@ storage:
   models_dir: storage/models
   datasets_dir: storage/datasets
   checkpoints_dir: storage/checkpoints
-  s3_bucket: "s3://wmtp"
-  s3_checkpoints_prefix: "checkpoints/verifiable"
 
 mlflow:
   tracking_uri: ""
   experiment: ""
-  s3_artifacts: ""
 
 logging:
   level: INFO

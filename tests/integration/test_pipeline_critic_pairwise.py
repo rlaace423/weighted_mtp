@@ -17,7 +17,7 @@ from weighted_mtp.pipelines.run_critic import run_critic_training
 
 @pytest.fixture
 def pairwise_test_config():
-    """Pairwise 테스트용 config 생성"""
+    """Pairwise 테스트용 config 생성 (독립 Value Model 구조)"""
     config = {
         "project": {
             "name": "weighted-mtp",
@@ -25,21 +25,16 @@ def pairwise_test_config():
         },
         "experiment": {
             "name": "test-critic-pairwise",
-            "description": "Pairwise ranking loss test",
+            "description": "Independent Value Model pairwise test",
             "stage": "critic",
             "tags": ["critic", "pairwise", "test"],
         },
         "models": {
-            "policy": {
-                "name": "micro-mtp",
-                "path": "storage/models/micro-mtp",
-                "tokenizer_path": "storage/models/meta-llama-mtp/tokenizer",
-                "params": {
-                    "dim": 512,
-                    "n_layers": 4,
-                    "n_heads": 8,
-                    "n_future_tokens": 4,
-                },
+            # 독립 Value Model (HuggingFace 기반)
+            "value_model": {
+                "name": "ref-sheared-llama-2.7b",
+                "path": "storage/models/ref-sheared-llama-2.7b/raw",
+                "tokenizer_path": "storage/models/ref-sheared-llama-2.7b/tokenizer",
                 "dtype": "float32",  # MPS 호환
             },
         },
@@ -47,13 +42,13 @@ def pairwise_test_config():
             "name": "codecontests",
             "train": "storage/datasets/codecontests/processed/train.jsonl",
             "validation": "storage/datasets/codecontests/processed/valid.jsonl",
-            "max_length": 1024,  # 충분한 길이
+            "max_length": 512,  # 메모리 절감
         },
         "data_sampling": {
             "seed": 42,
             "val_n_samples": 50,
             "use_pairwise": True,
-            "n_samples": 200,  # 최종 쌍 수 (pairwise 모드)
+            "n_samples": 100,  # 테스트용 소량
             "difficulty_bins": {
                 "diff_7": [7, 7],
                 "else": [8, 25],
@@ -64,16 +59,21 @@ def pairwise_test_config():
             },
         },
         "training": {
-            "n_epochs": 1.0,
-            "batch_size": 2,
+            "n_epochs": 0.1,  # 빠른 테스트
+            "batch_size": 1,
             "gradient_accumulation_steps": 1,
-            "trunk_learning_rate": 1e-5,
-            "value_head_learning_rate": 1e-3,
-            "max_grad_norm": 1.0,
-            "num_unfrozen_layers": 0,
+            "learning_rate": 1e-4,
+            "backbone_frozen": True,  # value head만 학습
             "value_head_type": "mlp",
             "dropout": 0.1,
+            "max_grad_norm": 1.0,
             "log_interval": 1,
+            "value_loss": {
+                "use_pairwise": False,
+                "use_mc_mse": True,
+                "pairwise_coef": 0,
+                "mc_mse_coef": 1.0,
+            },
             "lr_scheduler": {
                 "type": "constant",
                 "warmup_ratio": 0.0,
@@ -82,16 +82,16 @@ def pairwise_test_config():
         },
         "checkpoint": {
             "save_dir": "storage/checkpoints/critic/test-pairwise-integration",
-            "save_checkpoint_every": 1.0,
+            "save_checkpoint_every": 0.1,
             "save_best": True,
             "save_final": True,
             "save_total_limit": 2,
             "s3_upload": False,
         },
         "runtime": {
-            "device": "mps",  # Mac 로컬 테스트
+            "device": "mps",
             "seed": 42,
-            "mixed_precision": False,  # MPS는 mixed precision 제한
+            "mixed_precision": False,
         },
         "distributed": {
             "fsdp": {
@@ -109,7 +109,7 @@ def pairwise_test_config():
         },
         "mlflow": {
             "tracking_uri": "",
-            "experiment": "",  # 테스트에서는 MLflow 비활성화
+            "experiment": "",
         },
         "logging": {
             "level": "INFO",
@@ -128,12 +128,12 @@ def test_critic_pairwise_pipeline_micro_mtp(pairwise_test_config):
     if not torch.backends.mps.is_available():
         pytest.skip("MPS not available on this machine")
 
-    # 모델 경로 확인
-    model_path = Path(pairwise_test_config.models.policy.path)
+    # Value Model 경로 확인
+    model_path = Path(pairwise_test_config.models.value_model.path)
     if not model_path.exists():
-        pytest.skip(f"Model not found: {model_path}")
+        pytest.skip(f"Value Model not found: {model_path}")
 
-    tokenizer_path = Path(pairwise_test_config.models.policy.tokenizer_path)
+    tokenizer_path = Path(pairwise_test_config.models.value_model.tokenizer_path)
     if not tokenizer_path.exists():
         pytest.skip(f"Tokenizer not found: {tokenizer_path}")
 
