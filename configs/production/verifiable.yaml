@@ -1,6 +1,7 @@
-# Baseline MTP (Uniform Weighting)
-# 균등 가중치 기반 표준 MTP (비교 기준선)
-# 프로덕션 설정 (VESSL H200 4-GPU)
+# Verifiable WMTP (TD Weighting with Independent Value Model)
+# Policy Model: MTP 학습 대상 (LoRA)
+# Value Model: Critic checkpoint에서 로드, eval only
+# 프로덕션 설정 (VESSL H200 3-GPU)
 
 # 프로젝트 정보
 project:
@@ -9,16 +10,18 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: baseline-mtp-final
-  description: "Baseline MTP with uniform weights (all tokens weight=1.0)"
-  stage: baseline
+  name: lora-verifiable
+  description: "WMTP with TD weighting using independent Value Model"
+  stage: verifiable
   tags:
-    - baseline
-    - uniform-weight
+    - verifiable
+    - td-weighting
+    - independent-value-model
     - production
 
 # 모델 설정
 models:
+  # Policy Model (학습 대상, value_head 없음)
   policy:
     name: meta-llama-mtp
     path: storage/models/meta-llama-mtp
@@ -33,6 +36,10 @@ models:
       vocab_size: 32000
     dtype: bfloat16
 
+  # Value Model (Critic checkpoint에서 로드, eval only)
+  value_model:
+    checkpoint_path: storage/checkpoints/critic/lora-critic-pretrain/checkpoint_final.pt
+
 # 데이터셋 설정
 dataset:
   name: codecontests
@@ -46,57 +53,67 @@ data_sampling:
   val_n_samples: 500
   use_pairwise: false
 
-  n_samples: 100000
+  n_samples: 120000
   max_pairs_per_problem: 25  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
 
   difficulty_bins:
-    zero: [0, 0]
-    diff_7: [7, 7]
-    else: [8, 25]
+    zero: [0, 25]
   difficulty_weights:
-    zero: 0.4
-    diff_7: 0.3
-    else: 0.3
+    zero: 1.0
 
 # 학습 설정 (H200 3-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 40  # Per GPU
-  gradient_accumulation_steps: 1  # Effective batch size = 40 × 1 × 3 = 120
-  learning_rate: 1.0e-4  # LoRA 사용 시 Full FT 대비 LR 높여야 함
-  max_grad_norm: 0.1
+  batch_size: 48
+  gradient_accumulation_steps: 1  # Effective batch size = 18 x 2 x 3 = 108
+
+  # 학습률 (Policy Model LoRA)
+  learning_rate: 1.0e-4
+
+  # Gradient clipping
+  max_grad_norm: 1.0
+
+  # TD error weighting (Terminal-only binary reward이므로 MC 방식 사용)
+  beta: 0.9
+  weight_clip_min: 0.1
+  weight_clip_max: 3
+
+  # TD EMA 정규화
+  td_ema_momentum: 0.1
+  td_ema_warmup_steps: 10
+
   log_interval: 5
 
-  # LoRA 설정 (All-Linear LoRA for CodeContests)
+  # LoRA 설정
   use_lora: true
   lora:
-    rank: 64           # 코드/논리 태스크는 64 권장 (표현력 확보)
-    alpha: 128.0       # rank의 2배 (안정적 스케일링)
-    dropout: 0.05      # 약간의 규제로 과적합 방지
-    target_modules:    # 모든 Linear Layer에 적용 (All-Linear LoRA)
+    rank: 64
+    alpha: 128.0
+    dropout: 0.05
+    target_modules:
       - wq
       - wk
       - wv
       - wo
-      - w1             # FFN gate_proj
-      - w2             # FFN down_proj
-      - w3             # FFN up_proj
+      - w1
+      - w2
+      - w3
 
   # Learning rate scheduler
   lr_scheduler:
     type: cosine
-    warmup_ratio: 0.03
+    warmup_ratio: 0.1
     min_lr_ratio: 0.005
 
 # 체크포인트
 checkpoint:
-  save_dir: storage/checkpoints/baseline/${experiment.name}
+  save_dir: storage/checkpoints/verifiable/${experiment.name}
   save_checkpoint_every: 0.2
   save_best: true
   save_final: true
-  save_total_limit: 3
+  save_total_limit: 4
   s3_upload: false
-  save_lora_only: true  # LoRA 사용 시 LoRA 파라미터만 저장 (메모리 효율)
+  save_lora_only: true
 
 # 런타임 설정
 runtime:
@@ -119,9 +136,9 @@ storage:
   datasets_dir: storage/datasets
   checkpoints_dir: storage/checkpoints
 
-# MLflow 추적 (로컬 파일 기반)
+# MLflow 추적
 mlflow:
-  tracking_uri: ""  # 빈 문자열 = ./mlruns 디렉터리 사용
+  tracking_uri: ""
   experiment: "weighted-mtp/production"
 
 # 로깅

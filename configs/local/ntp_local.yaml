@@ -31,8 +31,14 @@ dataset:
 
 data_sampling:
   n_samples: 500
-  correct_ratio: 1.0
   seed: 42
+  use_pairwise: false
+  max_pairs_per_problem: 25
+
+  difficulty_bins:
+    all: [0, 25]
+  difficulty_weights:
+    all: 1.0
 
 training:
   n_epochs: 1.0

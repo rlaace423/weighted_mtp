@@ -1,0 +1,9 @@
+# Cursor는 .gitignore 외에 이 파일을 추가로 참조
+# 여기에 명시된 것만 Cursor에서 무시됨
+# .gitignore에 있어도 여기 없으면 Cursor에서 접근 가능
+
+# 진짜 무시할 것들만 명시
+__pycache__/
+*.pyc
+.DS_Store
+

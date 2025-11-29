@@ -178,14 +178,14 @@ def main():
     # 4. 데이터 로딩
     # 샘플링 설정
     if args.incorrect_only:
-        correct_ratio = 0.0
-        logger.info("오답 샘플만 로딩")
+        use_pairwise = True
+        logger.info("Pairwise 로딩 (오답 분석용)")
     elif args.correct_only:
-        correct_ratio = 1.0
+        use_pairwise = False
         logger.info("정답 샘플만 로딩")
     else:
-        correct_ratio = 0.5
-        logger.info("정답/오답 균형 샘플링")
+        use_pairwise = True
+        logger.info("정답/오답 pair 샘플링")
 
     logger.info(f"데이터셋 로딩: {args.dataset}/{args.split}")
     dataset = load_dataset(
@@ -193,7 +193,9 @@ def main():
         split=args.split,
         sampling_config={
             "n_samples": args.n_samples,
-            "correct_ratio": correct_ratio,
+            "use_pairwise": use_pairwise,
+            "difficulty_bins": {"all": [0, 25]},
+            "difficulty_weights": {"all": 1.0},
         },
         seed=42,
     )

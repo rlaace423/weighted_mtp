@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: critic-pretrain-mlp-final
+  name: lora-critic-pretrain
   description: "Independent Value Model pretraining for TD error calculation"
   stage: critic
   tags:
@@ -37,27 +37,23 @@ dataset:
 
 # 데이터 샘플링 (Pairwise)
 data_sampling:
-  seed: 42
+  seed: 84
   val_n_samples: 500
   use_pairwise: true
 
-  n_samples: 50000
-  max_pairs_per_problem: 25
+  n_samples: 60000
+  max_pairs_per_problem: 20  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
 
   difficulty_bins:
-    zero: [0, 0]
-    diff_7: [7, 7]
-    else: [8, 25]
+    zero: [0, 25]
   difficulty_weights:
-    zero: 0.4
-    diff_7: 0.3
-    else: 0.3
+    zero: 1.0
 
 # 학습 설정 (H200 3-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 18
-  gradient_accumulation_steps: 2  # Effective batch size = 18 × 2 × 3 = 108
+  batch_size: 48
+  gradient_accumulation_steps: 1  # Effective batch size = 18 × 2 × 3 = 108
   
   # 학습률 (Value Model 전용)
   learning_rate: 1.0e-4
@@ -67,7 +63,7 @@ training:
   
   # Value head 설정
   value_head_type: mlp
-  dropout: 0.3  # Shortcut Learning 방지
+  dropout: 0.2  # Shortcut Learning 방지
   
   max_grad_norm: 1.0
   log_interval: 5

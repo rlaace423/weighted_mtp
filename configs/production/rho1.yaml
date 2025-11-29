@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: rho1-wmtp-signed
+  name: lora-rho1-wmtp
   description: "Rho-1 Weighted MTP with Reference Model"
   stage: rho1
   tags:
@@ -52,27 +52,22 @@ data_sampling:
   seed: 42
   val_n_samples: 500
   use_pairwise: false
-  correct_ratio: 1.0  # Rho-1은 correct 샘플만 사용
 
-  n_samples: 100000
+  n_samples: 120000
   max_pairs_per_problem: 25  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
 
   difficulty_bins:
-    zero: [0, 0]
-    diff_7: [7, 7]
-    else: [8, 25]
+    zero: [0, 25]
   difficulty_weights:
-    zero: 0.4
-    diff_7: 0.3
-    else: 0.3
+    zero: 1.0
 
 # 학습 설정 (H200 3-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 18  # Per GPU (Reference model 메모리 고려)
-  gradient_accumulation_steps: 2  # Effective batch size = 18 × 2 × 3 = 108
+  batch_size: 48  # Per GPU (Reference model 메모리 고려)
+  gradient_accumulation_steps: 1  # Effective batch size = 18 × 2 × 3 = 108
   learning_rate: 1.0e-4  # LoRA 사용 시 Full FT 대비 LR 높여야 함
-  max_grad_norm: 0.1
+  max_grad_norm: 1.0
 
   # Rho-1 weighting
   rho1_mode: "signed"  # "signed" (Policy > Ref만) / "absolute" (차이 큰 모든 토큰) / "difficult" (Ref가 어려워하는 토큰)

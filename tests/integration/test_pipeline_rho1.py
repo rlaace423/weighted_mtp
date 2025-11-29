@@ -132,7 +132,7 @@ def test_rho1_config_validation():
     # Rho-1 특화 검증
     assert config.experiment.stage == "rho1", "Should be rho1 stage"
     assert hasattr(config.models, "reference"), "Rho-1 needs reference model"
-    assert config.data_sampling.correct_ratio == 1.0, "Rho-1 uses only correct samples"
+    assert config.data_sampling.use_pairwise == False, "Rho-1 uses only correct samples"
     assert config.runtime.device == "mps", "Should use MPS for local test"
 
     # Training 파라미터 검증 (rho1 특화)

@@ -107,9 +107,9 @@ def create_dataloader(
         sampling_config: 샘플링 설정 딕셔너리
             - use_pairwise: Pairwise 포맷 사용 여부 (기본: False)
             - n_samples: 샘플링할 총 샘플 수
-            - correct_ratio: correct 샘플 비율
-            - difficulty_weights: 난이도별 가중치
-            - difficulty_bins: 난이도 구간 정의
+            - difficulty_weights: 난이도별 가중치 (필수)
+            - difficulty_bins: 난이도 구간 정의 (필수)
+            - max_pairs_per_problem: problem당 최대 샘플 수
         seed: 랜덤 시드
         shuffle: 셔플 여부
 
@@ -117,19 +117,21 @@ def create_dataloader(
         DataLoader
 
     Examples:
-        >>> # Pointwise 방식
+        >>> # Correct-only 방식 (Baseline, Rho-1, Verifiable)
         >>> sampling_config = {
         ...     "use_pairwise": False,
         ...     "n_samples": 100000,
-        ...     "correct_ratio": 0.5
+        ...     "difficulty_bins": {"all": [0, 25]},
+        ...     "difficulty_weights": {"all": 1.0}
         ... }
         >>> loader = create_dataloader(path, tokenizer, 4, 2048, sampling_config)
         >>>
-        >>> # Pairwise 방식
+        >>> # Pairwise 방식 (Critic)
         >>> sampling_config = {
         ...     "use_pairwise": True,
         ...     "n_samples": 100000,
-        ...     "correct_ratio": 0.5
+        ...     "difficulty_bins": {"all": [0, 25]},
+        ...     "difficulty_weights": {"all": 1.0}
         ... }
         >>> loader = create_dataloader(path, tokenizer, 16, 2048, sampling_config)
     """

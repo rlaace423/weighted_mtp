@@ -265,9 +265,9 @@ class TestEdgeCases:
 
         ema.update(td_errors, loss_mask, distributed=False)
 
-        # 단일 토큰: mean=0.5, std=1.0 (기본값)
+        # 단일 토큰: mean=0.5, var=0 → std=sqrt(1e-8) (수치 안정성 하한)
         assert abs(ema.ema_mean.item() - 0.5) < 1e-4
-        assert ema.ema_std.item() == 1.0  # numel=1이면 std=1.0 반환
+        assert abs(ema.ema_std.item() - 1e-4) < 1e-6  # sqrt(1e-8) ≈ 1e-4
 
     def test_all_same_values(self):
         """모든 값이 동일한 경우"""

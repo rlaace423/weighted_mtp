@@ -59,7 +59,7 @@ def verify_difficulty_sampling():
     try:
         sampling_config = {
             "n_samples": 500,
-            "correct_ratio": 0.5,
+            "use_pairwise": True,
             "difficulty_bins": {
                 "diff_7": [7, 7],
                 "else": [8, 25],
@@ -106,27 +106,27 @@ def verify_difficulty_sampling():
         print_result("Difficulty 샘플링", False, str(e))
         all_passed = False
 
-    # 테스트 2: correct_ratio 준수
+    # 테스트 2: Pairwise 샘플에 correct/incorrect 쌍 포함 검증
     try:
         correct_count = sum(1 for s in dataset if s["is_correct"])
-        correct_ratio = correct_count / len(dataset)
+        incorrect_count = len(dataset) - correct_count
 
-        passed = 0.4 <= correct_ratio <= 0.6
+        passed = correct_count > 0 and incorrect_count > 0
         all_passed = all_passed and passed
         print_result(
-            "Correct ratio 준수",
+            "Pairwise 쌍 검증",
             passed,
-            f"correct={correct_ratio:.1%} (목표 50%)"
+            f"correct={correct_count}, incorrect={incorrect_count}"
         )
     except Exception as e:
-        print_result("Correct ratio", False, str(e))
+        print_result("Pairwise 쌍", False, str(e))
         all_passed = False
 
-    # 테스트 3: correct_ratio=1.0 (Baseline용)
+    # 테스트 3: use_pairwise=False (Baseline용)
     try:
         sampling_config_baseline = {
             "n_samples": 200,
-            "correct_ratio": 1.0,
+            "use_pairwise": False,
             "difficulty_bins": {"diff_7": [7, 7], "else": [8, 25]},
             "difficulty_weights": {"diff_7": 0.35, "else": 0.65},
         }
@@ -167,7 +167,6 @@ def verify_pairwise_sampling():
         sampling_config = {
             "use_pairwise": True,
             "n_samples": 500,
-            "correct_ratio": 0.5,
             "difficulty_bins": {"diff_7": [7, 7], "else": [8, 25]},
             "difficulty_weights": {"diff_7": 0.35, "else": 0.65},
         }
@@ -245,7 +244,6 @@ def verify_alpaca_preprocessing():
         sampling_config_pointwise = {
             "use_pairwise": False,
             "n_samples": 50,
-            "correct_ratio": 0.5,
             "difficulty_bins": {"diff_7": [7, 7], "else": [8, 25]},
             "difficulty_weights": {"diff_7": 0.35, "else": 0.65},
         }
@@ -305,7 +303,6 @@ def verify_alpaca_preprocessing():
         sampling_config_pairwise = {
             "use_pairwise": True,
             "n_samples": 100,
-            "correct_ratio": 0.5,
             "difficulty_bins": {"diff_7": [7, 7], "else": [8, 25]},
             "difficulty_weights": {"diff_7": 0.35, "else": 0.65},
         }

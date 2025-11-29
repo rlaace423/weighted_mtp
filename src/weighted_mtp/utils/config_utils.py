@@ -339,12 +339,6 @@ def _validate_data_sampling(config: DictConfig, errors: List[str]) -> None:
         if ds.n_samples <= 0:
             errors.append(f"n_samples는 양수여야 함: {ds.n_samples}")
 
-    # correct_ratio 검증 (선택)
-    if hasattr(ds, "correct_ratio"):
-        ratio = ds.correct_ratio
-        if ratio < 0 or ratio > 1:
-            errors.append(f"correct_ratio는 0~1 범위여야 함: {ratio}")
-
     # difficulty_weights와 difficulty_bins 일관성
     has_weights = hasattr(ds, "difficulty_weights")
     has_bins = hasattr(ds, "difficulty_bins")

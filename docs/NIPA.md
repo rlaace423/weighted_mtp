@@ -315,7 +315,7 @@ CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_
 CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_verifiable \
-  --config configs/verifiable/verifiable_pairwise.yaml \
+  --config configs/verifiable/verifiable.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 
 # Rho-1

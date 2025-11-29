@@ -104,10 +104,10 @@ for batch in dataloader:
 metadata = json.load(open(f"{dataset}_metadata.json"))
 
 # 2. Config 기반 샘플링 인덱스 계산
-if auto_data_balancing:  # Critic, Verifiable
-    indices = balanced_sample(metadata, correct_ratio=0.5)
-elif correct_ratio == 1.0:  # Baseline, Rho-1
-    indices = filter_correct_samples(metadata)
+if use_pairwise:  # Critic
+    pairs = _sample_unique_pairs(metadata, n_samples, difficulty_weights, difficulty_bins)
+else:  # Baseline, Rho-1, Verifiable
+    indices = filter_correct_samples(metadata, difficulty_weights, difficulty_bins)
 
 # 3. JSONL에서 해당 라인만 선택적 읽기
 samples = [jsonl_lines[idx] for idx in indices]

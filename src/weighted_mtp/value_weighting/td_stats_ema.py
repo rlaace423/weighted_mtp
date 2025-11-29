@@ -73,34 +73,56 @@ class TDStatsEMA:
         """EMA 통계 업데이트
 
         현재 batch의 통계를 계산하고 EMA에 반영.
-        분산 학습 시 all-reduce로 GPU 간 평균 동기화.
+        분산 학습 시 all-reduce SUM으로 정확한 global 통계 계산.
+
+        수학적 정확성:
+        - global_mean = (sum₀ + sum₁ + ...) / (n₀ + n₁ + ...)
+        - global_var = (Σx²/N) - (Σx/N)²
+        - 각 GPU의 토큰 수가 달라도 정확한 통계 보장
 
         Args:
             td_errors: [batch, seq] TD error 텐서
             loss_mask: [batch, seq] 학습 대상 토큰 마스크 (labels != -100)
             distributed: True면 all-reduce로 GPU 간 동기화
         """
-        # 현재 batch 통계 계산
         valid_td = td_errors[loss_mask.bool()].detach().float()
 
         # 유효 토큰이 없으면 업데이트 스킵
         if valid_td.numel() == 0:
             return
 
-        batch_mean = valid_td.mean()
-        batch_std = valid_td.std() if valid_td.numel() > 1 else torch.tensor(1.0, device=self.device)
+        # 기초 통계량 계산 (sum, sum_sq, count)
+        local_sum = valid_td.sum()
+        local_sum_sq = (valid_td ** 2).sum()
+        local_count = valid_td.numel()
 
-        # 분산 학습 시 GPU 간 평균 동기화
+        # 분산 학습 시 all-reduce SUM으로 정확한 global 통계 계산
         if distributed and is_distributed():
             reduced = all_reduce_scalars(
                 {
-                    "mean": batch_mean.item(),
-                    "std": batch_std.item(),
+                    "sum": local_sum.item(),
+                    "sum_sq": local_sum_sq.item(),
+                    "count": float(local_count),
                 },
-                op="mean",
+                op="sum",
             )
-            batch_mean = torch.tensor(reduced["mean"], device=self.device, dtype=torch.float32)
-            batch_std = torch.tensor(reduced["std"], device=self.device, dtype=torch.float32)
+            global_sum = reduced["sum"]
+            global_sum_sq = reduced["sum_sq"]
+            global_count = reduced["count"]
+        else:
+            global_sum = local_sum.item()
+            global_sum_sq = local_sum_sq.item()
+            global_count = float(local_count)
+
+        # 정확한 global 통계 계산
+        # mean = Σx / N
+        # var = (Σx² / N) - mean²
+        batch_mean = global_sum / global_count
+        batch_var = (global_sum_sq / global_count) - (batch_mean ** 2)
+        batch_std = max(batch_var, 1e-8) ** 0.5  # 수치 안정성 (음수 방지)
+
+        batch_mean = torch.tensor(batch_mean, device=self.device, dtype=torch.float32)
+        batch_std = torch.tensor(batch_std, device=self.device, dtype=torch.float32)
 
         self.step_count += 1
 

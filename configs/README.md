@@ -123,27 +123,25 @@ dataset:
 ```yaml
 data_sampling:
   n_samples: 100000            # 샘플 개수
-  correct_ratio: 1.0           # Correct 샘플 비율 (Baseline: 1.0, Critic: 0.5)
+  use_pairwise: false          # true: correct+incorrect pair, false: correct만
+  max_pairs_per_problem: 25    # problem당 최대 샘플 수 (다양성 확보)
   seed: 42                     # Random seed
 
-  # Verifiable 전용 (Curriculum learning)
-  curriculum_learning: true
+  # 난이도 기반 샘플링 (필수)
   difficulty_bins:
-    low: [1, 3]
-    medium: [4, 7]
-    high: [8, 11]
-  curriculum_schedule:
-    - epoch_range: [0.0, 0.3]
-      difficulty_weights:
-        low: 0.7
-        medium: 0.3
-        high: 0.0
+    zero: [0, 0]
+    diff_7: [7, 7]
+    else: [8, 25]
+  difficulty_weights:
+    zero: 0.4
+    diff_7: 0.3
+    else: 0.3
 ```
 
 **Stage별 차이**:
-- **Baseline**: `correct_ratio: 1.0` (정답만 학습)
-- **Critic/Verifiable**: `correct_ratio: 0.5` (Correct/Incorrect 균형)
-- **Verifiable**: `curriculum_learning` 설정 추가
+- **Baseline/Rho-1**: `use_pairwise: false` (정답만 학습)
+- **Critic**: `use_pairwise: true` (Correct/Incorrect pair 학습)
+- **Verifiable**: `use_pairwise: false` (정답만 학습)
 
 ### 3.5 training (학습 설정)
 
@@ -298,7 +296,11 @@ experiment:
   stage: baseline
 
 data_sampling:
-  correct_ratio: 1.0           # 정답만 학습
+  use_pairwise: false          # 정답만 학습
+  difficulty_bins:
+    all: [0, 25]
+  difficulty_weights:
+    all: 1.0
 
 training:
   n_epochs: 2.5
@@ -320,7 +322,11 @@ experiment:
   stage: critic
 
 data_sampling:
-  correct_ratio: 0.5           # Correct/Incorrect 균형
+  use_pairwise: true           # Correct/Incorrect pair 학습
+  difficulty_bins:
+    zero: [0, 25]
+  difficulty_weights:
+    zero: 1.0
 
 training:
   n_epochs: 0.5
@@ -343,11 +349,11 @@ experiment:
   critic_checkpoint: storage/checkpoints/critic/critic-pretrain/checkpoint_best.pt
 
 data_sampling:
-  correct_ratio: 0.5
-  curriculum_learning: true
-  curriculum_schedule:
-    - epoch_range: [0.0, 0.3]
-      difficulty_weights: {low: 0.7, medium: 0.3, high: 0.0}
+  use_pairwise: false          # 정답만 학습
+  difficulty_bins:
+    all: [0, 25]
+  difficulty_weights:
+    all: 1.0
 
 training:
   beta: 1.0                    # TD error temperature
@@ -374,7 +380,15 @@ models:
     path: storage/models/ref-sheared-llama-2.7b
 
 data_sampling:
-  correct_ratio: 1.0           # 정답만 학습
+  use_pairwise: false          # 정답만 학습
+  difficulty_bins:
+    zero: [0, 0]
+    diff_7: [7, 7]
+    else: [8, 25]
+  difficulty_weights:
+    zero: 0.4
+    diff_7: 0.3
+    else: 0.3
 
 training:
   temperature: 1.0             # Rho-1 temperature

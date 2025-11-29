@@ -31,7 +31,6 @@ data_sampling:
   seed: 42
   val_n_samples: 100
   use_pairwise: false
-  correct_ratio: 1.0
 
   n_samples: 500
   max_pairs_per_problem: 25

@@ -162,7 +162,7 @@ class TestSamplingWithDifficultyConfig:
             split="train",
             sampling_config={
                 "n_samples": n_samples,
-                "correct_ratio": 1.0,
+                "use_pairwise": False,
                 "difficulty_weights": {"diff_7": 0.35, "else": 0.65},
                 "difficulty_bins": {"diff_7": [7, 7], "else": [8, 25]},
             },
@@ -194,7 +194,7 @@ class TestSamplingWithDifficultyConfig:
 
         # 모두 correct 검증
         all_correct = all(sample["is_correct"] for sample in dataset)
-        assert all_correct, "correct_ratio=1.0이면 모든 샘플이 correct여야 함"
+        assert all_correct, "use_pairwise=False이면 모든 샘플이 correct여야 함"
 
     def test_critic_config_sampling(self):
         """Critic config: all difficulty (difficulty_weights 사용 시 correct만 로드)
@@ -214,7 +214,7 @@ class TestSamplingWithDifficultyConfig:
             split="train",
             sampling_config={
                 "n_samples": n_samples,
-                "correct_ratio": 0.5,  # difficulty_weights가 있으면 무시됨
+                "use_pairwise": False,
                 "difficulty_weights": {"all": 1.0},
                 "difficulty_bins": {"all": [1, 25]},
             },
@@ -251,7 +251,7 @@ class TestSamplingWithDifficultyConfig:
             split="train",
             sampling_config={
                 "n_samples": n_samples,
-                "correct_ratio": 1.0,
+                "use_pairwise": False,
                 "difficulty_weights": {"diff_7": 0.35, "else": 0.65},
                 "difficulty_bins": {"diff_7": [7, 7], "else": [8, 25]},
             },
@@ -283,13 +283,13 @@ class TestSamplingWithDifficultyConfig:
 
         # 모든 샘플이 correct
         all_correct = all(sample["is_correct"] for sample in dataset)
-        assert all_correct, "correct_ratio=1.0이면 모든 샘플이 correct여야 함"
+        assert all_correct, "use_pairwise=False이면 모든 샘플이 correct여야 함"
 
     def test_reproducibility_with_difficulty(self):
         """동일 seed + difficulty 설정 → 동일 결과"""
         sampling_config = {
             "n_samples": 200,
-            "correct_ratio": 1.0,
+            "use_pairwise": False,
             "difficulty_weights": {"diff_7": 0.35, "else": 0.65},
             "difficulty_bins": {"diff_7": [7, 7], "else": [8, 25]},
         }

@@ -110,8 +110,11 @@ PYTHONPATH=src python src/weighted_mtp/pipelines/run_baseline.py \
 **설정 (`configs/baseline/baseline.yaml`)**:
 ```yaml
 data_sampling:
-  correct_ratio: 1.0  # 정답만
-  curriculum_learning: true
+  use_pairwise: false  # 정답만
+  difficulty_bins:
+    all: [0, 25]
+  difficulty_weights:
+    all: 1.0
 
 training:
   n_epochs: 3.0
@@ -129,9 +132,11 @@ PYTHONPATH=src python src/weighted_mtp/pipelines/run_verifiable.py \
 **설정 (`configs/verifiable/verifiable.yaml`)**:
 ```yaml
 data_sampling:
-  auto_data_balancing: true
-  correct_ratio: 0.5  # 정답/오답 50:50
-  curriculum_learning: true
+  use_pairwise: false  # 정답만
+  difficulty_bins:
+    all: [0, 25]
+  difficulty_weights:
+    all: 1.0
 
 training:
   beta: 0.2              # TD error temperature

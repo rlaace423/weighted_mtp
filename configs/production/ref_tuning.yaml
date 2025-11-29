@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: ref-tuning-codecontests
+  name: lora-ref-tuning
   description: "Reference model fine-tuning for Rho-1 (HuggingFace LlamaForCausalLM)"
   stage: ref-tuning
   tags:
@@ -34,24 +34,22 @@ dataset:
 
 # 데이터 샘플링 (정답만 학습)
 data_sampling:
-  seed: 42
+  seed: 84
   val_n_samples: 500
-  use_pairwise: true
+  use_pairwise: false
 
-  n_samples: 50000  # 학습용 (correct, incorrect) 쌍
-  max_pairs_per_problem: 15  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
+  n_samples: 60000
+  max_pairs_per_problem: 20  # problem당 최대 쌍 수 (다양성 확보, 과적합 방지)
 
   difficulty_bins:
-    diff_7: [7, 7]
-    else: [8, 25]
+    zero: [0, 25]
   difficulty_weights:
-    diff_7: 0.35
-    else: 0.65
+    zero: 1.0
 
 # 학습 설정 (2.7B 모델, H200 3-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 36  # Per GPU (2.7B 경량 모델)
+  batch_size: 48  # Per GPU (2.7B 경량 모델)
   gradient_accumulation_steps: 1  # Effective batch size = 36 × 1 × 3 = 108
   learning_rate: 2.0e-5
   max_grad_norm: 1
