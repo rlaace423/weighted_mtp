@@ -64,7 +64,7 @@ data_sampling:
 # 학습 설정 (H200 3-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 48  # Per GPU (Reference model 메모리 고려)
+  batch_size: 32  # Per GPU (Reference model 메모리 고려)
   gradient_accumulation_steps: 1  # Effective batch size = 18 × 2 × 3 = 108
   learning_rate: 1.0e-4  # LoRA 사용 시 Full FT 대비 LR 높여야 함
   max_grad_norm: 1.0

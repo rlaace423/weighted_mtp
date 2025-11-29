@@ -260,47 +260,20 @@ class MetaLlamaMTPAdapter(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
         return_hidden_states: bool = False,
-        compute_sequential_loss: bool = False,
-        labels: Optional[torch.Tensor] = None,
-        weights: Optional[torch.Tensor] = None,
-        loss_scale: float = 1.0,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
         """Forward pass
 
         Args:
             input_ids: [batch, seq] 입력 토큰
-            attention_mask: [batch, seq] attention mask
             return_hidden_states: True면 hidden_states도 함께 반환 (Value Head용)
-            compute_sequential_loss: True면 Sequential Unembedding으로 메모리 효율적 loss 계산
-            labels: [batch, seq] 타겟 토큰 (compute_sequential_loss=True 시 필수)
-            weights: 토큰별 가중치 (Weighted MTP용)
-                - [batch, seq]: Position-level (Verifiable TD weighting)
-                - [batch, seq, n_future]: Per-head (Rho1 selective weighting)
-            loss_scale: gradient accumulation을 위한 loss 스케일 (1/accumulation_steps)
 
         Returns:
-            compute_sequential_loss=True:
-                {"loss": scalar (detached), "n_heads": int}
-                backward()는 내부에서 이미 수행됨
             return_hidden_states=True:
                 {"logits": tensor, "hidden_states": tensor}
             기본:
                 logits: [batch, seq, n_future_tokens, vocab]
         """
-        if compute_sequential_loss:
-            return self.transformer(
-                input_ids,
-                start_pos=0,
-                return_all_heads=True,
-                compute_sequential_loss=True,
-                labels=labels,
-                attention_mask=attention_mask,
-                weights=weights,
-                loss_scale=loss_scale,
-            )
-
         if return_hidden_states:
             logits, hidden_states = self.transformer(
                 input_ids,

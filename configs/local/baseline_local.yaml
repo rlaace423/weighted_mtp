@@ -19,7 +19,7 @@ models:
     name: micro-mtp
     path: storage/models/micro-mtp
     tokenizer_path: storage/models/meta-llama-mtp/tokenizer
-    dtype: float16
+    dtype: float32
 
 dataset:
   name: codecontests
@@ -29,11 +29,11 @@ dataset:
 
 data_sampling:
   seed: 42
-  val_n_samples: 100
+  val_n_samples: 10
   use_pairwise: false
 
-  n_samples: 500
-  max_pairs_per_problem: 25
+  n_samples: 50
+  max_pairs_per_problem: 5
 
   difficulty_bins:
     diff_7: [7, 7]

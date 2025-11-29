@@ -391,22 +391,25 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            # Forward + Sequential Unembedding (메모리 효율적 loss 계산 + backward)
-            # backward()는 adapter 내부에서 수행됨
+            # Forward
             if batch_count == 0:
-                logger.info(f"[Rank {rank}] Data moved to device, starting sequential forward")
+                logger.info(f"[Rank {rank}] Data moved to device, starting forward")
 
-            loss_result = adapter(
-                input_ids,
-                attention_mask=attention_mask,
-                compute_sequential_loss=True,
+            logits = adapter(input_ids)  # [batch, seq, n_future, vocab]
+
+            # Loss 계산
+            ce_loss = compute_mtp_ce_loss_unweighted(
+                logits=logits,
                 labels=labels,
-                loss_scale=1.0 / gradient_accumulation_steps,
+                attention_mask=attention_mask,
             )
-            ce_loss = loss_result["loss"]  # detached scalar
+
+            # Backward (외부에서 명시적 호출 - FSDP 호환)
+            scaled_loss = ce_loss / gradient_accumulation_steps
+            scaled_loss.backward()
 
             if batch_count == 0:
-                logger.info(f"[Rank {rank}] Sequential forward completed, n_heads: {loss_result['n_heads']}")
+                logger.info(f"[Rank {rank}] Forward and backward completed")
 
             accumulation_counter += 1
             batch_count += 1
@@ -418,7 +421,7 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
             throughput_tracker.update(batch_size_actual, int(n_tokens))
 
             # Period metrics 누적 (batch 단위)
-            period_loss_sum += ce_loss.item()
+            period_loss_sum += ce_loss.detach().item()
 
             # Optimizer step (accumulation 완료 시에만)
             if accumulation_counter >= gradient_accumulation_steps:
@@ -457,7 +460,7 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 avg_grad_clip_ratio = grad_clip_stats["grad_clip_ratio"]
 
                 # 나머지 메트릭 배치 all_reduce (1회 통신)
-                reduced = all_reduce_scalars({"loss": ce_loss.item()})
+                reduced = all_reduce_scalars({"loss": ce_loss.detach().item()})
                 avg_loss = reduced["loss"]
 
                 if is_main_process():

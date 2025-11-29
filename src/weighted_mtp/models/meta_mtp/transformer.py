@@ -284,11 +284,6 @@ class Transformer(nn.Module):
         start_pos: int = 0,
         return_all_heads: bool = False,
         return_hidden_states: bool = False,
-        compute_sequential_loss: bool = False,
-        labels: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        weights: Optional[torch.Tensor] = None,
-        loss_scale: float = 1.0,
     ):
         """Forward pass
 
@@ -297,18 +292,8 @@ class Transformer(nn.Module):
             start_pos: KV cache 시작 위치 (학습 시 0)
             return_all_heads: True면 모든 MTP heads 반환
             return_hidden_states: True면 hidden_states도 함께 반환 (Value Head용)
-            compute_sequential_loss: True면 Sequential Unembedding으로 메모리 효율적 loss 계산
-            labels: [batch, seq] 타겟 토큰 (compute_sequential_loss=True 시 필수)
-            attention_mask: [batch, seq] 유효 토큰 마스크
-            weights: 토큰별 가중치 (Weighted MTP용)
-                - [batch, seq]: Position-level (Verifiable TD weighting)
-                - [batch, seq, n_future]: Per-head (Rho1 selective weighting)
-            loss_scale: gradient accumulation을 위한 loss 스케일 (1/accumulation_steps)
 
         Returns:
-            compute_sequential_loss=True:
-                {"loss": scalar (detached), "n_heads": int}
-                backward()는 내부에서 이미 수행됨
             return_hidden_states=True:
                 (logits, hidden_states) tuple
             기본:
@@ -334,48 +319,7 @@ class Transformer(nn.Module):
             h = layer(h, start_pos, freqs_cis, mask)
         h_trunk = h
 
-        # Sequential Unembedding: head별로 output projection + loss 계산, 단일 backward
-        # FSDP + Activation Checkpointing 호환을 위해 retain_graph 없이 단일 backward 수행
-        if compute_sequential_loss:
-            from weighted_mtp.utils.loss_utils import compute_head_ce_loss
-
-            prediction_heads = [self.layers[-1]] + list(self.extra_heads)
-            n_future = self.n_future_tokens
-            head_losses = []
-
-            for head_idx, layer in enumerate(prediction_heads, start=1):
-                # Head forward
-                h = layer(h_trunk, start_pos, freqs_cis, mask)
-                h = self.norm(h)
-
-                # Output projection
-                logits_k = self.output(h)
-
-                # Loss 계산
-                loss_k = compute_head_ce_loss(
-                    logits=logits_k,
-                    labels=labels,
-                    attention_mask=attention_mask,
-                    head_idx=head_idx,
-                    weights=weights,
-                )
-                head_losses.append(loss_k)
-
-                # 중간 텐서 메모리 해제 (loss_k의 graph는 유지됨)
-                del logits_k, h
-
-            # 모든 head loss 합산 후 단일 backward
-            total_loss = sum(head_losses)
-            scaled_loss = (total_loss / n_future) * loss_scale
-            if scaled_loss.requires_grad:
-                scaled_loss.backward()
-
-            return {
-                "loss": total_loss.detach() / n_future,
-                "n_heads": n_future,
-            }
-
-        # 기존 로직: 모든 head의 logits를 한 번에 생성
+        # MTP heads forward: 모든 head의 logits를 한 번에 생성
         latents = []
         n_heads_to_use = self.n_future_tokens if return_all_heads else 1
         prediction_heads = [self.layers[-1]] + list(self.extra_heads)

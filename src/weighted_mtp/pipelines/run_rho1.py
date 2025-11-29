@@ -29,6 +29,7 @@ from weighted_mtp.utils import (
     cleanup_old_checkpoints,
     cleanup_s3_checkpoints,
     compute_gradient_clip_stats,
+    compute_mtp_ce_loss,
     compute_weight_statistics,
     create_scheduler,
     get_model_size,
@@ -543,19 +544,22 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
                 del policy_logits_for_weights  # 메모리 즉시 해제
 
-            # Pass 2: Sequential Unembedding (grad + backward 내부 수행)
-            loss_result = adapter(
-                input_ids,
-                attention_mask=attention_mask,
-                compute_sequential_loss=True,
-                labels=labels,
-                weights=weights,  # [batch, seq, n_future] 3D weights
-                loss_scale=1.0 / gradient_accumulation_steps,
-            )
-            weighted_ce_loss = loss_result["loss"]  # detached scalar
+            # Pass 2: Forward + Weighted Loss
+            logits = adapter(input_ids)  # [batch, seq, n_future, vocab]
 
-            # unweighted_ce_loss는 Sequential 모드에서 별도 계산 안함 (메모리 효율 우선)
-            unweighted_ce_loss = weighted_ce_loss
+            # Weighted Loss 계산 (3D weights)
+            loss_dict = compute_mtp_ce_loss(
+                logits=logits,
+                labels=labels,
+                attention_mask=attention_mask,
+                weights=weights,  # [batch, seq, n_future] 3D weights
+            )
+            weighted_ce_loss = loss_dict["weighted_ce_loss"]
+            unweighted_ce_loss = loss_dict["unweighted_ce_loss"]
+
+            # Backward (외부에서 명시적 호출 - FSDP 호환)
+            scaled_loss = weighted_ce_loss / gradient_accumulation_steps
+            scaled_loss.backward()
 
             accumulation_counter += 1
             batch_count += 1
@@ -567,8 +571,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             throughput_tracker.update(batch_size_actual, int(n_tokens))
 
             # Period metrics 누적 (batch 단위)
-            period_metrics_sum["weighted_ce_loss"] += weighted_ce_loss.item()
-            period_metrics_sum["unweighted_ce_loss"] += unweighted_ce_loss.item()
+            period_metrics_sum["weighted_ce_loss"] += weighted_ce_loss.detach().item()
+            period_metrics_sum["unweighted_ce_loss"] += unweighted_ce_loss.detach().item()
             period_metrics_sum["excess_loss"] += selection_stats.get('head_1_excess_mean', 0.0)
 
             # Optimizer step (accumulation 완료 시에만)

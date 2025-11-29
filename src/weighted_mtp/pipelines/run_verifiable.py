@@ -505,21 +505,22 @@ def run_verifiable_training(
                 external_std=ema_std,
             )
 
-            # Policy Forward + Sequential Unembedding (메모리 효율적 weighted loss 계산 + backward)
-            # backward()는 policy_model 내부에서 수행됨
-            loss_result = policy_model(
-                pos_input_ids,
-                attention_mask=pos_attention_mask,
-                compute_sequential_loss=True,
-                labels=pos_labels,
-                weights=weights,
-                loss_scale=1.0 / gradient_accumulation_steps,
-            )
-            weighted_ce_loss = loss_result["loss"]  # detached scalar
+            # Forward
+            logits = policy_model(pos_input_ids)  # [batch, seq, n_future, vocab]
 
-            # unweighted_ce_loss는 Sequential 모드에서 계산하지 않음 (메모리 효율 우선)
-            # logging용으로 weighted_ce_loss를 사용
-            unweighted_ce_loss = weighted_ce_loss
+            # Weighted Loss 계산
+            loss_dict = compute_mtp_ce_loss(
+                logits=logits,
+                labels=pos_labels,
+                attention_mask=pos_attention_mask,
+                weights=weights,  # 2D weights [batch, seq]
+            )
+            weighted_ce_loss = loss_dict["weighted_ce_loss"]
+            unweighted_ce_loss = loss_dict["unweighted_ce_loss"]
+
+            # Backward (외부에서 명시적 호출 - FSDP 호환)
+            scaled_loss = weighted_ce_loss / gradient_accumulation_steps
+            scaled_loss.backward()
 
             # EMA 통계 업데이트
             td_ema.update(td_errors, pos_loss_mask, distributed=True)
@@ -534,8 +535,8 @@ def run_verifiable_training(
             throughput_tracker.update(batch_size_actual, int(n_tokens))
 
             # Period metrics 누적
-            period_metrics_sum["weighted_ce_loss"] += weighted_ce_loss.item()
-            period_metrics_sum["unweighted_ce_loss"] += unweighted_ce_loss.item()
+            period_metrics_sum["weighted_ce_loss"] += weighted_ce_loss.detach().item()
+            period_metrics_sum["unweighted_ce_loss"] += unweighted_ce_loss.detach().item()
 
             # Optimizer step
             if accumulation_counter >= gradient_accumulation_steps:
