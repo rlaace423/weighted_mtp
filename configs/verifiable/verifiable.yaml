@@ -43,17 +43,20 @@ dataset:
 # 데이터 샘플링
 data_sampling:
   seed: 42
-  val_n_samples: 1000
-  use_pairwise: true  # value head 학습은 항상 pairwise
+  val_n_samples: 500
+  use_pairwise: true
 
-  n_samples: 200000  # 최종 쌍 수 (pairwise 모드)
+  n_samples: 100000
+  max_pairs_per_problem: 25
 
   difficulty_bins:
+    zero: [0, 0]
     diff_7: [7, 7]
     else: [8, 25]
   difficulty_weights:
-    diff_7: 0.35
-    else: 0.65
+    zero: 0.4
+    diff_7: 0.3
+    else: 0.3
 
 # 학습 설정 (H200 4-GPU 최적화)
 training:

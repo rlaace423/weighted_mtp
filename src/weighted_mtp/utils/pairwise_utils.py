@@ -83,7 +83,7 @@ def compute_mc_value_loss(
     value_logits: torch.Tensor,
     rewards: torch.Tensor,
     attention_mask: torch.Tensor,
-    response_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
 ) -> torch.Tensor:
     """Monte Carlo Value Loss (Tokenwise MSE)
 
@@ -93,8 +93,8 @@ def compute_mc_value_loss(
     Args:
         value_logits: [batch, seq, 1] Value head 출력
         rewards: [batch] Binary reward (0.0: incorrect, 1.0: correct)
-        attention_mask: [batch, seq] 유효 토큰 마스크
-        response_mask: [batch, seq] Response 토큰 마스크 (labels != -100)
+        attention_mask: [batch, seq] 유효 토큰 마스크 (padding 제외)
+        loss_mask: [batch, seq] 학습 대상 토큰 마스크 (labels != -100)
 
     Returns:
         mc_loss: scalar tensor
@@ -105,8 +105,8 @@ def compute_mc_value_loss(
     # MC targets: 모든 토큰에 동일한 terminal reward 할당
     mc_targets = rewards.view(-1, 1).expand(-1, seq_len).to(dtype)
 
-    # Response 토큰만으로 MSE 계산 (Instruction 제외)
-    combined_mask = attention_mask * response_mask
+    # 학습 대상 토큰만으로 MSE 계산 (Instruction 제외)
+    combined_mask = attention_mask * loss_mask
 
     # Tokenwise MSE
     values = value_logits.squeeze(-1)

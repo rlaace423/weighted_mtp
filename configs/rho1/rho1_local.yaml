@@ -36,6 +36,7 @@ data_sampling:
   seed: 42
   val_n_samples: 10
   use_pairwise: false
+  correct_ratio: 1.0  # Rho-1은 correct 샘플만 사용
 
   n_samples: 500
   max_pairs_per_problem: 25

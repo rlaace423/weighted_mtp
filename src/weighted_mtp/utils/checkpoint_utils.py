@@ -23,6 +23,7 @@ def save_checkpoint(
     config: dict | None = None,
     s3_upload: bool = False,
     mlflow_run_id: str | None = None,
+    td_ema_state: dict | None = None,
 ) -> None:
     """Checkpoint 저장 (FSDP 지원, S3 업로드 옵션)
 
@@ -39,6 +40,7 @@ def save_checkpoint(
         config: 학습 설정 정보 (모델 경로 등, 평가 시 필요)
         s3_upload: S3 업로드 여부 (MLflow artifact로 업로드)
         mlflow_run_id: MLflow run ID (S3 업로드 시 스레드 안전을 위해 필요)
+        td_ema_state: TD EMA 통계 state dict (TDStatsEMA.state_dict())
 
     Saved checkpoint format:
         {
@@ -48,6 +50,7 @@ def save_checkpoint(
             "train_metrics": dict,
             "val_metrics": dict,
             "config": dict,
+            "td_ema_state": dict,  # TD EMA 통계 (선택적)
         }
     """
     import torch.distributed as dist
@@ -85,6 +88,7 @@ def save_checkpoint(
         "train_metrics": train_metrics,
         "val_metrics": val_metrics,
         "config": config,
+        "td_ema_state": td_ema_state,
     }
 
     torch.save(checkpoint, checkpoint_path)
@@ -243,6 +247,7 @@ def save_lora_checkpoint(
     s3_upload: bool = False,
     mlflow_run_id: str | None = None,
     save_value_head: bool = True,
+    td_ema_state: dict | None = None,
 ) -> None:
     """LoRA 전용 checkpoint 저장 (LoRA 파라미터 + value head만)
 
@@ -260,6 +265,7 @@ def save_lora_checkpoint(
         s3_upload: S3 업로드 여부
         mlflow_run_id: MLflow run ID
         save_value_head: Value head도 함께 저장할지 여부
+        td_ema_state: TD EMA 통계 state dict (TDStatsEMA.state_dict())
 
     Saved checkpoint format:
         {
@@ -271,6 +277,7 @@ def save_lora_checkpoint(
             "val_metrics": dict,
             "config": dict,
             "lora_config": dict,  # LoRA 설정 (rank, alpha 등)
+            "td_ema_state": dict,  # TD EMA 통계 (선택적)
         }
     """
     import torch.distributed as dist
@@ -351,7 +358,8 @@ def save_lora_checkpoint(
         "val_metrics": val_metrics,
         "config": config,
         "lora_config": lora_config,
-        "checkpoint_type": "lora",  # checkpoint 타입 구분용
+        "checkpoint_type": "lora",
+        "td_ema_state": td_ema_state,
     }
 
     torch.save(checkpoint, checkpoint_path)

@@ -151,9 +151,9 @@ def validate_critic(
             pos_value_logits = combined_value_logits[:batch_size]
             neg_value_logits = combined_value_logits[batch_size:]
 
-            # Mask (labels != -100)
-            pos_mask = (pos_labels != -100).to(model_dtype)
-            neg_mask = (neg_labels != -100).to(model_dtype)
+            # 학습 대상 토큰 마스크 (labels != -100)
+            pos_loss_mask = (pos_labels != -100)
+            neg_loss_mask = (neg_labels != -100)
 
             # Value Loss 계산 (조건부)
             value_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
@@ -162,19 +162,19 @@ def validate_critic(
                 pairwise_loss_val = pairwise_ranking_loss(
                     v_pos=pos_value_logits,
                     v_neg=neg_value_logits,
-                    mask_pos=pos_mask,
-                    mask_neg=neg_mask,
+                    mask_pos=pos_loss_mask,
+                    mask_neg=neg_loss_mask,
                 )
                 value_loss = value_loss + pairwise_coef * pairwise_loss_val
 
             if use_mc_mse:
                 pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
                 pos_mc_loss = compute_mc_value_loss(
-                    pos_value_logits, pos_rewards, pos_attention_mask, pos_mask
+                    pos_value_logits, pos_rewards, pos_attention_mask, pos_loss_mask
                 )
                 neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
                 neg_mc_loss = compute_mc_value_loss(
-                    neg_value_logits, neg_rewards, neg_attention_mask, neg_mask
+                    neg_value_logits, neg_rewards, neg_attention_mask, neg_loss_mask
                 )
                 mc_mse_loss_val = (pos_mc_loss + neg_mc_loss) / 2
                 value_loss = value_loss + mc_mse_coef * mc_mse_loss_val
@@ -183,8 +183,8 @@ def validate_critic(
             pairwise_metrics = compute_pairwise_accuracy(
                 v_pos=pos_value_logits,
                 v_neg=neg_value_logits,
-                mask_pos=pos_mask,
-                mask_neg=neg_mask,
+                mask_pos=pos_loss_mask,
+                mask_neg=neg_loss_mask,
             )
 
             total_loss += value_loss.item()
@@ -584,9 +584,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             pos_value_logits = combined_value_logits[:batch_size]
             neg_value_logits = combined_value_logits[batch_size:]
 
-            # Mask (labels != -100)
-            pos_mask = (pos_labels != -100).to(model_dtype)
-            neg_mask = (neg_labels != -100).to(model_dtype)
+            # 학습 대상 토큰 마스크 (labels != -100)
+            pos_loss_mask = (pos_labels != -100)
+            neg_loss_mask = (neg_labels != -100)
 
             # Value Loss 계산 (조건부)
             value_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
@@ -595,8 +595,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 pairwise_loss_val = pairwise_ranking_loss(
                     v_pos=pos_value_logits,
                     v_neg=neg_value_logits,
-                    mask_pos=pos_mask,
-                    mask_neg=neg_mask,
+                    mask_pos=pos_loss_mask,
+                    mask_neg=neg_loss_mask,
                 )
                 value_loss = value_loss + pairwise_coef * pairwise_loss_val
 
@@ -604,12 +604,12 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 # Positive: reward=1
                 pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
                 pos_mc_loss = compute_mc_value_loss(
-                    pos_value_logits, pos_rewards, pos_attention_mask, pos_mask
+                    pos_value_logits, pos_rewards, pos_attention_mask, pos_loss_mask
                 )
                 # Negative: reward=0
                 neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
                 neg_mc_loss = compute_mc_value_loss(
-                    neg_value_logits, neg_rewards, neg_attention_mask, neg_mask
+                    neg_value_logits, neg_rewards, neg_attention_mask, neg_loss_mask
                 )
                 mc_mse_loss_val = (pos_mc_loss + neg_mc_loss) / 2
                 value_loss = value_loss + mc_mse_coef * mc_mse_loss_val
@@ -618,8 +618,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             pairwise_metrics = compute_pairwise_accuracy(
                 v_pos=pos_value_logits,
                 v_neg=neg_value_logits,
-                mask_pos=pos_mask,
-                mask_neg=neg_mask,
+                mask_pos=pos_loss_mask,
+                mask_neg=neg_loss_mask,
             )
             train_correct_pairs += pairwise_metrics["correct_pairs"]
             train_total_pairs += pairwise_metrics["total_pairs"]

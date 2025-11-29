@@ -151,26 +151,29 @@ def validate_rho1(
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            # 2. Reference forward (HuggingFace 모델)
+            # 2. Loss mask 생성 (labels != -100)
+            loss_mask = (labels != -100)
+
+            # 3. Reference forward (HuggingFace 모델)
             ref_outputs = ref_model(input_ids)
             ref_logits = ref_outputs.logits  # [batch, seq, vocab]
 
-            # 3. Policy forward (MTP만)
+            # 4. Policy forward (MTP만)
             policy_logits = adapter(input_ids)
 
             batch_size, seq_len, n_future, vocab_size = policy_logits.shape
 
-            # 4. MTP selective weights (per-head binary selection)
+            # 5. MTP selective weights (per-head binary selection)
             weights, selection_stats = compute_mtp_selective_weights(
                 policy_logits=policy_logits,
                 ref_logits=ref_logits,
                 labels=labels,
-                attention_mask=attention_mask,
+                loss_mask=loss_mask,
                 k_percent=k_percent,
                 mode=rho1_mode,
             )
 
-            # 5. Weighted CE loss (per-head) 및 Head0 CE loss, Unweighted CE loss
+            # 6. Weighted CE loss (per-head) 및 Head0 CE loss, Unweighted CE loss
             batch_weighted_ce_loss = 0.0
             batch_unweighted_ce_loss = 0.0
             batch_head0_ce_loss = 0.0
@@ -185,7 +188,7 @@ def validate_rho1(
                 policy_logits_k = policy_logits[:, :valid_len, k - 1, :]
                 labels_k = labels[:, k : k + valid_len]
                 weights_k = weights[:, :valid_len, k - 1]  # Per-head weights
-                mask_k = attention_mask[:, k : k + valid_len]
+                loss_mask_k = loss_mask[:, k : k + valid_len]
 
                 ce_loss_k = F.cross_entropy(
                     policy_logits_k.reshape(-1, vocab_size),
@@ -194,24 +197,23 @@ def validate_rho1(
                     ignore_index=-100,
                 )
 
-                # labels=-100인 토큰은 loss=0, mask에서도 제외
-                valid_label_mask_k = (labels_k != -100).float()
-                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
+                # loss_mask_k는 이미 labels != -100 조건 포함
+                loss_mask_k_float = loss_mask_k.to(model_dtype)
 
                 # Head0 (k=1): 순수 CE loss 평균 (weight 없이)
                 if k == 1:
-                    valid_count = combined_mask_k.sum()
+                    valid_count = loss_mask_k_float.sum()
                     if valid_count > 0:
-                        batch_head0_ce_loss = (ce_loss_k * combined_mask_k.reshape(-1)).sum() / valid_count
+                        batch_head0_ce_loss = (ce_loss_k * loss_mask_k_float.reshape(-1)).sum() / valid_count
 
                 # Weighted CE (선택된 토큰만)
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
+                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * loss_mask_k_float.reshape(-1)
                 # Unweighted CE (모든 valid 토큰)
-                unweighted_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
+                unweighted_ce_k = ce_loss_k * loss_mask_k_float.reshape(-1)
 
                 # 선택된 토큰 수로 나눠서 정확한 평균 계산
-                selected_sum_k = (weights_k.reshape(-1) * combined_mask_k.reshape(-1)).sum()
-                mask_sum_k = combined_mask_k.sum()
+                selected_sum_k = (weights_k.reshape(-1) * loss_mask_k_float.reshape(-1)).sum()
+                mask_sum_k = loss_mask_k_float.sum()
 
                 if selected_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / selected_sum_k
@@ -220,8 +222,8 @@ def validate_rho1(
                     batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
 
                 # 메모리 최적화: 중간 텐서 즉시 삭제
-                del policy_logits_k, labels_k, weights_k, mask_k
-                del ce_loss_k, valid_label_mask_k, combined_mask_k
+                del policy_logits_k, labels_k, weights_k, loss_mask_k
+                del ce_loss_k, loss_mask_k_float
                 del weighted_ce_k, unweighted_ce_k
 
             weighted_ce_loss = batch_weighted_ce_loss / max(valid_heads, 1)
@@ -518,6 +520,9 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
+            # Loss mask 생성 (labels != -100)
+            loss_mask = (labels != -100)
+
             # Reference forward (no grad, HuggingFace 모델)
             with torch.no_grad():
                 ref_outputs = ref_model(input_ids)
@@ -533,7 +538,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 policy_logits=policy_logits,
                 ref_logits=ref_logits,
                 labels=labels,
-                attention_mask=attention_mask,
+                loss_mask=loss_mask,
                 k_percent=config.training.k_percent,
                 mode=config.training.rho1_mode,
             )
@@ -552,7 +557,7 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 policy_logits_k = policy_logits[:, :valid_len, k - 1, :]
                 labels_k = labels[:, k : k + valid_len]
                 weights_k = weights[:, :valid_len, k - 1]  # Per-head weights
-                mask_k = attention_mask[:, k : k + valid_len]
+                loss_mask_k = loss_mask[:, k : k + valid_len]
 
                 ce_loss_k = F.cross_entropy(
                     policy_logits_k.reshape(-1, vocab_size),
@@ -561,18 +566,17 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     ignore_index=-100,
                 )
 
-                # labels=-100인 토큰은 loss=0, mask에서도 제외
-                valid_label_mask_k = (labels_k != -100).float()
-                combined_mask_k = mask_k.to(model_dtype) * valid_label_mask_k
+                # loss_mask_k는 이미 labels != -100 조건 포함
+                loss_mask_k_float = loss_mask_k.to(model_dtype)
 
                 # Weighted CE (선택된 토큰만)
-                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * combined_mask_k.reshape(-1)
+                weighted_ce_k = ce_loss_k * weights_k.reshape(-1) * loss_mask_k_float.reshape(-1)
                 # Unweighted CE (모든 valid 토큰)
-                unweighted_ce_k = ce_loss_k * combined_mask_k.reshape(-1)
+                unweighted_ce_k = ce_loss_k * loss_mask_k_float.reshape(-1)
 
                 # 선택된 토큰 수로 나눠서 정확한 평균 계산
-                selected_sum_k = (weights_k.reshape(-1) * combined_mask_k.reshape(-1)).sum()
-                mask_sum_k = combined_mask_k.sum()
+                selected_sum_k = (weights_k.reshape(-1) * loss_mask_k_float.reshape(-1)).sum()
+                mask_sum_k = loss_mask_k_float.sum()
 
                 if selected_sum_k > 0:
                     batch_weighted_ce_loss += weighted_ce_k.sum() / selected_sum_k
@@ -581,8 +585,8 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     batch_unweighted_ce_loss += unweighted_ce_k.sum() / mask_sum_k
 
                 # 메모리 최적화: 중간 텐서 즉시 삭제
-                del policy_logits_k, labels_k, weights_k, mask_k
-                del ce_loss_k, valid_label_mask_k, combined_mask_k
+                del policy_logits_k, labels_k, weights_k, loss_mask_k
+                del ce_loss_k, loss_mask_k_float
                 del weighted_ce_k, unweighted_ce_k
 
             weighted_ce_loss = batch_weighted_ce_loss / max(valid_heads, 1)

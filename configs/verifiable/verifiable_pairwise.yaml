@@ -81,11 +81,15 @@ training:
   trunk_frozen: true  # false면 value loss gradient가 trunk로 전파됨
 
   # TD error weighting
-  beta: 1
+  beta: 0.8
   weight_clip_min: 0.1
   weight_clip_max: 2
   gamma: 1.0
   lam: 1.0
+
+  # TD EMA 정규화 (Advantage Whitening 일관성 보장)
+  td_ema_momentum: 0.1       # EMA 업데이트 계수 (0.1 = 90% 이전 + 10% 현재)
+  td_ema_warmup_steps: 10    # 초기 warmup step 수
 
   # Value loss 스케일링 (컴포넌트별 clipping과 별개로 loss 비율 조정)
   # 이제 gradient clipping이 분리되어 있으므로 순수 loss 비율로만 사용

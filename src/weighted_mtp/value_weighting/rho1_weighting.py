@@ -6,8 +6,8 @@ Rho-1 원리:
 - Top-k binary selection (논문 방식)
 
 MTP 확장:
-- Head 0 (t+1): 무조건 학습 (NTP baseline과 동일)
-- Head 1,2,3 (t+2~t+4): Batch-wise top-k selection
+- Head 0,1,2,3 (t+1~t+4): 모두 Rho-1 selection 적용
+- 각 head별로 독립적인 top-k threshold 계산
 
 Reference:
 - Lin et al. "Rho-1: Not All Tokens Are What You Need" (NeurIPS 2024)
@@ -26,11 +26,11 @@ def compute_mtp_selective_weights(
     policy_logits: torch.Tensor,
     ref_logits: torch.Tensor,
     labels: torch.Tensor,
-    attention_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
     k_percent: float = 0.6,
     mode: str = "signed",
 ) -> tuple[torch.Tensor, dict]:
-    """MTP-specific Rho-1 weighting: t+1 always, t+2~4 selective
+    """MTP-specific Rho-1 weighting: 모든 head에 top-k selection 적용
 
     Reference inference는 이미 완료되어 ref_logits로 전달됨.
     각 head에 대해 ref_logits의 다른 slice만 사용.
@@ -39,7 +39,7 @@ def compute_mtp_selective_weights(
         policy_logits: [batch, seq, n_future=4, vocab] - Policy MTP logits
         ref_logits: [batch, seq, vocab] - Reference NTP logits (이미 계산된 것)
         labels: [batch, seq] - Target tokens
-        attention_mask: [batch, seq] - Attention mask
+        loss_mask: [batch, seq] - 학습 대상 토큰 마스크 (labels != -100)
         k_percent: Top k% selection ratio (0~1, default 0.6)
         mode: "signed" (Policy > Ref만 선택) / "absolute" (차이 큰 모든 토큰 선택) / "difficult" (Ref가 어려워하는 토큰 선택)
 
@@ -71,7 +71,7 @@ def compute_mtp_selective_weights(
         policy_logits_k = policy_logits[:, :valid_len, head_idx, :]  # [batch, valid_len, vocab]
         ref_logits_k = ref_logits[:, k-1:k-1+valid_len, :]            # [batch, valid_len, vocab]
         labels_k = labels[:, k:k+valid_len]                            # [batch, valid_len]
-        mask_k = attention_mask[:, k:k+valid_len]                      # [batch, valid_len]
+        loss_mask_k = loss_mask[:, k:k+valid_len]                      # [batch, valid_len]
 
         # Per-token CE loss (float32로 계산하여 정밀도 보장)
         # labels=-100인 토큰은 제외 (ignore_index)
@@ -101,9 +101,8 @@ def compute_mtp_selective_weights(
         excess_loss = excess_loss.float()  # [batch, valid_len], float32
 
         # Batch-wise top-k selection
-        # labels=-100인 토큰도 제외 (instruction tokens)
-        valid_label_mask = (labels_k != -100)
-        valid_mask = mask_k.bool() & valid_label_mask
+        # loss_mask_k는 이미 labels != -100 조건을 포함
+        valid_mask = loss_mask_k.bool()
         valid_excess = excess_loss[valid_mask]
 
         if valid_excess.numel() == 0:
@@ -131,20 +130,20 @@ def compute_mtp_selective_weights(
     total_selected = weights.sum().item()
     # selection_ratio: 실제 선택 가능한 토큰(labels != -100) 대비 선택된 비율
     stats['selection_ratio'] = total_selected / (total_valid_possible + 1e-8)
-    stats['avg_heads_per_position'] = total_selected / (attention_mask.sum().item() + 1e-8)
+    stats['avg_heads_per_position'] = total_selected / (loss_mask.sum().item() + 1e-8)
 
     return weights, stats
 
 
 def compute_rho1_stats(
     weights: torch.Tensor,
-    attention_mask: torch.Tensor | None = None,
+    loss_mask: torch.Tensor | None = None,
 ) -> dict[str, float]:
     """Rho-1 weighting 통계 계산 (Per-head binary weights)
 
     Args:
         weights: [batch, seq, n_future] - Binary weights (0 or 1)
-        attention_mask: [batch, seq] - Attention mask (optional)
+        loss_mask: [batch, seq] - 학습 대상 토큰 마스크 (labels != -100, optional)
 
     Returns:
         stats: {
@@ -158,9 +157,9 @@ def compute_rho1_stats(
     """
     batch_size, seq_len, n_future = weights.shape
 
-    if attention_mask is not None:
+    if loss_mask is not None:
         # Valid positions만 계산
-        total_valid = attention_mask.sum().item()
+        total_valid = loss_mask.sum().item()
     else:
         total_valid = batch_size * seq_len
 
@@ -176,8 +175,8 @@ def compute_rho1_stats(
     # Per-head statistics
     for head_idx in range(n_future):
         head_weights = weights[:, :, head_idx]
-        if attention_mask is not None:
-            head_selected = (head_weights * attention_mask.float()).sum().item()
+        if loss_mask is not None:
+            head_selected = (head_weights * loss_mask.float()).sum().item()
         else:
             head_selected = head_weights.sum().item()
 

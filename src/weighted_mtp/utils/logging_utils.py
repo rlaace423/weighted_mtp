@@ -13,15 +13,13 @@ logger = logging.getLogger(__name__)
 
 def compute_weight_statistics(
     weights: torch.Tensor,
-    attention_mask: torch.Tensor = None,
-    labels: torch.Tensor = None,
+    loss_mask: torch.Tensor,
 ) -> dict[str, float]:
     """Weight 분포 통계 계산
 
     Args:
         weights: Token weights [batch, seq, n_heads] or [batch, seq]
-        attention_mask: 유효 토큰 마스크 [batch, seq] (None이면 전체 사용)
-        labels: 학습 레이블 [batch, seq] (-100은 제외, None이면 전체 사용)
+        loss_mask: [batch, seq] 학습 대상 토큰 마스크 (labels != -100)
 
     Returns:
         통계 딕셔너리:
@@ -34,16 +32,8 @@ def compute_weight_statistics(
     batch, seq = weights.shape[:2]
     n_heads = weights.shape[2] if weights.dim() == 3 else 1
 
-    # 기본 마스크: 전체 True
-    mask = torch.ones(batch, seq, dtype=torch.bool, device=weights.device)
-
-    # attention_mask 적용 (padding 제외)
-    if attention_mask is not None:
-        mask = mask & attention_mask.bool()
-
-    # labels 적용 (instruction 토큰 제외, labels=-100)
-    if labels is not None:
-        mask = mask & (labels != -100)
+    # bool 마스크 변환
+    mask = loss_mask.bool()
 
     # weights가 [batch, seq, n_heads]인 경우 처리
     if weights.dim() == 3:
@@ -63,7 +53,6 @@ def compute_weight_statistics(
         }
 
     # Entropy 계산 (log base e)
-    # 0에 가까운 값 방지를 위해 epsilon 추가
     epsilon = 1e-10
     entropy = -(weights_flat * torch.log(weights_flat + epsilon)).mean()
 
@@ -183,6 +172,8 @@ def compute_gradient_clip_stats_by_component(
     trunk과 value_head에 각각 다른 max_grad_norm을 적용하여 clipping.
     두 컴포넌트의 gradient scale이 크게 다를 때 유용.
 
+    FSDP 환경에서는 summon_full_params를 사용하여 gradient 접근.
+
     Args:
         model: 모델 (FSDP wrapped 또는 일반 모델)
         trunk_max_grad_norm: Trunk 파라미터용 gradient clipping threshold
@@ -199,48 +190,95 @@ def compute_gradient_clip_stats_by_component(
     """
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
-    # FSDP인 경우 내부 모듈 접근
-    if isinstance(model, FSDP):
-        model_to_inspect = model.module
-    else:
-        model_to_inspect = model
+    is_fsdp = isinstance(model, FSDP)
 
-    # 파라미터 분리 (gradient 있는 것만)
-    trunk_params = []
-    value_head_params = []
+    if is_fsdp:
+        # FSDP: summon_full_params로 gradient 접근 후 clipping
+        # writeback=True로 clipping 결과를 다시 sharded gradient에 반영
+        from torch.distributed.fsdp import FullStateDictConfig, StateDictType
 
-    for name, param in model_to_inspect.named_parameters():
-        if param.grad is not None:
+        # 파라미터 이름 매핑 구축 (summon 전에)
+        trunk_param_names = set()
+        value_head_param_names = set()
+        for name, _ in model.module.named_parameters():
             if "value_head" in name:
-                value_head_params.append(param)
+                value_head_param_names.add(name)
             else:
-                trunk_params.append(param)
+                trunk_param_names.add(name)
 
-    # Trunk gradient clipping
-    if trunk_params and trunk_max_grad_norm > 0:
-        trunk_norm_pre = torch.nn.utils.clip_grad_norm_(
-            trunk_params, trunk_max_grad_norm
-        ).item()
-        trunk_norm_post = min(trunk_norm_pre, trunk_max_grad_norm)
-        trunk_clip_ratio = trunk_norm_post / trunk_norm_pre if trunk_norm_pre > 0 else 1.0
-    else:
-        trunk_norm_pre = 0.0
-        trunk_norm_post = 0.0
-        trunk_clip_ratio = 1.0
+        with FSDP.summon_full_params(model, writeback=True, with_grads=True):
+            trunk_params = []
+            value_head_params = []
 
-    # Value head gradient clipping
-    if value_head_params and value_head_max_grad_norm > 0:
-        value_head_norm_pre = torch.nn.utils.clip_grad_norm_(
-            value_head_params, value_head_max_grad_norm
-        ).item()
-        value_head_norm_post = min(value_head_norm_pre, value_head_max_grad_norm)
-        value_head_clip_ratio = (
-            value_head_norm_post / value_head_norm_pre if value_head_norm_pre > 0 else 1.0
-        )
+            for name, param in model.module.named_parameters():
+                if param.grad is not None:
+                    if name in value_head_param_names:
+                        value_head_params.append(param)
+                    else:
+                        trunk_params.append(param)
+
+            # Trunk gradient clipping
+            if trunk_params and trunk_max_grad_norm > 0:
+                trunk_norm_pre = torch.nn.utils.clip_grad_norm_(
+                    trunk_params, trunk_max_grad_norm
+                ).item()
+                trunk_norm_post = min(trunk_norm_pre, trunk_max_grad_norm)
+                trunk_clip_ratio = trunk_norm_post / trunk_norm_pre if trunk_norm_pre > 0 else 1.0
+            else:
+                trunk_norm_pre = 0.0
+                trunk_norm_post = 0.0
+                trunk_clip_ratio = 1.0
+
+            # Value head gradient clipping
+            if value_head_params and value_head_max_grad_norm > 0:
+                value_head_norm_pre = torch.nn.utils.clip_grad_norm_(
+                    value_head_params, value_head_max_grad_norm
+                ).item()
+                value_head_norm_post = min(value_head_norm_pre, value_head_max_grad_norm)
+                value_head_clip_ratio = (
+                    value_head_norm_post / value_head_norm_pre if value_head_norm_pre > 0 else 1.0
+                )
+            else:
+                value_head_norm_pre = 0.0
+                value_head_norm_post = 0.0
+                value_head_clip_ratio = 1.0
     else:
-        value_head_norm_pre = 0.0
-        value_head_norm_post = 0.0
-        value_head_clip_ratio = 1.0
+        # Non-FSDP: 직접 파라미터 접근
+        trunk_params = []
+        value_head_params = []
+
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                if "value_head" in name:
+                    value_head_params.append(param)
+                else:
+                    trunk_params.append(param)
+
+        # Trunk gradient clipping
+        if trunk_params and trunk_max_grad_norm > 0:
+            trunk_norm_pre = torch.nn.utils.clip_grad_norm_(
+                trunk_params, trunk_max_grad_norm
+            ).item()
+            trunk_norm_post = min(trunk_norm_pre, trunk_max_grad_norm)
+            trunk_clip_ratio = trunk_norm_post / trunk_norm_pre if trunk_norm_pre > 0 else 1.0
+        else:
+            trunk_norm_pre = 0.0
+            trunk_norm_post = 0.0
+            trunk_clip_ratio = 1.0
+
+        # Value head gradient clipping
+        if value_head_params and value_head_max_grad_norm > 0:
+            value_head_norm_pre = torch.nn.utils.clip_grad_norm_(
+                value_head_params, value_head_max_grad_norm
+            ).item()
+            value_head_norm_post = min(value_head_norm_pre, value_head_max_grad_norm)
+            value_head_clip_ratio = (
+                value_head_norm_post / value_head_norm_pre if value_head_norm_pre > 0 else 1.0
+            )
+        else:
+            value_head_norm_pre = 0.0
+            value_head_norm_post = 0.0
+            value_head_clip_ratio = 1.0
 
     return {
         "trunk_grad_norm_pre": trunk_norm_pre,
@@ -255,14 +293,14 @@ def compute_gradient_clip_stats_by_component(
 def compute_value_function_stats(
     values: torch.Tensor,
     returns: torch.Tensor,
-    attention_mask: torch.Tensor = None,
+    loss_mask: torch.Tensor = None,
 ) -> dict[str, float]:
     """Value function 품질 통계 계산
 
     Args:
         values: Predicted values [batch, seq]
         returns: Target returns [batch, seq]
-        attention_mask: 유효 토큰 마스크 [batch, seq] (None이면 전체 사용)
+        loss_mask: [batch, seq] 학습 대상 토큰 마스크 (None이면 전체 사용)
 
     Returns:
         통계 딕셔너리:
@@ -271,9 +309,9 @@ def compute_value_function_stats(
             - value_std: Predicted value 표준편차
             - return_mean: 평균 return
     """
-    if attention_mask is not None:
-        # 유효한 토큰만 선택 (padding 제외)
-        mask = attention_mask.reshape(-1).bool()
+    if loss_mask is not None:
+        # 유효한 토큰만 선택
+        mask = loss_mask.reshape(-1).bool()
         values_flat = values.reshape(-1)[mask]
         returns_flat = returns.reshape(-1)[mask]
     else:

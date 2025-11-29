@@ -282,7 +282,7 @@ uv run python -m weighted_mtp.pipelines.run_baseline \
   --override training.n_epochs=0.01
 ```
 
-### 5.2 분산 학습 (4-GPU)
+### 5.2 분산 학습 (3-GPU)
 
 ```bash
 cd ~/grad_school/wooshikwon/weighted_mtp
@@ -291,43 +291,35 @@ cd ~/grad_school/wooshikwon/weighted_mtp
 MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
 
 # Baseline MTP
-uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_baseline \
   --config configs/baseline/baseline.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 
-MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
-
 # Critic 사전학습
-uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_critic \
   --config configs/critic/critic_mlp.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
-  
-MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
 
 # ref-tuning
-uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_ref_tuning \
   --config configs/ref-tuning/ref_tuning.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 
-MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
-
 # Verifiable Reward
-uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_verifiable \
   --config configs/verifiable/verifiable_pairwise.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 
-MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
-
 # Rho-1
-uv run torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 \
+CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_rho1 \
   --config configs/rho1/rho1.yaml \

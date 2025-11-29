@@ -108,7 +108,7 @@ checkpoint:
   save_best: true
   save_final: true
   save_total_limit: 3
-  s3_upload: true
+  s3_upload: false
   save_lora_only: false
 
 # 런타임 설정

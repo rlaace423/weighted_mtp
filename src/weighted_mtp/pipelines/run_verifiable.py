@@ -54,6 +54,7 @@ from weighted_mtp.value_weighting.td_weighting import (
     compute_td_errors,
     compute_td_stats,
 )
+from weighted_mtp.value_weighting.td_stats_ema import TDStatsEMA
 
 
 def validate_verifiable(
@@ -137,19 +138,20 @@ def validate_verifiable(
 
             n_future = pos_logits.shape[2]
 
-            # TD error (Positive만 - Policy weighting용)
-            # Response 토큰 마스크 (labels != -100)
-            pos_response_mask = (pos_labels != -100).long()
+            # 학습 대상 토큰 마스크 (labels != -100)
+            pos_loss_mask = (pos_labels != -100)
+            neg_loss_mask = (neg_labels != -100)
 
+            # TD error (Positive만 - Policy weighting용)
             td_errors = compute_td_errors(
                 value_logits=pos_value_logits,
                 rewards=pos_rewards,
-                attention_mask=pos_attention_mask,
+                loss_mask=pos_loss_mask,
                 gamma=1.0,
             )
             weights = build_weights(
                 td_errors=td_errors,
-                attention_mask=pos_response_mask,
+                loss_mask=pos_loss_mask,
                 beta=beta,
                 min_weight=weight_clip_min,
                 max_weight=weight_clip_max,
@@ -166,33 +168,29 @@ def validate_verifiable(
             weighted_ce_loss = ce_losses["weighted_ce_loss"]
             unweighted_ce_loss = ce_losses["unweighted_ce_loss"]
 
-            # Response 마스크 계산
-            pos_mask = (pos_labels != -100).to(model_dtype)
-            neg_mask = (neg_labels != -100).to(model_dtype)
-
             # Value Loss 계산 (조건부)
             value_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
 
             if use_pairwise:
                 pairwise_loss_val = pairwise_ranking_loss(
-                    pos_value_logits, neg_value_logits, pos_mask, neg_mask
+                    pos_value_logits, neg_value_logits, pos_loss_mask, neg_loss_mask
                 )
                 value_loss = value_loss + pairwise_coef * pairwise_loss_val
 
             if use_mc_mse:
                 pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
                 pos_mc_loss = compute_mc_value_loss(
-                    pos_value_logits, pos_rewards, pos_attention_mask, pos_mask
+                    pos_value_logits, pos_rewards, pos_attention_mask, pos_loss_mask
                 )
                 neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
                 neg_mc_loss = compute_mc_value_loss(
-                    neg_value_logits, neg_rewards, neg_attention_mask, neg_mask
+                    neg_value_logits, neg_rewards, neg_attention_mask, neg_loss_mask
                 )
                 mc_mse_loss_val = (pos_mc_loss + neg_mc_loss) / 2
                 value_loss = value_loss + mc_mse_coef * mc_mse_loss_val
 
             # Pairwise accuracy (항상 계산 - 메트릭용)
-            pairwise_metrics = compute_pairwise_accuracy(pos_value_logits, neg_value_logits, pos_mask, neg_mask)
+            pairwise_metrics = compute_pairwise_accuracy(pos_value_logits, neg_value_logits, pos_loss_mask, neg_loss_mask)
             total_pairwise_accuracy += pairwise_metrics["pairwise_accuracy"]
             total_margin += pairwise_metrics["margin"]
 
@@ -473,6 +471,16 @@ def run_verifiable_training(
     mc_mse_coef = value_loss_config.get("mc_mse_coef", 1.0)
     logger.info(f"Value loss: use_pairwise={use_pairwise}, use_mc_mse={use_mc_mse}")
 
+    # TD Error EMA 통계 추적기 초기화
+    td_ema_momentum = config.training.get("td_ema_momentum", 0.1)
+    td_ema_warmup_steps = config.training.get("td_ema_warmup_steps", 10)
+    td_ema = TDStatsEMA(
+        device=device,
+        momentum=td_ema_momentum,
+        warmup_steps=td_ema_warmup_steps,
+    )
+    logger.info(f"TD EMA: momentum={td_ema_momentum}, warmup_steps={td_ema_warmup_steps}")
+
     # 컴포넌트별 gradient clipping 설정
     # trunk과 value_head에 각각 다른 max_grad_norm 적용하여 gradient scale 불균형 해소
     fallback_max_grad_norm = config.training.get("max_grad_norm", 1.0)
@@ -586,25 +594,28 @@ def run_verifiable_training(
                     )
             neg_value_logits = neg_outputs["value_logits"]
 
-            # TD error 계산 (Positive만 - Policy weighting용)
-            # Response 토큰 마스크 (labels != -100)
-            pos_response_mask = (pos_labels != -100).long()
+            # 학습 대상 토큰 마스크 (labels != -100)
+            pos_loss_mask = (pos_labels != -100)
+            neg_loss_mask = (neg_labels != -100)
 
+            # TD error 계산 (Positive만 - Policy weighting용)
             td_errors = compute_td_errors(
                 value_logits=pos_value_logits,
                 rewards=pos_rewards,
-                attention_mask=pos_attention_mask,
+                loss_mask=pos_loss_mask,
                 gamma=1.0,
             )
 
-            # Weight 산출 (Normalized IQL with Advantage Whitening)
-            # Response 토큰만으로 정규화 (Instruction 제외)
+            # Weight 산출 (EMA 기반 Advantage Whitening)
+            ema_mean, ema_std = td_ema.get_stats()
             weights = build_weights(
                 td_errors=td_errors,
-                attention_mask=pos_response_mask,
+                loss_mask=pos_loss_mask,
                 beta=config.training.beta,
                 min_weight=config.training.weight_clip_min,
                 max_weight=config.training.weight_clip_max,
+                external_mean=ema_mean,
+                external_std=ema_std,
             )
 
             # Policy Loss (Positive만, TD Weighted) - 메모리 최적화된 유틸리티 사용
@@ -617,10 +628,6 @@ def run_verifiable_training(
             weighted_ce_loss = ce_losses["weighted_ce_loss"]
             unweighted_ce_loss = ce_losses["unweighted_ce_loss"]
 
-            # Response 마스크 계산
-            pos_mask = (pos_labels != -100).to(model_dtype)
-            neg_mask = (neg_labels != -100).to(model_dtype)
-
             # Value Loss 계산 (조건부)
             value_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
             pairwise_loss_value = torch.tensor(0.0, device=device, dtype=model_dtype)
@@ -628,19 +635,19 @@ def run_verifiable_training(
 
             if use_pairwise:
                 pairwise_loss_value = pairwise_ranking_loss(
-                    pos_value_for_ranking, neg_value_logits, pos_mask, neg_mask
+                    pos_value_for_ranking, neg_value_logits, pos_loss_mask, neg_loss_mask
                 )
                 value_loss = value_loss + pairwise_coef * pairwise_loss_value
 
             if use_mc_mse:
                 # Positive: reward=1
                 pos_mc_loss = compute_mc_value_loss(
-                    pos_value_logits, pos_rewards, pos_attention_mask, pos_mask
+                    pos_value_logits, pos_rewards, pos_attention_mask, pos_loss_mask
                 )
                 # Negative: reward=0
                 neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
                 neg_mc_loss = compute_mc_value_loss(
-                    neg_value_logits, neg_rewards, neg_attention_mask, neg_mask
+                    neg_value_logits, neg_rewards, neg_attention_mask, neg_loss_mask
                 )
                 mc_mse_loss_value = (pos_mc_loss + neg_mc_loss) / 2
                 value_loss = value_loss + mc_mse_coef * mc_mse_loss_value
@@ -650,26 +657,24 @@ def run_verifiable_training(
             total_loss = weighted_ce_loss + value_loss_coef * value_loss
 
             # 로깅용 변수 설정
-            input_ids = pos_input_ids
-            attention_mask = pos_attention_mask
-            labels = pos_labels
-            rewards = pos_rewards
             value_logits = pos_value_logits
-            valid_label_mask = pos_mask.unsqueeze(-1)
             # pairwise 모드에서는 rewards를 td_targets로 사용 (로깅용)
-            td_targets = rewards.view(-1, 1, 1).expand_as(value_logits)
+            td_targets = pos_rewards.view(-1, 1, 1).expand_as(value_logits)
 
             # Loss scaling (gradient accumulation 적용)
             scaled_loss = total_loss / gradient_accumulation_steps
             scaled_loss.backward()
+
+            # EMA 통계 업데이트 (backward 후, 다음 batch를 위해)
+            td_ema.update(td_errors, pos_loss_mask, distributed=True)
 
             accumulation_counter += 1
             batch_count += 1
             period_batches += 1
 
             # Throughput tracking (batch 단위)
-            batch_size_actual = input_ids.size(0)
-            n_tokens = attention_mask.sum().item()
+            batch_size_actual = pos_input_ids.size(0)
+            n_tokens = pos_attention_mask.sum().item()
             throughput_tracker.update(batch_size_actual, int(n_tokens))
 
             # Period metrics 누적 (batch 단위)
@@ -731,22 +736,19 @@ def run_verifiable_training(
 
             # Step-level 로깅 (optimizer step 시에만)
             if global_step % config.training.log_interval == 0 and accumulation_counter == 0:
-                # Response 토큰 마스크 (통계 계산용)
-                response_mask = valid_label_mask.squeeze(-1)
-
-                # TD error stats (response 토큰만)
-                td_stats = compute_td_stats(td_errors, response_mask)
+                # TD error stats
+                td_stats = compute_td_stats(td_errors, pos_loss_mask)
                 gpu_metrics = gpu_monitor.get_metrics()
 
-                # Value function statistics (response 토큰만)
+                # Value function statistics
                 value_func_stats = compute_value_function_stats(
                     values=value_logits.squeeze(-1),
                     returns=td_targets.squeeze(-1),
-                    attention_mask=response_mask,
+                    loss_mask=pos_loss_mask,
                 )
 
-                # Weight distribution statistics (response 토큰만)
-                weight_dist_stats = compute_weight_statistics(weights, attention_mask, labels)
+                # Weight distribution statistics
+                weight_dist_stats = compute_weight_statistics(weights, pos_loss_mask)
 
                 # Metric aggregation (분산 환경)
                 # grad_clip_stats는 clip_grad_norm_이 이미 전역 값을 반환하므로 all_reduce 불필요
@@ -797,6 +799,8 @@ def run_verifiable_training(
                             "td/std": reduced["td_std"],
                             "td/min": reduced["td_min"],
                             "td/max": reduced["td_max"],
+                            "td/ema_mean": td_ema.ema_mean.item(),
+                            "td/ema_std": td_ema.ema_std.item(),
                             "value/mse": avg_value_mse,
                             "value/mean_prediction": avg_value_mean,
                             "value/std_prediction": avg_value_std,
@@ -960,6 +964,7 @@ def run_verifiable_training(
                     s3_upload=use_s3_upload,
                     mlflow_run_id=mlflow_run_id,
                     save_value_head=True,
+                    td_ema_state=td_ema.state_dict(),
                 )
             else:
                 save_checkpoint(
@@ -976,6 +981,7 @@ def run_verifiable_training(
                     config={"model": {"path": config.models.policy.path}},
                     s3_upload=use_s3_upload,
                     mlflow_run_id=mlflow_run_id,
+                    td_ema_state=td_ema.state_dict(),
                 )
 
             # 모든 GPU가 checkpoint 저장 완료까지 대기
@@ -1044,6 +1050,7 @@ def run_verifiable_training(
                 s3_upload=use_s3_upload,
                 mlflow_run_id=mlflow_run_id,
                 save_value_head=True,
+                td_ema_state=td_ema.state_dict(),
             )
         else:
             save_checkpoint(
@@ -1060,6 +1067,7 @@ def run_verifiable_training(
                 config={"model": {"path": config.models.policy.path}},
                 s3_upload=use_s3_upload,
                 mlflow_run_id=mlflow_run_id,
+                td_ema_state=td_ema.state_dict(),
             )
 
         # 모든 GPU가 final checkpoint 저장 완료까지 대기

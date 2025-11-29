@@ -15,7 +15,7 @@ import torch
 def compute_td_targets(
     value_logits: torch.Tensor,
     rewards: torch.Tensor,
-    attention_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
     gamma: float = 1.0,
     lam: float = 0.0,
 ) -> torch.Tensor:
@@ -29,7 +29,7 @@ def compute_td_targets(
     Args:
         value_logits: [batch, seq, 1] Value head 출력
         rewards: [batch] Binary reward (0.0: incorrect, 1.0: correct)
-        attention_mask: [batch, seq] 유효 토큰 마스크 (1: 유효, 0: padding)
+        loss_mask: [batch, seq] 학습 대상 토큰 마스크 (labels != -100)
         gamma: 할인율 (기본 1.0)
         lam: GAE lambda (기본 0.0)
             - 0.0: TD(0) - 한 스텝 bootstrapping
@@ -42,12 +42,12 @@ def compute_td_targets(
     Examples:
         >>> value_logits = torch.tensor([[[0.5], [0.7], [0.9]]])  # [1, 3, 1]
         >>> rewards = torch.tensor([1.0])
-        >>> attention_mask = torch.tensor([[1, 1, 1]])
+        >>> loss_mask = torch.tensor([[1, 1, 1]])
         >>> # TD(0): lam=0
-        >>> targets = compute_td_targets(value_logits, rewards, attention_mask, gamma=1.0, lam=0.0)
+        >>> targets = compute_td_targets(value_logits, rewards, loss_mask, gamma=1.0, lam=0.0)
         >>> # [0.7, 0.9, 1.0]
         >>> # GAE: lam=0.95
-        >>> targets = compute_td_targets(value_logits, rewards, attention_mask, gamma=1.0, lam=0.95)
+        >>> targets = compute_td_targets(value_logits, rewards, loss_mask, gamma=1.0, lam=0.95)
         >>> # 에러 신호가 더 빠르게 전파됨
     """
     batch_size, seq_len, _ = value_logits.shape
@@ -59,7 +59,7 @@ def compute_td_targets(
     if lam == 1.0 and gamma == 1.0:
         # rewards: [batch] → [batch, seq]
         td_targets = rewards.view(-1, 1).expand(-1, seq_len).to(dtype)
-        td_targets = td_targets * attention_mask.to(dtype)
+        td_targets = td_targets * loss_mask.to(dtype)
         return td_targets.unsqueeze(-1)
 
     # Value logits squeeze 및 detach: [batch, seq, 1] → [batch, seq]
@@ -67,7 +67,7 @@ def compute_td_targets(
 
     # Terminal indices: 각 시퀀스의 마지막 유효 토큰 위치
     seq_indices = torch.arange(seq_len, device=device).unsqueeze(0)
-    masked_indices = seq_indices * attention_mask
+    masked_indices = seq_indices * loss_mask
     terminal_indices = masked_indices.max(dim=1).values.long()
 
     # TD targets 초기화 (모델 dtype 유지)
@@ -101,7 +101,7 @@ def compute_td_targets(
             last_gae = gae
 
     # Padding 마스킹 (dtype 유지)
-    td_targets = td_targets * attention_mask.to(dtype)
+    td_targets = td_targets * loss_mask.to(dtype)
 
     # [batch, seq] → [batch, seq, 1]
     return td_targets.unsqueeze(-1)
@@ -110,34 +110,39 @@ def compute_td_targets(
 def compute_td_errors(
     value_logits: torch.Tensor,
     rewards: torch.Tensor,
-    attention_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
     gamma: float = 1.0,
+    initial_value: float = 0.5,
 ) -> torch.Tensor:
-    """표준 TD error 계산 (Intermediate + Terminal)
+    """TD error 계산 (한계 가치 기반)
+
+    δ_t = V(t) - V(t-1): t시점 토큰을 선택함으로써 얻게 되는 한계 가치(marginal value)
+    Terminal에서는 δ_T = R - V(T): 실제 결과와 예측의 차이
 
     Args:
         value_logits: [batch, seq, 1] Value head 출력
         rewards: [batch] Binary reward (0.0: incorrect, 1.0: correct)
-        attention_mask: [batch, seq] 유효 토큰 마스크 (1: 유효, 0: padding)
+        loss_mask: [batch, seq] 학습 대상 토큰 마스크 (labels != -100)
         gamma: 할인율 (기본 1.0, LLM RLHF 표준은 할인 없음)
+        initial_value: V(-1) 초기값 (기본 0.5, 중립적 사전 확률)
 
     Returns:
         td_errors: [batch, seq] 토큰별 TD error
-            - Intermediate (k < T): γV(s_k) - V(s_{k-1})
-            - Terminal (k = T): R - V(s_{T-1})
+            - First (t=0): γV(0) - initial_value
+            - Intermediate (0 < t < T): γV(t) - V(t-1)
+            - Terminal (t = T): R - V(T)
             - Padding: 0.0 (masking 적용)
 
     Examples:
         >>> value_logits = torch.tensor([[[0.5], [0.7], [0.9]]])  # [1, 3, 1]
         >>> rewards = torch.tensor([1.0])  # Correct
-        >>> attention_mask = torch.tensor([[1, 1, 1]])  # All valid
-        >>> td_errors = compute_td_errors(value_logits, rewards, attention_mask, gamma=1.0)
-        >>> # Expected:
-        >>> # Intermediate (0→1): 1.0 * 0.7 - 0.5 = 0.2
-        >>> # Intermediate (1→2): 1.0 * 0.9 - 0.7 = 0.2
-        >>> # Terminal (2): 1.0 - 0.9 = 0.1
+        >>> loss_mask = torch.tensor([[1, 1, 1]])  # All valid
+        >>> td_errors = compute_td_errors(value_logits, rewards, loss_mask)
+        >>> # δ_0 = V(0) - V(-1) = 0.5 - 0.5 = 0.0
+        >>> # δ_1 = V(1) - V(0) = 0.7 - 0.5 = 0.2
+        >>> # δ_2 = R - V(2) = 1.0 - 0.9 = 0.1 (terminal)
         >>> td_errors
-        tensor([[0.2, 0.2, 0.1]])
+        tensor([[0.0, 0.2, 0.1]])
     """
     batch_size, seq_len, _ = value_logits.shape
 
@@ -146,23 +151,23 @@ def compute_td_errors(
     values = value_logits.squeeze(-1).detach()
 
     # Terminal indices 계산: 각 시퀀스의 마지막 유효 토큰 위치
-    # 왼쪽 패딩을 지원하기 위해 마지막 1의 인덱스를 직접 찾음
     seq_indices = torch.arange(seq_len, device=values.device).unsqueeze(0)
-    masked_indices = seq_indices * attention_mask
+    masked_indices = seq_indices * loss_mask
     terminal_indices = masked_indices.max(dim=1).values.long()
 
-    # TD errors 초기화 (전체를 Intermediate로 계산)
+    # TD errors 초기화
     td_errors = torch.zeros_like(values)
 
-    # Intermediate TD errors: δ_t = γV(s_t) - V(s_{t-1})
-    # td_errors[t]는 토큰 t의 가중치
-    # - values[:, 1:]: V(s_t) for t=1,2,...,T-1
-    # - values[:, :-1]: V(s_{t-1}) for t=1,2,...,T-1
+    # 첫 번째 토큰의 TD error: δ_0 = γV(0) - initial_value
+    td_errors[:, 0] = gamma * values[:, 0] - initial_value
+
+    # Intermediate TD errors: δ_t = γV(t) - V(t-1)
+    # t시점 토큰을 선택함으로써 얻게 되는 한계 가치
     if seq_len > 1:
         td_errors[:, 1:] = gamma * values[:, 1:] - values[:, :-1]
 
-    # Terminal TD error (k = T): R - V(s_{T-1})
-    # Advanced indexing으로 vectorized 연산
+    # Terminal TD error: δ_T = R - V(T)
+    # 실제 결과와 예측의 차이
     batch_indices = torch.arange(batch_size, device=values.device)
     values_terminal = values[batch_indices, terminal_indices]
     td_terminal = rewards - values_terminal
@@ -170,71 +175,84 @@ def compute_td_errors(
     # Terminal 위치에 TD terminal 값 할당
     td_errors[batch_indices, terminal_indices] = td_terminal
 
-    # Padding 토큰 masking: attention_mask == 0인 위치는 td_error = 0
-    td_errors = td_errors * attention_mask.float()
+    # Padding 토큰 masking
+    td_errors = td_errors * loss_mask.float()
 
     return td_errors
 
 
 def build_weights(
     td_errors: torch.Tensor,
-    attention_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
     beta: float = 1.0,
     min_weight: float = 0.1,
     max_weight: float = 5.0,
+    external_mean: torch.Tensor = None,
+    external_std: torch.Tensor = None,
 ) -> torch.Tensor:
     """TD error 기반 토큰 가중치 (Advantage Whitening 적용)
 
     가중치 산정 흐름:
-    1. 배치 단위 표준화 (Whitening): 스케일 불변성 확보
+    1. 표준화 (Whitening): 스케일 불변성 확보
     2. exp(A_norm / beta): 중요도 변환
-    3. 평균 1 정규화: LR 스케일 유지 (Jensen's inequality 보정)
-    4. Clipping: 범위 제한으로 안정성 보장
+    3. Clipping: 범위 제한으로 안정성 보장
 
     Args:
         td_errors: [batch, seq] TD error (compute_td_errors 출력)
-        attention_mask: [batch, seq] 유효 토큰 마스크 (1: 유효, 0: padding)
+        loss_mask: [batch, seq] 학습 대상 토큰 마스크 (labels != -100)
         beta: Temperature (낮을수록 상위 토큰 집중, 기본 1.0)
         min_weight: 최소 가중치 (기본 0.1)
         max_weight: 최대 가중치 (기본 5.0)
+        external_mean: 외부 제공 평균 (EMA 등). None이면 현재 batch 통계 사용
+        external_std: 외부 제공 표준편차 (EMA 등). None이면 현재 batch 통계 사용
 
     Returns:
-        weights: [batch, seq] Token-level weights (평균 ≈ 1, clipped)
+        weights: [batch, seq] Token-level weights (clipped)
     """
-    # 유효 토큰만으로 통계 계산
-    mask = attention_mask.bool()
-    valid_td = td_errors[mask]
+    bool_mask = loss_mask.bool()
+
+    # 외부 통계 사용 여부 결정
+    if external_mean is not None and external_std is not None:
+        # EMA 등 외부 통계 사용
+        mean = external_mean
+        std = external_std
+    else:
+        # 현재 batch 통계 사용 (기존 동작)
+        valid_td = td_errors[bool_mask]
+
+        # Edge case: 유효 토큰이 1개 이하면 균등 가중치 반환
+        if valid_td.numel() <= 1:
+            weights = torch.ones_like(td_errors)
+            weights = weights * loss_mask.float()
+            return weights
+
+        mean = valid_td.mean()
+        std = valid_td.std()
 
     # Advantage Whitening: (A - mean) / (std + eps)
-    mean = valid_td.mean()
-    std = valid_td.std()
     td_normalized = (td_errors - mean) / (std + 1e-8)
 
     # Exponential transformation
     weights = torch.exp(td_normalized / beta)
 
-    # 평균 1 정규화 (Jensen's inequality: E[exp(X)] > exp(E[X]) 보정)
-    valid_weights = weights[mask]
-    weights = weights / (valid_weights.mean() + 1e-8)
-
-    # Clipping (정규화 후 범위 제한)
+    # Clipping
     weights = torch.clamp(weights, min=min_weight, max=max_weight)
 
     # Padding 위치는 0으로 마스킹
-    weights = weights * attention_mask.float()
+    weights = weights * loss_mask.float()
 
     return weights
 
 
 def compute_td_stats(
     td_errors: torch.Tensor,
-    attention_mask: torch.Tensor = None,
+    loss_mask: torch.Tensor = None,
 ) -> dict[str, float]:
     """TD error 분포 통계 계산
 
     Args:
         td_errors: [batch, seq] TD errors
-        attention_mask: 유효 토큰 마스크 [batch, seq] (None이면 전체 사용)
+        loss_mask: 학습 대상 토큰 마스크 [batch, seq] (None이면 전체 사용)
 
     Returns:
         {
@@ -252,10 +270,10 @@ def compute_td_stats(
         >>> stats["td_std"]  # 표준편차
         0.28
     """
-    if attention_mask is not None:
+    if loss_mask is not None:
         # 유효한 토큰만 선택 (padding 제외)
-        mask = attention_mask.flatten().bool()
-        td_flat = td_errors.flatten()[mask]
+        bool_mask = loss_mask.flatten().bool()
+        td_flat = td_errors.flatten()[bool_mask]
     else:
         td_flat = td_errors.flatten()
 
@@ -269,13 +287,13 @@ def compute_td_stats(
 
 def compute_weight_stats(
     weights: torch.Tensor,
-    attention_mask: torch.Tensor = None,
+    loss_mask: torch.Tensor = None,
 ) -> dict[str, float]:
     """Weight 분포 통계 계산
 
     Args:
         weights: [batch, seq] Token weights
-        attention_mask: 유효 토큰 마스크 [batch, seq] (None이면 전체 사용)
+        loss_mask: 학습 대상 토큰 마스크 [batch, seq] (None이면 전체 사용)
 
     Returns:
         {
@@ -294,10 +312,10 @@ def compute_weight_stats(
         >>> stats["weight_entropy"]  # 엔트로피 (높을수록 균등 분포)
         0.95
     """
-    if attention_mask is not None:
+    if loss_mask is not None:
         # 유효한 토큰만 선택 (padding 제외)
-        mask = attention_mask.flatten().bool()
-        weights_flat = weights.flatten()[mask]
+        bool_mask = loss_mask.flatten().bool()
+        weights_flat = weights.flatten()[bool_mask]
     else:
         weights_flat = weights.flatten()
 
