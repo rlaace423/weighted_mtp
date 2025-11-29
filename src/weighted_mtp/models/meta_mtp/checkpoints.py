@@ -1,6 +1,7 @@
 """모델 checkpoint 로딩 유틸리티"""
 
 import json
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -8,6 +9,8 @@ import torch
 from safetensors.torch import load_file
 
 from .transformer import ModelArgs, Transformer
+
+logger = logging.getLogger(__name__)
 
 
 def _get_device(device: str) -> torch.device:
@@ -33,6 +36,7 @@ def load_meta_mtp_model(
     model_dir: Path,
     device: str = "auto",
     dtype: Optional[torch.dtype] = None,
+    params_override: Optional[dict] = None,
 ) -> Transformer:
     """Meta MTP 모델 통합 로딩
 
@@ -40,6 +44,9 @@ def load_meta_mtp_model(
         model_dir: storage/models/meta-llama-mtp/ 경로
         device: "cuda", "mps", "cpu", "auto"
         dtype: torch.float16 등 (None이면 params.json 기준)
+        params_override: ModelArgs 오버라이드 설정
+            - n_future_tokens 변경은 지원하지 않음 (MTP/NTP 구조 불일치)
+            - 다른 파라미터 (max_seq_len 등)는 변경 가능
 
     Returns:
         Transformer 인스턴스
@@ -47,6 +54,7 @@ def load_meta_mtp_model(
     Raises:
         FileNotFoundError: params.json 또는 safetensors 파일 없음
         RuntimeError: safetensors 키 불일치
+        ValueError: n_future_tokens 변경 시도 시
     """
     model_dir = Path(model_dir)
 
@@ -75,6 +83,29 @@ def load_meta_mtp_model(
         }
     else:
         raise FileNotFoundError(f"Neither params.json nor config.json found in {model_dir}/configs/")
+
+    # params_override 적용 (n_future_tokens 변경은 차단)
+    if params_override:
+        # n_future_tokens 변경 시도 감지
+        ckpt_n_future = params_dict.get("n_future_tokens", 1)
+        override_n_future = params_override.get("n_future_tokens")
+
+        if override_n_future is not None and override_n_future != ckpt_n_future:
+            raise ValueError(
+                f"n_future_tokens 변경 불가: checkpoint={ckpt_n_future}, override={override_n_future}. "
+                f"MTP extra_heads는 미래 토큰 예측용으로 학습되어 NTP layer로 재사용 불가. "
+                f"NTP가 필요하면 순수 LLaMA2 checkpoint 사용 권장."
+            )
+
+        # n_future_tokens 외의 파라미터만 업데이트
+        valid_keys = ModelArgs.__dataclass_fields__.keys()
+        filtered_override = {
+            k: v for k, v in params_override.items()
+            if k in valid_keys and k != "n_future_tokens"
+        }
+        if filtered_override:
+            params_dict.update(filtered_override)
+            logger.info(f"params_override 적용: {filtered_override}")
 
     model_args = ModelArgs(**params_dict)
 

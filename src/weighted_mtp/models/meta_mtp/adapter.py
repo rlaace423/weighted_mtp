@@ -54,6 +54,7 @@ class MetaLlamaMTPAdapter(nn.Module):
         dtype: Optional[str] = None,
         use_lora: bool = False,
         lora_config: Optional[dict] = None,
+        params_override: Optional[dict] = None,
     ) -> "MetaLlamaMTPAdapter":
         """Pretrained 모델에서 Adapter 로드
 
@@ -66,6 +67,9 @@ class MetaLlamaMTPAdapter(nn.Module):
             use_lora: LoRA 적용 여부 (trunk layers에만 적용)
             lora_config: LoRA 설정 (rank, alpha, dropout, target_modules)
                 - None이면 DEFAULT_LORA_CONFIG 사용
+            params_override: ModelArgs 오버라이드 설정 (max_seq_len 등)
+                - n_future_tokens 변경은 지원하지 않음 (MTP/NTP 구조 불일치)
+                - NTP가 필요하면 순수 LLaMA2 checkpoint 사용 권장
 
         Returns:
             MetaLlamaMTPAdapter 인스턴스
@@ -89,6 +93,7 @@ class MetaLlamaMTPAdapter(nn.Module):
                 dtype=dtype,
                 use_lora=use_lora,
                 lora_config=lora_config,
+                params_override=params_override,
             )
 
         # Dtype 변환 (문자열 -> torch.dtype)
@@ -96,11 +101,12 @@ class MetaLlamaMTPAdapter(nn.Module):
         if dtype is not None:
             dtype_obj = getattr(torch, dtype)
 
-        # 1. Transformer 로드
+        # 1. Transformer 로드 (params_override 전달)
         transformer = load_meta_mtp_model(
             model_dir=model_path,
             device=device,
             dtype=dtype_obj,
+            params_override=params_override,
         )
 
         # 2. ModelArgs 파싱 (params.json 또는 config.json)
@@ -131,6 +137,13 @@ class MetaLlamaMTPAdapter(nn.Module):
             raise FileNotFoundError(
                 f"Neither params.json nor config.json found in {model_path}/configs/"
             )
+
+        # 파라미터 오버라이드 적용 (Adapter용 ModelArgs도 업데이트)
+        if params_override:
+            valid_keys = ModelArgs.__dataclass_fields__.keys()
+            filtered_override = {k: v for k, v in params_override.items() if k in valid_keys}
+            if filtered_override:
+                params_dict.update(filtered_override)
 
         model_args = ModelArgs(**params_dict)
 

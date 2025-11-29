@@ -87,6 +87,7 @@ def load_policy_model(
         dtype=config.models.policy.dtype,
         use_lora=use_lora,
         lora_config=lora_config,
+        params_override=OmegaConf.to_container(config.models.policy.params, resolve=True),
     )
     
     return policy_model

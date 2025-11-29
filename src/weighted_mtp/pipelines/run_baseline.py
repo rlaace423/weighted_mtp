@@ -62,6 +62,12 @@ def load_adapter(
     Returns:
         MetaLlamaMTPAdapter 인스턴스 (Value head 없음)
     """
+    # params_override: yaml의 models.policy.params 설정으로 params.json 덮어쓰기
+    params_override = None
+    if hasattr(config.models.policy, "params") and config.models.policy.params:
+        from omegaconf import OmegaConf
+        params_override = OmegaConf.to_container(config.models.policy.params, resolve=True)
+
     # Baseline은 Value head 불필요 (균등 가중치)
     adapter = MetaLlamaMTPAdapter.from_pretrained(
         model_path=config.models.policy.path,
@@ -69,6 +75,7 @@ def load_adapter(
         dtype=config.models.policy.dtype,
         use_lora=use_lora,
         lora_config=lora_config,
+        params_override=params_override,
     )
     return adapter
 
