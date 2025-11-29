@@ -334,24 +334,24 @@ class Transformer(nn.Module):
             h = layer(h, start_pos, freqs_cis, mask)
         h_trunk = h
 
-        # Sequential Unembedding: head별로 output projection + loss + backward
-        # FSDP forward 컨텍스트 내에서 실행되어 호환성 보장
+        # Sequential Unembedding: head별로 output projection + loss 계산, 단일 backward
+        # FSDP + Activation Checkpointing 호환을 위해 retain_graph 없이 단일 backward 수행
         if compute_sequential_loss:
             from weighted_mtp.utils.loss_utils import compute_head_ce_loss
 
             prediction_heads = [self.layers[-1]] + list(self.extra_heads)
             n_future = self.n_future_tokens
-            total_loss = torch.tensor(0.0, device=tokens.device, dtype=h_trunk.dtype)
+            head_losses = []
 
             for head_idx, layer in enumerate(prediction_heads, start=1):
-                # 1. Head forward
+                # Head forward
                 h = layer(h_trunk, start_pos, freqs_cis, mask)
                 h = self.norm(h)
 
-                # 2. Output projection (단일 head)
-                logits_k = self.output(h)  # [batch, seq, vocab]
+                # Output projection
+                logits_k = self.output(h)
 
-                # 3. Loss 계산
+                # Loss 계산
                 loss_k = compute_head_ce_loss(
                     logits=logits_k,
                     labels=labels,
@@ -359,20 +359,19 @@ class Transformer(nn.Module):
                     head_idx=head_idx,
                     weights=weights,
                 )
+                head_losses.append(loss_k)
 
-                # 4. Scaled backward (gradient 누적, 마지막 head 전까지 graph 유지)
-                scaled_loss = (loss_k * loss_scale) / n_future
-                if scaled_loss.requires_grad:
-                    scaled_loss.backward(retain_graph=(head_idx < n_future))
-
-                # 5. 메모리 해제
+                # 중간 텐서 메모리 해제 (loss_k의 graph는 유지됨)
                 del logits_k, h
 
-                # Logging용 loss 누적 (detached)
-                total_loss = total_loss + loss_k.detach()
+            # 모든 head loss 합산 후 단일 backward
+            total_loss = sum(head_losses)
+            scaled_loss = (total_loss / n_future) * loss_scale
+            if scaled_loss.requires_grad:
+                scaled_loss.backward()
 
             return {
-                "loss": total_loss / n_future,
+                "loss": total_loss.detach() / n_future,
                 "n_heads": n_future,
             }
 

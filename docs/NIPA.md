@@ -294,35 +294,35 @@ MLFLOW_URI="file:///home/work/grad_school/wooshikwon/weighted_mtp/mlruns"
 CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_baseline \
-  --config configs/baseline/baseline.yaml \
+  --config configs/production/baseline.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 
 # Critic 사전학습
 CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_critic \
-  --config configs/critic/critic_mlp.yaml \
+  --config configs/production/critic_mlp.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 
 # ref-tuning
 CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_ref_tuning \
-  --config configs/ref-tuning/ref_tuning.yaml \
+  --config configs/production/ref_tuning.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 
 # Verifiable Reward
 CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_verifiable \
-  --config configs/verifiable/verifiable.yaml \
+  --config configs/production/verifiable.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 
 # Rho-1
 CUDA_VISIBLE_DEVICES=0,1,2 uv run torchrun --nproc_per_node=3 --nnodes=1 --node_rank=0 \
   --master_port=29501 \
   -m weighted_mtp.pipelines.run_rho1 \
-  --config configs/rho1/rho1.yaml \
+  --config configs/production/rho1.yaml \
   --override mlflow.tracking_uri=$MLFLOW_URI
 ```
 

@@ -4,9 +4,14 @@
 padding_side, pad_token 등 일관된 설정 보장.
 """
 
+import warnings
 from pathlib import Path
 
 from transformers import AutoTokenizer
+
+# HuggingFace LlamaTokenizer/LlamaTokenizerFast legacy warning 필터링
+warnings.filterwarnings("ignore", message=".*legacy.*behaviour.*Llama.*")
+warnings.filterwarnings("ignore", message=".*legacy.*behavior.*Llama.*")
 
 
 def load_tokenizer(tokenizer_path: str) -> AutoTokenizer:

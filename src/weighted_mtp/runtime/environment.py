@@ -12,10 +12,14 @@
 import os
 import random
 import logging
+import warnings
 from typing import Optional, Literal
 
 import numpy as np
 import torch
+
+# MLflow FileStore deprecated warning 필터링
+warnings.filterwarnings("ignore", category=FutureWarning, module="mlflow")
 
 from weighted_mtp.runtime.distributed import get_rank, get_local_rank, is_main_process
 

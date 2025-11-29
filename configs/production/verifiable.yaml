@@ -111,7 +111,7 @@ checkpoint:
   save_checkpoint_every: 0.2
   save_best: true
   save_final: true
-  save_total_limit: 4
+  save_total_limit: 3
   s3_upload: false
   save_lora_only: true
 
