@@ -36,6 +36,7 @@ from weighted_mtp.utils import (
     get_system_info,
     s3_upload_executor,
     save_checkpoint,
+    save_lora_checkpoint,
     shutdown_s3_executor,
 )
 from weighted_mtp.runtime import (
@@ -740,20 +741,38 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             best_val_loss = val_metrics["val_loss"]
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}.pt"
 
-            save_checkpoint(
-                adapter=adapter,
-                optimizer=optimizer,
-                epoch=current_epoch,
-                train_metrics={
-                    "train_weighted_ce_loss": train_weighted_ce_avg,
-                    "train_excess_loss": train_excess_avg,
-                },
-                val_metrics=val_metrics,
-                checkpoint_path=checkpoint_path,
-                config={"model": {"path": config.models.policy.path}},
-                s3_upload=use_s3_upload,
-                mlflow_run_id=mlflow_run_id,
-            )
+            save_lora_only = config.checkpoint.get("save_lora_only", False) and use_lora
+
+            if save_lora_only:
+                save_lora_checkpoint(
+                    adapter=adapter,
+                    optimizer=optimizer,
+                    epoch=current_epoch,
+                    train_metrics={
+                        "train_weighted_ce_loss": train_weighted_ce_avg,
+                        "train_excess_loss": train_excess_avg,
+                    },
+                    val_metrics=val_metrics,
+                    checkpoint_path=checkpoint_path,
+                    config={"model": {"path": config.models.policy.path}},
+                    s3_upload=use_s3_upload,
+                    mlflow_run_id=mlflow_run_id,
+                )
+            else:
+                save_checkpoint(
+                    adapter=adapter,
+                    optimizer=optimizer,
+                    epoch=current_epoch,
+                    train_metrics={
+                        "train_weighted_ce_loss": train_weighted_ce_avg,
+                        "train_excess_loss": train_excess_avg,
+                    },
+                    val_metrics=val_metrics,
+                    checkpoint_path=checkpoint_path,
+                    config={"model": {"path": config.models.policy.path}},
+                    s3_upload=use_s3_upload,
+                    mlflow_run_id=mlflow_run_id,
+                )
 
             # 모든 GPU가 checkpoint 저장 완료까지 대기
             barrier()
@@ -797,20 +816,38 @@ def run_rho1_training(config: DictConfig) -> tuple[dict[str, float], str]:
             rho1_mode=config.training.rho1_mode,
         )
 
-        save_checkpoint(
-            adapter=adapter,
-            optimizer=optimizer,
-            epoch=current_epoch,
-            train_metrics={
-                "train_weighted_ce_loss": train_weighted_ce_avg,
-                "train_excess_loss": train_excess_avg,
-            },
-            val_metrics=final_val_metrics,
-            checkpoint_path=final_path,
-            config={"model": {"path": config.models.policy.path}},
-            s3_upload=use_s3_upload,
-            mlflow_run_id=mlflow_run_id,
-        )
+        save_lora_only = config.checkpoint.get("save_lora_only", False) and use_lora
+
+        if save_lora_only:
+            save_lora_checkpoint(
+                adapter=adapter,
+                optimizer=optimizer,
+                epoch=current_epoch,
+                train_metrics={
+                    "train_weighted_ce_loss": train_weighted_ce_avg,
+                    "train_excess_loss": train_excess_avg,
+                },
+                val_metrics=final_val_metrics,
+                checkpoint_path=final_path,
+                config={"model": {"path": config.models.policy.path}},
+                s3_upload=use_s3_upload,
+                mlflow_run_id=mlflow_run_id,
+            )
+        else:
+            save_checkpoint(
+                adapter=adapter,
+                optimizer=optimizer,
+                epoch=current_epoch,
+                train_metrics={
+                    "train_weighted_ce_loss": train_weighted_ce_avg,
+                    "train_excess_loss": train_excess_avg,
+                },
+                val_metrics=final_val_metrics,
+                checkpoint_path=final_path,
+                config={"model": {"path": config.models.policy.path}},
+                s3_upload=use_s3_upload,
+                mlflow_run_id=mlflow_run_id,
+            )
 
         # 모든 GPU가 final checkpoint 저장 완료까지 대기
         barrier()

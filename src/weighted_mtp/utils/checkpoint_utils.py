@@ -109,15 +109,15 @@ def load_checkpoint_for_evaluation(
     checkpoint_path: Path,
     device: torch.device,
 ):
-    """평가용 checkpoint 로드 (전체 adapter 로드)
+    """평가용 checkpoint 로드 (full 또는 LoRA checkpoint 자동 감지)
 
-    학습된 모델 전체를 로드하여 평가 모드로 설정합니다.
-    load_critic_checkpoint()와 달리 전체 adapter를 로드합니다.
+    checkpoint_type에 따라 적절한 방식으로 모델을 로드합니다.
+    - "full": 전체 adapter_state_dict 로드
+    - "lora": base model 로드 후 LoRA + extra_heads 적용
 
     Args:
         checkpoint_path: Checkpoint 파일 경로
         device: torch.device
-        initialize_value_head: Value head 초기화 여부 (critic 평가 시 True)
 
     Returns:
         (model, checkpoint_metadata)
@@ -149,51 +149,73 @@ def load_checkpoint_for_evaluation(
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     logger.info(f"Checkpoint 로드 완료: {checkpoint_path}")
 
-    # 필수 키 검증
-    required_keys = ["adapter_state_dict", "epoch", "val_metrics"]
-    missing_keys = [k for k in required_keys if k not in checkpoint]
-    if missing_keys:
-        raise KeyError(
-            f"Checkpoint에 필수 키가 없습니다: {missing_keys}\n"
-            f"사용 가능한 키: {list(checkpoint.keys())}"
-        )
+    # checkpoint_type 자동 감지 (기본값: "full")
+    checkpoint_type = checkpoint.get("checkpoint_type", "full")
+    logger.info(f"Checkpoint 타입: {checkpoint_type}")
 
-    # Config 정보 추출 (checkpoint에 저장된 경우)
-    # 없으면 checkpoint 경로에서 추론
+    # Config 정보 추출
     config_info = checkpoint.get("config", {})
     if not config_info:
-        # Fallback: checkpoint 경로에서 모델 경로 추론
-        # storage/checkpoints/{experiment}/checkpoint_*.pt
-        checkpoint_dir = checkpoint_path.parent
-        experiment_name = checkpoint_dir.name
-
-        # 기본 모델 경로 추정
-        config_info = {
-            "model": {
-                "path": "storage/models/meta-llama-mtp"  # 기본값
-            }
-        }
+        config_info = {"model": {"path": "storage/models/meta-llama-mtp"}}
         logger.warning(
             f"Checkpoint에 config 정보가 없습니다. 기본값 사용: {config_info['model']['path']}"
         )
 
-    # Adapter 로드 (MetaLlamaMTPAdapter)
     from weighted_mtp.models.meta_mtp.adapter import MetaLlamaMTPAdapter
 
-    model = MetaLlamaMTPAdapter.from_pretrained(
-        model_path=config_info["model"]["path"],
-        device=device,
-    )
+    if checkpoint_type == "lora":
+        # LoRA checkpoint: base model 로드 후 학습된 파라미터 적용
+        lora_config = checkpoint.get("lora_config")
 
-    # State dict 로드
-    model.load_state_dict(checkpoint["adapter_state_dict"])
-    model.eval()  # 평가 모드 설정
+        model = MetaLlamaMTPAdapter.from_pretrained(
+            model_path=config_info["model"]["path"],
+            device=device,
+            use_lora=True,
+            lora_config=lora_config,
+        )
+
+        # LoRA + extra_heads + value_head 적용
+        current_state_dict = model.state_dict()
+
+        for key, value in checkpoint.get("lora_state_dict", {}).items():
+            if key in current_state_dict:
+                current_state_dict[key] = value
+
+        for key, value in checkpoint.get("extra_heads_state_dict", {}).items():
+            if key in current_state_dict:
+                current_state_dict[key] = value
+
+        for key, value in checkpoint.get("value_head_state_dict", {}).items():
+            if key in current_state_dict:
+                current_state_dict[key] = value
+
+        model.load_state_dict(current_state_dict)
+        logger.info("LoRA checkpoint 적용 완료")
+
+    else:
+        # Full checkpoint: 전체 adapter_state_dict 로드
+        required_keys = ["adapter_state_dict", "epoch", "val_metrics"]
+        missing_keys = [k for k in required_keys if k not in checkpoint]
+        if missing_keys:
+            raise KeyError(
+                f"Checkpoint에 필수 키가 없습니다: {missing_keys}\n"
+                f"사용 가능한 키: {list(checkpoint.keys())}"
+            )
+
+        model = MetaLlamaMTPAdapter.from_pretrained(
+            model_path=config_info["model"]["path"],
+            device=device,
+        )
+        model.load_state_dict(checkpoint["adapter_state_dict"])
+        logger.info("Full checkpoint 적용 완료")
+
+    model.eval()
 
     # Metadata 구성
     checkpoint_metadata = {
-        "epoch": checkpoint["epoch"],
+        "epoch": checkpoint.get("epoch"),
         "config": config_info,
-        "val_metrics": checkpoint["val_metrics"],
+        "val_metrics": checkpoint.get("val_metrics", {}),
     }
 
     logger.info("평가용 모델 로드 성공")
@@ -247,10 +269,14 @@ def save_lora_checkpoint(
     save_value_head: bool = True,
     td_ema_state: dict | None = None,
 ) -> None:
-    """LoRA 전용 checkpoint 저장 (LoRA 파라미터 + value head만)
+    """LoRA checkpoint 저장 (LoRA + extra_heads + value_head)
 
-    전체 모델 대신 LoRA 파라미터와 value head만 저장하여 checkpoint 크기를 대폭 줄임.
-    Base model은 별도로 유지하고, 추론 시 base model + LoRA checkpoint 조합으로 사용.
+    학습 가능한 파라미터만 저장하여 checkpoint 크기를 대폭 줄임.
+    - LoRA 파라미터 (trunk layers)
+    - extra_heads 파라미터 (MTP heads, full fine-tuning)
+    - value_head 파라미터 (선택적)
+
+    Base model은 별도로 유지하고, 추론 시 base model + checkpoint 조합으로 사용.
 
     Args:
         adapter: MetaLlamaMTPAdapter (FSDP-wrapped 또는 일반 모델, LoRA 적용됨)
@@ -268,7 +294,8 @@ def save_lora_checkpoint(
     Saved checkpoint format:
         {
             "epoch": float,
-            "lora_state_dict": dict,  # LoRA 파라미터만
+            "lora_state_dict": dict,  # LoRA 파라미터
+            "extra_heads_state_dict": dict,  # MTP extra_heads 파라미터
             "value_head_state_dict": dict,  # Value head (선택적)
             "optimizer_state_dict": dict,
             "train_metrics": dict,
@@ -276,6 +303,7 @@ def save_lora_checkpoint(
             "config": dict,
             "lora_config": dict,  # LoRA 설정 (rank, alpha 등)
             "td_ema_state": dict,  # TD EMA 통계 (선택적)
+            "checkpoint_type": "lora",
         }
     """
     import torch.distributed as dist
@@ -305,10 +333,16 @@ def save_lora_checkpoint(
         full_state_dict = adapter.state_dict()
         unwrapped = adapter
 
-    # LoRA 파라미터만 추출
+    # LoRA 파라미터 추출 (trunk layers)
     lora_state_dict = {
         k: v for k, v in full_state_dict.items()
         if "lora_A" in k or "lora_B" in k
+    }
+
+    # extra_heads 파라미터 추출 (MTP heads, full fine-tuning)
+    extra_heads_state_dict = {
+        k: v for k, v in full_state_dict.items()
+        if "transformer.extra_heads." in k
     }
 
     # Value head 파라미터 추출 (선택적)
@@ -334,13 +368,15 @@ def save_lora_checkpoint(
     # 크기 비교 로깅
     full_size = sum(v.numel() for v in full_state_dict.values())
     lora_size = sum(v.numel() for v in lora_state_dict.values())
+    extra_heads_size = sum(v.numel() for v in extra_heads_state_dict.values())
     vh_size = sum(v.numel() for v in value_head_state_dict.values())
-    saved_size = lora_size + vh_size
+    saved_size = lora_size + extra_heads_size + vh_size
 
     logger.info(f"LoRA checkpoint 저장:")
     logger.info(f"  전체 모델: {full_size:,} params")
     logger.info(f"  LoRA: {lora_size:,} params ({lora_size/full_size*100:.2f}%)")
-    if save_value_head:
+    logger.info(f"  extra_heads: {extra_heads_size:,} params ({extra_heads_size/full_size*100:.2f}%)")
+    if save_value_head and vh_size > 0:
         logger.info(f"  Value head: {vh_size:,} params ({vh_size/full_size*100:.2f}%)")
     logger.info(f"  저장 크기: {saved_size:,} params ({saved_size/full_size*100:.2f}%)")
 
@@ -350,6 +386,7 @@ def save_lora_checkpoint(
     checkpoint = {
         "epoch": epoch,
         "lora_state_dict": lora_state_dict,
+        "extra_heads_state_dict": extra_heads_state_dict,
         "value_head_state_dict": value_head_state_dict if save_value_head else {},
         "optimizer_state_dict": optimizer.state_dict(),
         "train_metrics": train_metrics,
@@ -381,9 +418,12 @@ def load_lora_checkpoint(
     load_value_head: bool = True,
     strict: bool = True,
 ) -> dict:
-    """LoRA checkpoint 로드 (LoRA 파라미터 + value head를 기존 adapter에 적용)
+    """LoRA checkpoint 로드 (LoRA + extra_heads + value_head를 기존 adapter에 적용)
 
-    Base model이 이미 로드된 adapter에 LoRA 가중치와 value head를 로드합니다.
+    Base model이 이미 로드된 adapter에 학습된 파라미터를 로드합니다.
+    - LoRA 파라미터 (trunk layers)
+    - extra_heads 파라미터 (MTP heads)
+    - value_head 파라미터 (선택적)
 
     Args:
         adapter: MetaLlamaMTPAdapter (LoRA가 적용된 상태)
@@ -421,6 +461,9 @@ def load_lora_checkpoint(
     if not lora_state_dict:
         logger.warning("LoRA state_dict가 비어있습니다.")
 
+    # extra_heads state dict 로드
+    extra_heads_state_dict = checkpoint.get("extra_heads_state_dict", {})
+
     # Value head state dict 로드
     value_head_state_dict = checkpoint.get("value_head_state_dict", {})
 
@@ -435,6 +478,15 @@ def load_lora_checkpoint(
             raise KeyError(f"LoRA key not found in model: {key}")
         else:
             logger.warning(f"LoRA key not found, skipping: {key}")
+
+    # extra_heads 가중치 업데이트
+    for key, value in extra_heads_state_dict.items():
+        if key in current_state_dict:
+            current_state_dict[key] = value
+        elif strict:
+            raise KeyError(f"extra_heads key not found in model: {key}")
+        else:
+            logger.warning(f"extra_heads key not found, skipping: {key}")
 
     # Value head 가중치 업데이트
     if load_value_head and value_head_state_dict:
@@ -451,7 +503,8 @@ def load_lora_checkpoint(
 
     logger.info(f"LoRA checkpoint 로드 완료:")
     logger.info(f"  LoRA params: {len(lora_state_dict)} keys")
-    if load_value_head:
+    logger.info(f"  extra_heads params: {len(extra_heads_state_dict)} keys")
+    if load_value_head and value_head_state_dict:
         logger.info(f"  Value head params: {len(value_head_state_dict)} keys")
     logger.info(f"  Epoch: {checkpoint.get('epoch', 'N/A')}")
 
