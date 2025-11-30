@@ -298,13 +298,12 @@ def run_baseline_training(config: DictConfig) -> tuple[dict[str, float], str]:
         )
 
     # 6. Optimizer 설정
-    # LoRA 사용 시 trainable parameters만, 아니면 전체 파라미터
-    unwrapped_adapter = unwrap_model(adapter)
+    # FSDP-wrapped 모델에서 직접 파라미터 접근 (표준 패턴)
     if use_lora:
-        trainable_params = unwrapped_adapter.get_trainable_parameters()
+        trainable_params = [p for p in adapter.parameters() if p.requires_grad]
         logger.info(f"LoRA optimizer: {sum(p.numel() for p in trainable_params):,} trainable params")
     else:
-        trainable_params = adapter.parameters()
+        trainable_params = list(adapter.parameters())
 
     optimizer = torch.optim.AdamW(
         trainable_params,
