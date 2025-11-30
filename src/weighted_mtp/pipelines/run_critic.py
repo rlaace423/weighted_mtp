@@ -27,16 +27,15 @@ from weighted_mtp.utils import (
     GPUMonitor,
     ThroughputTracker,
     cleanup_old_checkpoints,
-    cleanup_s3_checkpoints,
     compute_gradient_clip_stats,
     compute_gradient_norm,
-    compute_mc_value_loss,
+    compute_lambda_value_loss,
     compute_pairwise_accuracy,
+    compute_token_variance,
+    create_eos_only_mask,
     create_scheduler,
     get_model_size,
     get_system_info,
-    pairwise_ranking_loss,
-    s3_upload_executor,
     shutdown_s3_executor,
 )
 from weighted_mtp.runtime import (
@@ -48,6 +47,30 @@ from weighted_mtp.runtime import (
     all_reduce_scalars,
     barrier,
 )
+
+
+def init_value_head_bias(value_model: ValueModel, bias_value: float) -> None:
+    """Value head의 마지막 레이어 bias를 특정 값으로 초기화
+
+    λ-return 학습 안정화를 위해 초기 예측값을 기대값(0.5)에 맞춤.
+
+    Args:
+        value_model: ValueModel 인스턴스
+        bias_value: 초기화할 bias 값 (보통 0.5)
+    """
+    value_head = value_model.value_head
+    head_type = getattr(value_head, "head_type", "unknown")
+
+    if head_type in ("linear", "sigmoid"):
+        # LinearValueHead, SigmoidValueHead: self.linear이 마지막 레이어
+        if hasattr(value_head, "linear") and value_head.linear.bias is not None:
+            value_head.linear.bias.data.fill_(bias_value)
+    elif head_type == "mlp":
+        # MLPValueHead: self.mlp[-1]이 마지막 레이어
+        if hasattr(value_head, "mlp"):
+            last_layer = value_head.mlp[-1]
+            if hasattr(last_layer, "bias") and last_layer.bias is not None:
+                last_layer.bias.data.fill_(bias_value)
 
 
 def load_value_model(
@@ -157,22 +180,20 @@ def validate_critic(
     value_model: ValueModel,
     dataloader: DataLoader,
     device: torch.device,
-    use_pairwise: bool = True,
-    use_mc_mse: bool = False,
-    pairwise_coef: float = 1.0,
-    mc_mse_coef: float = 1.0,
+    lambda_gamma: float = 1.0,
+    lambda_lam: float = 0.95,
+    lambda_coef: float = 1.0,
     return_raw_counts: bool = False,
 ) -> dict[str, float]:
-    """Pairwise Validation 수행
+    """λ-return 기반 Validation 수행
 
     Args:
         value_model: ValueModel 인스턴스
         dataloader: Validation DataLoader (pairwise format)
         device: 디바이스
-        use_pairwise: Pairwise ranking loss 사용 여부
-        use_mc_mse: MC tokenwise MSE loss 사용 여부
-        pairwise_coef: Pairwise loss 계수
-        mc_mse_coef: MC MSE loss 계수
+        lambda_gamma: λ-return gamma (discount factor)
+        lambda_lam: λ-return lambda (GAE smoothing)
+        lambda_coef: λ-return loss 계수
         return_raw_counts: True이면 raw counts 반환 (분산학습용 aggregation)
 
     Returns:
@@ -186,6 +207,8 @@ def validate_critic(
     total_pairs = 0
     total_mean_pos = 0.0
     total_mean_neg = 0.0
+    total_pos_variance = 0.0
+    total_neg_variance = 0.0
 
     # 모델 dtype 감지
     model_dtype = next(value_model.parameters()).dtype
@@ -214,31 +237,20 @@ def validate_critic(
             pos_loss_mask = (pos_labels != -100)
             neg_loss_mask = (neg_labels != -100)
 
-            # Value Loss 계산 (조건부)
-            value_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
+            # λ-return Value Loss 계산
+            pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
+            pos_lambda_loss = compute_lambda_value_loss(
+                pos_value_logits, pos_rewards, pos_attention_mask, pos_loss_mask.float(),
+                gamma=lambda_gamma, lam=lambda_lam,
+            )
+            neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
+            neg_lambda_loss = compute_lambda_value_loss(
+                neg_value_logits, neg_rewards, neg_attention_mask, neg_loss_mask.float(),
+                gamma=lambda_gamma, lam=lambda_lam,
+            )
+            value_loss = lambda_coef * (pos_lambda_loss + neg_lambda_loss) / 2
 
-            if use_pairwise:
-                pairwise_loss_val = pairwise_ranking_loss(
-                    v_pos=pos_value_logits,
-                    v_neg=neg_value_logits,
-                    mask_pos=pos_loss_mask,
-                    mask_neg=neg_loss_mask,
-                )
-                value_loss = value_loss + pairwise_coef * pairwise_loss_val
-
-            if use_mc_mse:
-                pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
-                pos_mc_loss = compute_mc_value_loss(
-                    pos_value_logits, pos_rewards, pos_attention_mask, pos_loss_mask
-                )
-                neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
-                neg_mc_loss = compute_mc_value_loss(
-                    neg_value_logits, neg_rewards, neg_attention_mask, neg_loss_mask
-                )
-                mc_mse_loss_val = (pos_mc_loss + neg_mc_loss) / 2
-                value_loss = value_loss + mc_mse_coef * mc_mse_loss_val
-
-            # Pairwise accuracy 계산 (항상 계산 - 메트릭용)
+            # Pairwise accuracy 계산 (메트릭용)
             pairwise_metrics = compute_pairwise_accuracy(
                 v_pos=pos_value_logits,
                 v_neg=neg_value_logits,
@@ -246,11 +258,17 @@ def validate_critic(
                 mask_neg=neg_loss_mask,
             )
 
+            # Token-level variance 계산
+            pos_var = compute_token_variance(pos_value_logits, pos_loss_mask)
+            neg_var = compute_token_variance(neg_value_logits, neg_loss_mask)
+
             total_loss += value_loss.item()
             total_correct_pairs += pairwise_metrics["correct_pairs"]
             total_pairs += pairwise_metrics["total_pairs"]
             total_mean_pos += pairwise_metrics["mean_pos"]
             total_mean_neg += pairwise_metrics["mean_neg"]
+            total_pos_variance += pos_var
+            total_neg_variance += neg_var
             n_batches += 1
 
     # 평균 계산
@@ -259,6 +277,8 @@ def validate_critic(
     avg_mean_pos = total_mean_pos / n_batches if n_batches > 0 else 0.0
     avg_mean_neg = total_mean_neg / n_batches if n_batches > 0 else 0.0
     avg_margin = avg_mean_pos - avg_mean_neg
+    avg_pos_variance = total_pos_variance / n_batches if n_batches > 0 else 0.0
+    avg_neg_variance = total_neg_variance / n_batches if n_batches > 0 else 0.0
 
     metrics = {
         "val_loss": avg_loss,
@@ -266,6 +286,8 @@ def validate_critic(
         "val_mean_pos": avg_mean_pos,
         "val_mean_neg": avg_mean_neg,
         "val_margin": avg_margin,
+        "val_pos_token_variance": avg_pos_variance,
+        "val_neg_token_variance": avg_neg_variance,
     }
 
     # 분산학습용: raw counts 포함 반환
@@ -277,6 +299,8 @@ def validate_critic(
             "total_pairs": total_pairs,
             "mean_pos_sum": total_mean_pos,
             "mean_neg_sum": total_mean_neg,
+            "pos_variance_sum": total_pos_variance,
+            "neg_variance_sum": total_neg_variance,
         }
 
     return metrics
@@ -334,6 +358,13 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # 6. Value Model 로드
     value_model = load_value_model(config, device)
     logger.info(f"Value Model loaded: {config.models.value_model.path}")
+
+    # λ-return bias 초기화 (FSDP wrapping 전에 수행)
+    lambda_config = config.training.value_loss.get("lambda_return", {})
+    bias_init = lambda_config.get("bias_init", None)
+    if bias_init is not None:
+        init_value_head_bias(value_model, bias_init)
+        logger.info(f"Value head bias initialized to {bias_init}")
 
     # LoRA 설정 확인
     use_lora = getattr(config.training, "use_lora", False)
@@ -584,13 +615,13 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # 모델 dtype 감지
     model_dtype = next(value_model.parameters()).dtype
 
-    # value_loss 설정
+    # λ-return value loss 설정
     value_loss_config = config.training.get("value_loss", {})
-    use_pairwise = value_loss_config.get("use_pairwise", True)
-    use_mc_mse = value_loss_config.get("use_mc_mse", False)
-    pairwise_coef = value_loss_config.get("pairwise_coef", 1.0)
-    mc_mse_coef = value_loss_config.get("mc_mse_coef", 1.0)
-    logger.info(f"Value loss: use_pairwise={use_pairwise}, use_mc_mse={use_mc_mse}")
+    lambda_gamma = value_loss_config.get("gamma", 1.0)
+    lambda_lam = value_loss_config.get("lam", 0.95)
+    lambda_coef = value_loss_config.get("coef", 1.0)
+    warmup_steps = value_loss_config.get("warmup_steps", 0)
+    logger.info(f"λ-return: gamma={lambda_gamma}, lam={lambda_lam}, coef={lambda_coef}, warmup_steps={warmup_steps}")
 
     # Gradient clipping
     max_grad_norm = config.training.get("max_grad_norm", 1.0)
@@ -654,31 +685,29 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             pos_loss_mask = (pos_labels != -100)
             neg_loss_mask = (neg_labels != -100)
 
-            # Value Loss 계산
-            value_loss = torch.tensor(0.0, device=device, dtype=model_dtype)
+            # λ-return Value Loss 계산
+            # Warmup 중에는 EOS 토큰만 학습
+            is_warmup_active = warmup_steps > 0 and global_step < warmup_steps
+            if is_warmup_active:
+                effective_pos_mask = create_eos_only_mask(pos_loss_mask.float())
+                effective_neg_mask = create_eos_only_mask(neg_loss_mask.float())
+            else:
+                effective_pos_mask = pos_loss_mask.float()
+                effective_neg_mask = neg_loss_mask.float()
 
-            if use_pairwise:
-                pairwise_loss_val = pairwise_ranking_loss(
-                    v_pos=pos_value_logits,
-                    v_neg=neg_value_logits,
-                    mask_pos=pos_loss_mask,
-                    mask_neg=neg_loss_mask,
-                )
-                value_loss = value_loss + pairwise_coef * pairwise_loss_val
+            pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
+            pos_lambda_loss = compute_lambda_value_loss(
+                pos_value_logits, pos_rewards, pos_attention_mask, effective_pos_mask,
+                gamma=lambda_gamma, lam=lambda_lam,
+            )
+            neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
+            neg_lambda_loss = compute_lambda_value_loss(
+                neg_value_logits, neg_rewards, neg_attention_mask, effective_neg_mask,
+                gamma=lambda_gamma, lam=lambda_lam,
+            )
+            value_loss = lambda_coef * (pos_lambda_loss + neg_lambda_loss) / 2
 
-            if use_mc_mse:
-                pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
-                pos_mc_loss = compute_mc_value_loss(
-                    pos_value_logits, pos_rewards, pos_attention_mask, pos_loss_mask
-                )
-                neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
-                neg_mc_loss = compute_mc_value_loss(
-                    neg_value_logits, neg_rewards, neg_attention_mask, neg_loss_mask
-                )
-                mc_mse_loss_val = (pos_mc_loss + neg_mc_loss) / 2
-                value_loss = value_loss + mc_mse_coef * mc_mse_loss_val
-
-            # Pairwise 메트릭 누적
+            # Pairwise 메트릭 누적 (accuracy 측정용)
             pairwise_metrics = compute_pairwise_accuracy(
                 v_pos=pos_value_logits,
                 v_neg=neg_value_logits,
@@ -689,6 +718,10 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             train_total_pairs += pairwise_metrics["total_pairs"]
             train_mean_pos_sum += pairwise_metrics["mean_pos"]
             train_mean_neg_sum += pairwise_metrics["mean_neg"]
+
+            # Token-level variance 계산 (problem-level vs token-level 학습 진단)
+            pos_token_var = compute_token_variance(pos_value_logits, pos_loss_mask)
+            neg_token_var = compute_token_variance(neg_value_logits, neg_loss_mask)
 
             # Throughput용 변수
             batch_size_actual = pos_input_ids.size(0) * 2
@@ -743,30 +776,34 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         "pairwise_accuracy": batch_pairwise_acc,
                         "mean_pos": batch_mean_pos,
                         "mean_neg": batch_mean_neg,
+                        "pos_token_var": pos_token_var,
+                        "neg_token_var": neg_token_var,
                     })
 
                     if is_main_process():
                         if use_mlflow:
-                            mlflow.log_metrics(
-                                {
-                                    "train/loss": reduced["loss"],
-                                    "train/grad_norm": grad_clip_stats["grad_norm_post_clip"],
-                                    "train/lora_lr": lora_current_lr,
-                                    "train/value_head_lr": value_head_current_lr,
-                                    "train/pairwise_accuracy": reduced["pairwise_accuracy"],
-                                    "value/mean_pos": reduced["mean_pos"],
-                                    "value/mean_neg": reduced["mean_neg"],
-                                    "value/margin": reduced["mean_pos"] - reduced["mean_neg"],
-                                    "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
-                                },
-                                step=global_step,
-                            )
+                            mlflow.log_metrics({
+                                "train/loss": reduced["loss"],
+                                "train/grad_norm": grad_clip_stats["grad_norm_post_clip"],
+                                "train/lora_lr": lora_current_lr,
+                                "train/value_head_lr": value_head_current_lr,
+                                "train/pairwise_accuracy": reduced["pairwise_accuracy"],
+                                "train/warmup_active": 1.0 if is_warmup_active else 0.0,
+                                "value/mean_pos": reduced["mean_pos"],
+                                "value/mean_neg": reduced["mean_neg"],
+                                "value/margin": reduced["mean_pos"] - reduced["mean_neg"],
+                                "value/pos_token_variance": reduced["pos_token_var"],
+                                "value/neg_token_variance": reduced["neg_token_var"],
+                                "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
+                            }, step=global_step)
+
+                    warmup_status = "WARMUP" if is_warmup_active else "FULL"
                     logger.info(
                         f"Step {global_step}/{total_optimization_steps}, "
-                        f"Loss: {reduced['loss']:.4f}, "
-                        f"Pairwise Acc: {reduced['pairwise_accuracy']:.3f}, "
+                        f"Loss: {reduced['loss']:.4f} [{warmup_status}], "
+                        f"Acc: {reduced['pairwise_accuracy']:.3f}, "
                         f"Margin: {reduced['mean_pos'] - reduced['mean_neg']:.4f}, "
-                        f"LoRA LR: {lora_current_lr:.2e}, VH LR: {value_head_current_lr:.2e}"
+                        f"LR: {value_head_current_lr:.2e}"
                     )
 
         # Period 종료
@@ -820,10 +857,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             value_model=value_model,
             dataloader=val_loader,
             device=device,
-            use_pairwise=use_pairwise,
-            use_mc_mse=use_mc_mse,
-            pairwise_coef=pairwise_coef,
-            mc_mse_coef=mc_mse_coef,
+            lambda_gamma=lambda_gamma,
+            lambda_lam=lambda_lam,
+            lambda_coef=lambda_coef,
             return_raw_counts=True,
         )
 
@@ -836,6 +872,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             "total_pairs": raw_counts["total_pairs"],
             "mean_pos_sum": raw_counts["mean_pos_sum"],
             "mean_neg_sum": raw_counts["mean_neg_sum"],
+            "pos_variance_sum": raw_counts["pos_variance_sum"],
+            "neg_variance_sum": raw_counts["neg_variance_sum"],
         }, op="sum")
 
         avg_val_loss = reduced_val_counts["loss_sum"] / max(1, reduced_val_counts["n_batches"])
@@ -843,6 +881,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         avg_val_mean_pos = reduced_val_counts["mean_pos_sum"] / max(1, reduced_val_counts["n_batches"])
         avg_val_mean_neg = reduced_val_counts["mean_neg_sum"] / max(1, reduced_val_counts["n_batches"])
         avg_val_margin = avg_val_mean_pos - avg_val_mean_neg
+        avg_val_pos_variance = reduced_val_counts["pos_variance_sum"] / max(1, reduced_val_counts["n_batches"])
+        avg_val_neg_variance = reduced_val_counts["neg_variance_sum"] / max(1, reduced_val_counts["n_batches"])
 
         # Epoch-level 로깅
         if is_main_process():
@@ -855,6 +895,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         "val/loss": avg_val_loss,
                         "val/pairwise_accuracy": avg_val_pairwise_acc,
                         "val/margin": avg_val_margin,
+                        "val/pos_token_variance": avg_val_pos_variance,
+                        "val/neg_token_variance": avg_val_neg_variance,
                         "perf/epoch_time_sec": throughput_metrics["epoch_time_sec"],
                         "perf/samples_per_sec": throughput_metrics["samples_per_sec"],
                         "system/gpu_memory_reserved_gb": gpu_metrics_epoch["gpu_memory_reserved_gb"],
@@ -865,7 +907,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         logger.info(
             f"Validation - Loss: {avg_val_loss:.4f}, "
             f"Pairwise Acc: {avg_val_pairwise_acc:.3f}, "
-            f"Margin: {avg_val_margin:.4f}"
+            f"Margin: {avg_val_margin:.4f}, "
+            f"PosVar: {avg_val_pos_variance:.6f}, NegVar: {avg_val_neg_variance:.6f}"
         )
 
         # Aggregated validation metrics
@@ -875,6 +918,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             "val_mean_pos": avg_val_mean_pos,
             "val_mean_neg": avg_val_mean_neg,
             "val_margin": avg_val_margin,
+            "val_pos_token_variance": avg_val_pos_variance,
+            "val_neg_token_variance": avg_val_neg_variance,
         }
 
         # Checkpoint 저장
@@ -917,10 +962,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             value_model=value_model,
             dataloader=val_loader,
             device=device,
-            use_pairwise=use_pairwise,
-            use_mc_mse=use_mc_mse,
-            pairwise_coef=pairwise_coef,
-            mc_mse_coef=mc_mse_coef,
+            lambda_gamma=lambda_gamma,
+            lambda_lam=lambda_lam,
+            lambda_coef=lambda_coef,
             return_raw_counts=True,
         )
 

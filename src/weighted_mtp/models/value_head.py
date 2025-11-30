@@ -13,10 +13,10 @@ class LinearValueHead(nn.Module):
 
     Args:
         hidden_size: Transformer hidden dimension
-        bias: Linear layer bias (기본값 False, RLHF 표준)
+        bias: Linear layer bias (기본값 True, λ-return 학습 안정화용)
     """
 
-    def __init__(self, hidden_size: int, bias: bool = False):
+    def __init__(self, hidden_size: int, bias: bool = True):
         super().__init__()
         self.hidden_size = hidden_size
         self.head_type = "linear"
@@ -52,10 +52,10 @@ class SigmoidValueHead(nn.Module):
 
     Args:
         hidden_size: Transformer hidden dimension
-        bias: Linear layer bias (기본값 False, RLHF 표준)
+        bias: Linear layer bias (기본값 True, λ-return 학습 안정화용)
     """
 
-    def __init__(self, hidden_size: int, bias: bool = False):
+    def __init__(self, hidden_size: int, bias: bool = True):
         super().__init__()
         self.hidden_size = hidden_size
         self.head_type = "sigmoid"
@@ -94,11 +94,11 @@ class MLPValueHead(nn.Module):
 
     Args:
         hidden_size: Transformer hidden dimension
-        bias: Linear layer bias (기본값 False, RLHF 표준)
+        bias: Linear layer bias (기본값 True, λ-return 학습 안정화용)
         dropout: Dropout 확률 (기본값 0.0, Pairwise 학습 시 0.3 권장)
     """
 
-    def __init__(self, hidden_size: int, bias: bool = False, dropout: float = 0.0):
+    def __init__(self, hidden_size: int, bias: bool = True, dropout: float = 0.0):
         super().__init__()
         self.hidden_size = hidden_size
         self.head_type = "mlp"

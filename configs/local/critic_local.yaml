@@ -61,11 +61,13 @@ training:
     learning_rate: 1.0e-4
     weight_decay: 0.01
 
+  # Value loss: λ-Return
   value_loss:
-    use_pairwise: false
-    use_mc_mse: true
-    pairwise_coef: 0
-    mc_mse_coef: 1.0
+    gamma: 1.0
+    lam: 0.95
+    coef: 1.0
+    warmup_steps: 10       # 로컬 테스트용 짧은 warmup
+    bias_init: 0.5
 
   lr_scheduler:
     type: cosine
