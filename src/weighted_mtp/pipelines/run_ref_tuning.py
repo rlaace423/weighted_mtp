@@ -63,11 +63,20 @@ def load_hf_model(config: DictConfig, device: torch.device) -> torch.nn.Module:
     }
     dtype = dtype_map.get(config.models.policy.dtype, torch.bfloat16)
 
+    # SDPA 활성화를 위한 config 설정
+    from transformers import AutoConfig
+    model_config = AutoConfig.from_pretrained(config.models.policy.path)
+    model_config._attn_implementation = "sdpa"
+
     model = AutoModelForCausalLM.from_pretrained(
         config.models.policy.path,
+        config=model_config,
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
+        attn_implementation="sdpa",
     ).to(device)
+
+    logger.info(f"Model loaded with attn_implementation={model_config._attn_implementation}")
 
     # LoRA 적용
     use_lora = getattr(config.training, "use_lora", False)

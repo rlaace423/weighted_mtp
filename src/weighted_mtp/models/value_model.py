@@ -101,14 +101,23 @@ class ValueModel(nn.Module):
         }
         torch_dtype = dtype_map.get(dtype, torch.bfloat16)
 
-        # HuggingFace LlamaModel 로드
+        # HuggingFace LlamaModel 로드 (SDPA 활성화)
         config = LlamaConfig.from_pretrained(model_path)
+        config._attn_implementation = "sdpa"  # Config에 명시적 설정
+
         backbone = LlamaModel.from_pretrained(
             model_path,
+            config=config,  # 수정된 config 전달
             torch_dtype=torch_dtype,
             low_cpu_mem_usage=True,
-            attn_implementation="sdpa",  # PyTorch SDPA (O(n) 메모리)
+            attn_implementation="sdpa",
         )
+
+        # SDPA 활성화 검증 로그
+        import logging
+        logger = logging.getLogger(__name__)
+        actual_impl = getattr(config, "_attn_implementation", "unknown")
+        logger.info(f"LlamaModel loaded with attn_implementation={actual_impl}")
 
         # 디바이스 이동
         if device != "cpu":
