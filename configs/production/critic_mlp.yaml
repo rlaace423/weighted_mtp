@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: lora-critic-lambda-0.997
+  name: lora-critic-lambda-0.997-final
   description: "Independent Value Model pretraining for TD error calculation"
   stage: critic
   tags:

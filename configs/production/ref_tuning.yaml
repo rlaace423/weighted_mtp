@@ -55,12 +55,12 @@ training:
   max_grad_norm: 1
   log_interval: 5
 
-  # LoRA 설정 (HuggingFace 모델용)
+  # LoRA 설정 (과적합 방지를 위해 축소된 용량)
   use_lora: true
   lora:
-    rank: 64
-    alpha: 128.0
-    dropout: 0.05
+    rank: 16              # 64 → 16 (암기 용량 축소)
+    alpha: 32.0           # 128 → 32 (rank × 2)
+    dropout: 0.1          # 0.05 → 0.1 (규제 강화)
     target_modules:
       - q_proj
       - k_proj
@@ -69,6 +69,7 @@ training:
       - gate_proj
       - up_proj
       - down_proj
+    weight_decay: 0.1     # 가중치 규제 강화
 
   # Learning rate scheduler
   lr_scheduler:
@@ -97,7 +98,7 @@ distributed:
     sharding_strategy: FULL_SHARD
     mixed_precision: true
     cpu_offload: false
-    activation_checkpointing: true
+    activation_checkpointing: false
 
 # 스토리지
 storage:
