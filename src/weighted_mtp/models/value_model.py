@@ -107,6 +107,7 @@ class ValueModel(nn.Module):
             model_path,
             torch_dtype=torch_dtype,
             low_cpu_mem_usage=True,
+            attn_implementation="sdpa",  # PyTorch SDPA (O(n) 메모리)
         )
 
         # 디바이스 이동
