@@ -59,6 +59,7 @@ from weighted_mtp.utils.pairwise_utils import (
     compute_pairwise_accuracy,
     compute_token_variance,
     create_eos_only_mask,
+    get_scheduled_lambda,
     pairwise_ranking_loss,
 )
 from weighted_mtp.utils.loss_utils import (
@@ -118,5 +119,6 @@ __all__ = [
     "compute_pairwise_accuracy",
     "compute_token_variance",
     "create_eos_only_mask",
+    "get_scheduled_lambda",
     "pairwise_ranking_loss",
 ]

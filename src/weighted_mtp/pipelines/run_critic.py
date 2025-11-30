@@ -32,8 +32,8 @@ from weighted_mtp.utils import (
     compute_lambda_value_loss,
     compute_pairwise_accuracy,
     compute_token_variance,
-    create_eos_only_mask,
     create_scheduler,
+    get_scheduled_lambda,
     get_model_size,
     get_system_info,
     shutdown_s3_executor,
@@ -618,10 +618,16 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     # λ-return value loss 설정
     value_loss_config = config.training.get("value_loss", {})
     lambda_gamma = value_loss_config.get("gamma", 1.0)
-    lambda_lam = value_loss_config.get("lam", 0.95)
     lambda_coef = value_loss_config.get("coef", 1.0)
-    warmup_steps = value_loss_config.get("warmup_steps", 0)
-    logger.info(f"λ-return: gamma={lambda_gamma}, lam={lambda_lam}, coef={lambda_coef}, warmup_steps={warmup_steps}")
+
+    # Lambda scheduling 설정 (EOS-only warmup 대체)
+    lambda_schedule_config = value_loss_config.get("lambda_schedule", {})
+    lam_start = lambda_schedule_config.get("start", 1.0)
+    lam_end = lambda_schedule_config.get("end", 0.95)
+    lam_warmup_steps = lambda_schedule_config.get("warmup_steps", 250)
+    lam_decay_steps = lambda_schedule_config.get("decay_steps", 500)
+    logger.info(f"λ-return: gamma={lambda_gamma}, coef={lambda_coef}")
+    logger.info(f"λ-schedule: start={lam_start}, end={lam_end}, warmup_steps={lam_warmup_steps}, decay_steps={lam_decay_steps}")
 
     # Gradient clipping
     max_grad_norm = config.training.get("max_grad_norm", 1.0)
@@ -685,25 +691,21 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             pos_loss_mask = (pos_labels != -100)
             neg_loss_mask = (neg_labels != -100)
 
-            # λ-return Value Loss 계산
-            # Warmup 중에는 EOS 토큰만 학습
-            is_warmup_active = warmup_steps > 0 and global_step < warmup_steps
-            if is_warmup_active:
-                effective_pos_mask = create_eos_only_mask(pos_loss_mask.float())
-                effective_neg_mask = create_eos_only_mask(neg_loss_mask.float())
-            else:
-                effective_pos_mask = pos_loss_mask.float()
-                effective_neg_mask = neg_loss_mask.float()
+            # Lambda scheduling: step에 따라 λ 동적 조절
+            current_lam = get_scheduled_lambda(
+                global_step, lam_warmup_steps, lam_decay_steps, lam_start, lam_end
+            )
 
+            # λ-return Value Loss 계산
             pos_rewards = torch.ones(pos_input_ids.size(0), device=device, dtype=model_dtype)
             pos_lambda_loss = compute_lambda_value_loss(
-                pos_value_logits, pos_rewards, pos_attention_mask, effective_pos_mask,
-                gamma=lambda_gamma, lam=lambda_lam,
+                pos_value_logits, pos_rewards, pos_attention_mask, pos_loss_mask.float(),
+                gamma=lambda_gamma, lam=current_lam,
             )
             neg_rewards = torch.zeros(neg_input_ids.size(0), device=device, dtype=model_dtype)
             neg_lambda_loss = compute_lambda_value_loss(
-                neg_value_logits, neg_rewards, neg_attention_mask, effective_neg_mask,
-                gamma=lambda_gamma, lam=lambda_lam,
+                neg_value_logits, neg_rewards, neg_attention_mask, neg_loss_mask.float(),
+                gamma=lambda_gamma, lam=current_lam,
             )
             value_loss = lambda_coef * (pos_lambda_loss + neg_lambda_loss) / 2
 
@@ -788,7 +790,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                                 "train/lora_lr": lora_current_lr,
                                 "train/value_head_lr": value_head_current_lr,
                                 "train/pairwise_accuracy": reduced["pairwise_accuracy"],
-                                "train/warmup_active": 1.0 if is_warmup_active else 0.0,
+                                "train/lambda": current_lam,
                                 "value/mean_pos": reduced["mean_pos"],
                                 "value/mean_neg": reduced["mean_neg"],
                                 "value/margin": reduced["mean_pos"] - reduced["mean_neg"],
@@ -797,10 +799,9 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                                 "system/gpu_memory_allocated_gb": gpu_metrics["gpu_memory_allocated_gb"],
                             }, step=global_step)
 
-                    warmup_status = "WARMUP" if is_warmup_active else "FULL"
                     logger.info(
                         f"Step {global_step}/{total_optimization_steps}, "
-                        f"Loss: {reduced['loss']:.4f} [{warmup_status}], "
+                        f"Loss: {reduced['loss']:.4f} [λ={current_lam:.2f}], "
                         f"Acc: {reduced['pairwise_accuracy']:.3f}, "
                         f"Margin: {reduced['mean_pos'] - reduced['mean_neg']:.4f}, "
                         f"LR: {value_head_current_lr:.2e}"

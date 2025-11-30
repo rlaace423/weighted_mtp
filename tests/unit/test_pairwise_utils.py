@@ -11,6 +11,7 @@ from weighted_mtp.utils.pairwise_utils import (
     compute_lambda_value_loss,
     compute_mc_value_loss,
     create_eos_only_mask,
+    get_scheduled_lambda,
 )
 
 
@@ -331,3 +332,113 @@ class TestCreateEosOnlyMask:
         loss_mask = torch.tensor([[1, 1, 1, 0]], dtype=torch.float32)
         eos_mask = create_eos_only_mask(loss_mask)
         assert eos_mask.device == loss_mask.device
+
+
+class TestGetScheduledLambda:
+    """get_scheduled_lambda 함수 테스트"""
+
+    def test_warmup_phase_returns_start(self):
+        """Warmup 기간 동안 λ=start 반환"""
+        warmup_steps = 250
+        decay_steps = 500
+        lam_start = 1.0
+        lam_end = 0.95
+
+        # Warmup 기간 내 여러 step 테스트
+        assert get_scheduled_lambda(0, warmup_steps, decay_steps, lam_start, lam_end) == 1.0
+        assert get_scheduled_lambda(100, warmup_steps, decay_steps, lam_start, lam_end) == 1.0
+        assert get_scheduled_lambda(249, warmup_steps, decay_steps, lam_start, lam_end) == 1.0
+
+    def test_decay_phase_linear_decrease(self):
+        """Decay 기간 동안 선형 감소"""
+        warmup_steps = 250
+        decay_steps = 500
+        lam_start = 1.0
+        lam_end = 0.95
+
+        # Decay 시작점
+        lam_at_250 = get_scheduled_lambda(250, warmup_steps, decay_steps, lam_start, lam_end)
+        assert abs(lam_at_250 - 1.0) < 1e-6
+
+        # Decay 중간점 (50% progress)
+        lam_at_500 = get_scheduled_lambda(500, warmup_steps, decay_steps, lam_start, lam_end)
+        expected_mid = 1.0 - 0.5 * (1.0 - 0.95)  # 0.975
+        assert abs(lam_at_500 - expected_mid) < 1e-6
+
+        # Decay 종료 직전
+        lam_at_749 = get_scheduled_lambda(749, warmup_steps, decay_steps, lam_start, lam_end)
+        assert lam_at_749 > 0.95 and lam_at_749 < 0.96
+
+    def test_stable_phase_returns_end(self):
+        """Decay 종료 후 λ=end 유지"""
+        warmup_steps = 250
+        decay_steps = 500
+        lam_start = 1.0
+        lam_end = 0.95
+
+        # Decay 종료 이후
+        assert get_scheduled_lambda(750, warmup_steps, decay_steps, lam_start, lam_end) == 0.95
+        assert get_scheduled_lambda(1000, warmup_steps, decay_steps, lam_start, lam_end) == 0.95
+        assert get_scheduled_lambda(10000, warmup_steps, decay_steps, lam_start, lam_end) == 0.95
+
+    def test_custom_lambda_range(self):
+        """다른 λ 범위 테스트 (0.8 → 0.5)"""
+        warmup_steps = 100
+        decay_steps = 200
+        lam_start = 0.8
+        lam_end = 0.5
+
+        # Warmup
+        assert get_scheduled_lambda(50, warmup_steps, decay_steps, lam_start, lam_end) == 0.8
+
+        # Decay 중간 (50% progress)
+        lam_mid = get_scheduled_lambda(200, warmup_steps, decay_steps, lam_start, lam_end)
+        expected = 0.8 - 0.5 * (0.8 - 0.5)  # 0.65
+        assert abs(lam_mid - expected) < 1e-6
+
+        # Stable
+        assert get_scheduled_lambda(500, warmup_steps, decay_steps, lam_start, lam_end) == 0.5
+
+    def test_zero_warmup_steps(self):
+        """warmup_steps=0일 때 즉시 decay 시작"""
+        warmup_steps = 0
+        decay_steps = 100
+        lam_start = 1.0
+        lam_end = 0.95
+
+        # Step 0에서 decay 시작
+        assert get_scheduled_lambda(0, warmup_steps, decay_steps, lam_start, lam_end) == 1.0
+
+        # 50% decay
+        lam_50 = get_scheduled_lambda(50, warmup_steps, decay_steps, lam_start, lam_end)
+        assert abs(lam_50 - 0.975) < 1e-6
+
+        # Decay 완료
+        assert get_scheduled_lambda(100, warmup_steps, decay_steps, lam_start, lam_end) == 0.95
+
+    def test_zero_decay_steps(self):
+        """decay_steps=0일 때 warmup 후 즉시 end로 전환"""
+        warmup_steps = 100
+        decay_steps = 0
+        lam_start = 1.0
+        lam_end = 0.95
+
+        # Warmup 중
+        assert get_scheduled_lambda(50, warmup_steps, decay_steps, lam_start, lam_end) == 1.0
+
+        # Warmup 종료 후 즉시 end
+        assert get_scheduled_lambda(100, warmup_steps, decay_steps, lam_start, lam_end) == 0.95
+        assert get_scheduled_lambda(150, warmup_steps, decay_steps, lam_start, lam_end) == 0.95
+
+    def test_monotonic_decrease(self):
+        """λ가 단조 감소하는지 확인"""
+        warmup_steps = 100
+        decay_steps = 200
+        lam_start = 1.0
+        lam_end = 0.95
+
+        prev_lam = float("inf")
+        for step in range(0, 400, 10):
+            current_lam = get_scheduled_lambda(step, warmup_steps, decay_steps, lam_start, lam_end)
+            assert current_lam <= prev_lam, f"Step {step}: {current_lam} > {prev_lam}"
+            prev_lam = current_lam

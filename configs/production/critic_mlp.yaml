@@ -89,10 +89,16 @@ training:
   # Value loss: λ-Return (토큰별 차별화된 타겟으로 일반화 성능 향상)
   value_loss:
     gamma: 1.0              # Discount factor (InstructGPT 설정)
-    lam: 0.95               # GAE smoothing factor
     coef: 1.0               # Loss coefficient
-    warmup_steps: 125        # EOS-only warmup (terminal 패턴 선학습)
     bias_init: 0.5          # Value head bias 초기값 (기대값 일치)
+
+    # Lambda scheduling (Hold & Decay)
+    # 초기 Pure MC로 방향성 확립 후 점진적으로 TD mixture로 전환
+    lambda_schedule:
+      start: 1.0            # 초기 λ (Pure MC, 모든 토큰 타겟=R)
+      end: 0.95             # 최종 λ (TD mixture, 부트스트랩 도입)
+      warmup_steps: 125     # Hold 기간 (λ=1.0 유지, V=0.5 편향 탈출)
+      decay_steps: 125      # Decay 기간 (1.0 → 0.95 선형 감소)
 
   # Learning rate scheduler (공유)
   lr_scheduler:

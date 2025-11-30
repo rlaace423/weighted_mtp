@@ -108,6 +108,48 @@ def compute_token_variance(
     return seq_variance.mean().item()
 
 
+def get_scheduled_lambda(
+    current_step: int,
+    warmup_steps: int = 250,
+    decay_steps: int = 500,
+    lam_start: float = 1.0,
+    lam_end: float = 0.95,
+) -> float:
+    """Lambda scheduling (Hold & Decay)
+
+    EOS-only warmup 대신 λ 값을 동적으로 조절하여 학습 안정성 확보.
+    초기에 Pure MC (λ=1.0)로 방향성을 잡고, 점진적으로 TD mixture로 전환.
+
+    Phase 1 (Hold): warmup_steps 동안 λ=start 유지
+        - 모델이 terminal reward 패턴을 확실히 학습
+        - V=0.5 편향에서 벗어나도록 강제
+
+    Phase 2 (Decay): decay_steps 동안 start → end 선형 감소
+        - 부드러운 전환으로 학습 안정성 유지
+        - 부트스트랩 비중 점진적 증가
+
+    Phase 3 (Stable): 이후 λ=end 유지
+        - 토큰별 차별화된 타겟으로 일반화 성능 향상
+
+    Args:
+        current_step: 현재 global step
+        warmup_steps: Hold 기간 (λ=start 유지)
+        decay_steps: Decay 기간 (start → end)
+        lam_start: 초기 λ 값 (기본값 1.0, Pure MC)
+        lam_end: 최종 λ 값 (기본값 0.95)
+
+    Returns:
+        현재 step의 λ 값
+    """
+    if current_step < warmup_steps:
+        return lam_start
+    elif current_step < warmup_steps + decay_steps:
+        progress = (current_step - warmup_steps) / decay_steps
+        return lam_start - progress * (lam_start - lam_end)
+    else:
+        return lam_end
+
+
 def create_eos_only_mask(loss_mask: torch.Tensor) -> torch.Tensor:
     """마지막 유효 토큰(Output 끝)만 1인 마스크 생성
 
