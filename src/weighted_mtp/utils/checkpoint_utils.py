@@ -601,3 +601,113 @@ def save_hf_checkpoint(
     logger.info(f"HuggingFace checkpoint 저장 완료: {save_dir}")
     logger.info(f"  Epoch: {epoch}")
     logger.info(f"  Val loss: {val_metrics.get('val_loss', 'N/A')}")
+
+
+def save_hf_lora_checkpoint(
+    model,
+    checkpoint_path: Path | str,
+    config: dict,
+    epoch: float,
+    val_metrics: dict[str, float],
+    value_head_state_dict: dict | None = None,
+) -> None:
+    """HuggingFace 모델용 LoRA checkpoint 저장
+
+    LlamaForCausalLM 또는 LlamaModel에 적용된 LoRA 파라미터를 저장합니다.
+    ref_tuning, critic 등 HuggingFace 기반 파이프라인에서 사용.
+
+    Args:
+        model: LoRA가 적용된 HuggingFace 모델 (FSDP-wrapped 가능)
+        checkpoint_path: 저장 경로 (.pt 파일)
+        config: 학습 설정 (base_model_path, lora config 등)
+        epoch: 현재 epoch
+        val_metrics: Validation metrics
+        value_head_state_dict: Value head state dict (critic용, 없으면 빈 dict)
+
+    Saved checkpoint format:
+        {
+            "checkpoint_type": "hf_lora",
+            "lora_state_dict": dict,
+            "value_head_state_dict": dict,
+            "lora_config": dict,
+            "base_model_path": str,
+            "epoch": float,
+            "val_metrics": dict,
+            "config": dict,
+        }
+    """
+    import torch.distributed as dist
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp.fully_sharded_data_parallel import (
+        StateDictType,
+        FullStateDictConfig,
+    )
+    from weighted_mtp.models.lora import get_hf_lora_state_dict
+
+    checkpoint_path = Path(checkpoint_path)
+
+    # FSDP Full state dict gathering
+    if isinstance(model, FSDP):
+        with FSDP.state_dict_type(
+            model,
+            StateDictType.FULL_STATE_DICT,
+            FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+        ):
+            full_state_dict = model.state_dict()
+
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+
+        unwrapped = model.module
+    else:
+        full_state_dict = model.state_dict()
+        unwrapped = model
+
+    # LoRA 파라미터 추출
+    lora_state_dict = {
+        k: v for k, v in full_state_dict.items()
+        if "lora_A" in k or "lora_B" in k
+    }
+
+    # LoRA config 추출
+    lora_config = None
+    if hasattr(config, "training") and hasattr(config.training, "lora"):
+        from omegaconf import OmegaConf
+        lora_config = OmegaConf.to_container(config.training.lora, resolve=True)
+
+    # base_model_path 추출
+    base_model_path = None
+    if hasattr(config, "models"):
+        if hasattr(config.models, "policy"):
+            base_model_path = config.models.policy.path
+        elif hasattr(config.models, "value_model"):
+            base_model_path = config.models.value_model.path
+
+    # 저장
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    from omegaconf import OmegaConf
+    checkpoint = {
+        "checkpoint_type": "hf_lora",
+        "lora_state_dict": lora_state_dict,
+        "value_head_state_dict": value_head_state_dict or {},
+        "lora_config": lora_config,
+        "base_model_path": base_model_path,
+        "epoch": epoch,
+        "val_metrics": val_metrics,
+        "config": OmegaConf.to_container(config, resolve=True) if hasattr(config, "_metadata") else config,
+    }
+
+    torch.save(checkpoint, checkpoint_path)
+
+    # 크기 로깅
+    full_size = sum(v.numel() for v in full_state_dict.values())
+    lora_size = sum(v.numel() for v in lora_state_dict.values())
+    vh_size = sum(v.numel() for v in (value_head_state_dict or {}).values())
+
+    logger.info(f"HF LoRA checkpoint 저장 완료: {checkpoint_path}")
+    logger.info(f"  Epoch: {epoch}")
+    logger.info(f"  Val loss: {val_metrics.get('val_loss', 'N/A')}")
+    logger.info(f"  LoRA: {lora_size:,} params ({lora_size/full_size*100:.2f}%)")
+    if vh_size > 0:
+        logger.info(f"  Value head: {vh_size:,} params")

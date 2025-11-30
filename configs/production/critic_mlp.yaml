@@ -54,17 +54,32 @@ training:
   n_epochs: 2.0
   batch_size: 32
   gradient_accumulation_steps: 1  # Effective batch size = 18 × 2 × 3 = 108
-  
+
   # 학습률 (Value Model 전용)
   learning_rate: 1.0e-4
-  
-  # Backbone freeze 설정 (true: value head만 학습)
+
+  # Backbone freeze 설정 (use_lora=true 시 무시됨)
   backbone_frozen: true
-  
+
+  # LoRA 설정 (HuggingFace 모델용)
+  use_lora: true
+  lora:
+    rank: 64
+    alpha: 128.0
+    dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
   # Value head 설정
   value_head_type: mlp
-  dropout: 0.2  # Shortcut Learning 방지
-  
+  dropout: 0.1  # Shortcut Learning 방지
+
   max_grad_norm: 1.0
   log_interval: 5
 

@@ -236,3 +236,132 @@ def merge_lora_weights(model: nn.Module) -> None:
         if isinstance(module, LoRALinear):
             module.merge_weights()
 
+
+# HuggingFace Llama 모델의 Linear 레이어 이름
+HF_ATTENTION_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj"]
+HF_MLP_TARGETS = ["gate_proj", "up_proj", "down_proj"]
+
+DEFAULT_HF_LORA_CONFIG = {
+    "rank": 64,
+    "alpha": 128.0,
+    "dropout": 0.05,
+    "target_modules": HF_ATTENTION_TARGETS + HF_MLP_TARGETS,
+}
+
+
+def apply_lora_to_hf_model(
+    model: nn.Module,
+    lora_config: Optional[dict] = None,
+) -> nn.Module:
+    """HuggingFace Llama 모델에 LoRA 적용
+
+    LlamaModel 또는 LlamaForCausalLM의 attention/mlp Linear에 LoRA 적용
+    기존 apply_lora_to_linear 함수를 내부적으로 호출
+
+    Args:
+        model: HuggingFace LlamaModel 또는 LlamaForCausalLM
+        lora_config: LoRA 설정 (rank, alpha, dropout, target_modules)
+            None이면 DEFAULT_HF_LORA_CONFIG 사용
+
+    Returns:
+        LoRA가 적용된 모델 (원본 weights frozen, LoRA만 학습 가능)
+
+    Raises:
+        ValueError: 지원하지 않는 모델 구조
+    """
+    config = {**DEFAULT_HF_LORA_CONFIG}
+    if lora_config:
+        config.update(lora_config)
+
+    rank = config["rank"]
+    alpha = config["alpha"]
+    dropout = config["dropout"]
+    target_modules = config["target_modules"]
+
+    # HuggingFace 모델 구조 감지
+    # LlamaForCausalLM: model.model.layers
+    # LlamaModel: model.layers
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        layers = model.model.layers
+    elif hasattr(model, "layers"):
+        layers = model.layers
+    else:
+        raise ValueError(
+            "지원하지 않는 모델 구조입니다. "
+            "LlamaModel 또는 LlamaForCausalLM만 지원합니다."
+        )
+
+    # Attention 타겟과 MLP 타겟 분리
+    attn_targets = [t for t in target_modules if t in HF_ATTENTION_TARGETS]
+    mlp_targets = [t for t in target_modules if t in HF_MLP_TARGETS]
+
+    # 각 layer에 LoRA 적용
+    for layer in layers:
+        if attn_targets:
+            apply_lora_to_linear(
+                module=layer.self_attn,
+                target_names=attn_targets,
+                rank=rank,
+                alpha=alpha,
+                dropout=dropout,
+            )
+        if mlp_targets:
+            apply_lora_to_linear(
+                module=layer.mlp,
+                target_names=mlp_targets,
+                rank=rank,
+                alpha=alpha,
+                dropout=dropout,
+            )
+
+    # 원본 weights frozen (LoRA 파라미터만 학습 가능)
+    for name, param in model.named_parameters():
+        if "lora_A" not in name and "lora_B" not in name:
+            param.requires_grad = False
+
+    return model
+
+
+def get_hf_lora_state_dict(model: nn.Module) -> dict:
+    """HuggingFace 모델에서 LoRA 파라미터만 추출
+
+    state_dict 형태로 반환하여 checkpoint 저장에 사용
+
+    Args:
+        model: LoRA가 적용된 HuggingFace 모델
+
+    Returns:
+        LoRA 파라미터만 포함된 state_dict
+    """
+    return {
+        k: v for k, v in model.state_dict().items()
+        if "lora_A" in k or "lora_B" in k
+    }
+
+
+def load_hf_lora_state_dict(
+    model: nn.Module,
+    lora_state_dict: dict,
+    strict: bool = True,
+) -> None:
+    """LoRA 파라미터를 HuggingFace 모델에 로드
+
+    기존 state_dict에 LoRA 파라미터를 덮어쓰기
+
+    Args:
+        model: LoRA가 적용된 HuggingFace 모델
+        lora_state_dict: 로드할 LoRA state_dict
+        strict: True면 누락된 키가 있을 때 에러 발생
+    """
+    current_state = model.state_dict()
+    loaded_keys = []
+
+    for k, v in lora_state_dict.items():
+        if k in current_state:
+            current_state[k] = v
+            loaded_keys.append(k)
+        elif strict:
+            raise KeyError(f"LoRA key not found in model: {k}")
+
+    model.load_state_dict(current_state)
+

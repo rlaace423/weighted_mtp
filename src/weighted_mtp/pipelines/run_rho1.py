@@ -84,6 +84,10 @@ def load_reference_model(config: dict, device: torch.device) -> nn.Module:
     Rho-1에서 Reference 모델은 NTP loss 계산용으로만 사용되므로
     HuggingFace 모델을 직접 로드합니다.
 
+    checkpoint_path 형식에 따른 로드 방식:
+    - .pt 파일: LoRA checkpoint (base_model_path + LoRA merge)
+    - 디렉토리: HuggingFace 모델 (그대로 로드)
+
     Args:
         config: 모델 설정
         device: 디바이스
@@ -91,16 +95,69 @@ def load_reference_model(config: dict, device: torch.device) -> nn.Module:
     Returns:
         Reference model (eval mode, HuggingFace LlamaForCausalLM)
     """
+    from pathlib import Path as PathlibPath
+    from weighted_mtp.models.lora import (
+        apply_lora_to_hf_model,
+        load_hf_lora_state_dict,
+        merge_lora_weights,
+    )
+
     # dtype 변환
     dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
     dtype = dtype_map.get(config.models.reference.dtype, torch.bfloat16)
 
-    # HuggingFace 모델 로드
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        config.models.reference.path,
-        torch_dtype=dtype,
-        low_cpu_mem_usage=True,
-    ).to(device)
+    # checkpoint_path 확인 (필수)
+    checkpoint_path = getattr(config.models.reference, "checkpoint_path", None)
+    if checkpoint_path is None:
+        raise ValueError("config.models.reference.checkpoint_path가 필요합니다.")
+
+    checkpoint_path_obj = PathlibPath(checkpoint_path)
+
+    # Config에서 base_model_path 읽기 (명시적 지정)
+    base_model_path_config = getattr(config.models.reference, "base_model_path", None)
+
+    if str(checkpoint_path).endswith(".pt"):
+        # LoRA checkpoint에서 로드
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+        if checkpoint.get("checkpoint_type") == "hf_lora":
+            # Base model 경로: config 우선, 없으면 checkpoint에서 추출
+            base_model_path = base_model_path_config or checkpoint.get("base_model_path")
+            if base_model_path is None:
+                raise ValueError(
+                    "base_model_path가 필요합니다. "
+                    "config에서 base_model_path를 지정하거나, checkpoint에 base_model_path가 포함되어야 합니다."
+                )
+
+            ref_model = AutoModelForCausalLM.from_pretrained(
+                base_model_path,
+                torch_dtype=dtype,
+                low_cpu_mem_usage=True,
+            ).to(device)
+
+            # LoRA 적용
+            lora_config = checkpoint.get("lora_config", {})
+            apply_lora_to_hf_model(ref_model, lora_config)
+
+            # LoRA weights 로드
+            lora_state_dict = checkpoint.get("lora_state_dict", {})
+            if lora_state_dict:
+                load_hf_lora_state_dict(ref_model, lora_state_dict)
+
+            # LoRA merge (inference 최적화)
+            merge_lora_weights(ref_model)
+        else:
+            raise ValueError(
+                f"지원하지 않는 checkpoint 타입입니다: {checkpoint.get('checkpoint_type')}. "
+                "hf_lora 타입만 지원합니다."
+            )
+    else:
+        # 디렉토리인 경우: HuggingFace 모델로 직접 로드
+        ref_model = AutoModelForCausalLM.from_pretrained(
+            checkpoint_path,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+        ).to(device)
 
     # Eval mode (gradient 불필요)
     ref_model.eval()

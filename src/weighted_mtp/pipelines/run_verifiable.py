@@ -98,22 +98,29 @@ def load_value_model(
     device: torch.device,
 ) -> ValueModel:
     """Value Model 로드 (Critic checkpoint에서, eval only)
-    
+
+    Config에서 base_model_path를 명시적으로 지정하면 해당 경로 사용.
+    지정하지 않으면 checkpoint 내부의 base_model_path 사용.
+
     Args:
         config: 설정 (models.value_model 포함)
         device: 디바이스
-    
+
     Returns:
         ValueModel 인스턴스 (eval mode, frozen)
     """
+    # Config에서 base_model_path 읽기 (명시적 지정)
+    base_model_path = getattr(config.models.value_model, "base_model_path", None)
+
     value_model = ValueModel.from_checkpoint(
         checkpoint_path=config.models.value_model.checkpoint_path,
         device=str(device),
+        base_model_path_override=base_model_path,
     )
-    
+
     # Eval only 모드 (전체 frozen, gradient 비활성화)
     value_model.eval_mode()
-    
+
     return value_model
 
 

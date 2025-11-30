@@ -55,18 +55,24 @@ def load_value_model(
     device: torch.device,
 ) -> ValueModel:
     """독립 Value Model 로드
-    
+
     Args:
         config: 설정 (models.value_model 포함)
         device: 디바이스
-    
+
     Returns:
         ValueModel 인스턴스
     """
     # Value head 설정
     value_head_type = getattr(config.training, "value_head_type", "mlp")
     dropout = getattr(config.training, "dropout", 0.0)
-    
+
+    # LoRA 설정
+    use_lora = getattr(config.training, "use_lora", False)
+    lora_config = None
+    if use_lora and hasattr(config.training, "lora"):
+        lora_config = OmegaConf.to_container(config.training.lora, resolve=True)
+
     # Value Model 로드
     value_model = ValueModel.from_pretrained(
         model_path=config.models.value_model.path,
@@ -74,8 +80,10 @@ def load_value_model(
         dropout=dropout,
         device=str(device),
         dtype=config.models.value_model.dtype,
+        use_lora=use_lora,
+        lora_config=lora_config,
     )
-    
+
     return value_model
 
 
@@ -89,13 +97,10 @@ def save_value_model_checkpoint(
     config: DictConfig = None,
 ) -> None:
     """Value Model checkpoint 저장
-    
-    저장 내용:
-    - backbone_state_dict: HuggingFace LlamaModel weights
-    - value_head_state_dict: Value head weights
-    - optimizer_state_dict
-    - config (모델 경로 포함, 로드 시 필요)
-    
+
+    LoRA 모드: checkpoint_type="hf_lora"로 저장 (LoRA weights + value head만)
+    Full 모드: checkpoint_type="full"로 저장 (전체 backbone + value head)
+
     Args:
         value_model: ValueModel 인스턴스
         optimizer: Optimizer
@@ -107,17 +112,38 @@ def save_value_model_checkpoint(
     """
     # FSDP unwrap
     unwrapped = unwrap_model(value_model)
-    
-    checkpoint = {
-        "epoch": epoch,
-        "backbone_state_dict": unwrapped.backbone.state_dict(),
-        "value_head_state_dict": unwrapped.value_head.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "train_metrics": train_metrics,
-        "val_metrics": val_metrics,
-        "config": OmegaConf.to_container(config, resolve=True) if config else None,
-    }
-    
+
+    # LoRA 모드 확인
+    use_lora = getattr(unwrapped, "lora_enabled", False)
+
+    if use_lora:
+        # LoRA checkpoint (경량)
+        from weighted_mtp.models.lora import get_hf_lora_state_dict
+
+        checkpoint = {
+            "checkpoint_type": "hf_lora",
+            "lora_state_dict": get_hf_lora_state_dict(unwrapped.backbone),
+            "value_head_state_dict": unwrapped.value_head.state_dict(),
+            "lora_config": unwrapped.lora_config,
+            "base_model_path": config.models.value_model.path if config else None,
+            "epoch": epoch,
+            "train_metrics": train_metrics,
+            "val_metrics": val_metrics,
+            "config": OmegaConf.to_container(config, resolve=True) if config else None,
+        }
+    else:
+        # Full checkpoint
+        checkpoint = {
+            "checkpoint_type": "full",
+            "epoch": epoch,
+            "backbone_state_dict": unwrapped.backbone.state_dict(),
+            "value_head_state_dict": unwrapped.value_head.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "train_metrics": train_metrics,
+            "val_metrics": val_metrics,
+            "config": OmegaConf.to_container(config, resolve=True) if config else None,
+        }
+
     torch.save(checkpoint, checkpoint_path)
 
 
@@ -303,13 +329,19 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     value_model = load_value_model(config, device)
     logger.info(f"Value Model loaded: {config.models.value_model.path}")
 
-    # Backbone freeze 설정
-    backbone_frozen = getattr(config.training, "backbone_frozen", True)
-    if backbone_frozen:
-        value_model.freeze_backbone()
-        logger.info("Backbone frozen: training value head only")
+    # LoRA 설정 확인
+    use_lora = getattr(config.training, "use_lora", False)
+
+    # Backbone freeze 설정: use_lora=True면 LoRA가 freeze 제어 (원본 frozen, LoRA만 학습)
+    if use_lora:
+        logger.info("LoRA mode: backbone frozen, training LoRA + value head")
     else:
-        logger.info("Backbone unfrozen: training entire model")
+        backbone_frozen = getattr(config.training, "backbone_frozen", True)
+        if backbone_frozen:
+            value_model.freeze_backbone()
+            logger.info("Backbone frozen: training value head only")
+        else:
+            logger.info("Backbone unfrozen: training entire model")
 
     # Model size 로깅 (FSDP wrapping 전에 계산)
     model_size = get_model_size(value_model)
@@ -334,6 +366,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
     if is_main_process():
         if use_mlflow:
+            # backbone_frozen은 use_lora=False일 때만 적용
+            backbone_frozen_effective = not use_lora and getattr(config.training, "backbone_frozen", True)
             mlflow.log_params(
                 {
                     "model_total_params": model_size["total_params"],
@@ -341,7 +375,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                     "model_non_trainable_params": model_size["non_trainable_params"],
                     "model_trainable_value_head": trainable_breakdown["value_head"],
                     "model_trainable_backbone": trainable_breakdown["backbone"],
-                    "backbone_frozen": backbone_frozen,
+                    "use_lora": use_lora,
+                    "backbone_frozen": backbone_frozen_effective,
                 }
             )
         logger.info(
@@ -414,14 +449,25 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             }
         )
 
-    # 6. Optimizer (단순화: value_model 전체)
+    # 6. Optimizer
     learning_rate = config.training.get("learning_rate", 1e-4)
-    
-    # Backbone frozen인 경우 value_head만 학습
-    trainable_params = value_model.parameters() if not backbone_frozen else [
-        p for p in unwrap_model(value_model).value_head.parameters() if p.requires_grad
-    ]
-    
+
+    # trainable params 설정:
+    # - use_lora=True: LoRA + value_head (requires_grad=True인 파라미터)
+    # - use_lora=False, backbone_frozen=True: value_head만
+    # - use_lora=False, backbone_frozen=False: 전체 모델
+    if use_lora:
+        # LoRA 모드: requires_grad=True인 모든 파라미터 (LoRA + value_head)
+        trainable_params = [p for p in value_model.parameters() if p.requires_grad]
+    else:
+        backbone_frozen = getattr(config.training, "backbone_frozen", True)
+        if backbone_frozen:
+            trainable_params = [
+                p for p in unwrap_model(value_model).value_head.parameters() if p.requires_grad
+            ]
+        else:
+            trainable_params = list(value_model.parameters())
+
     optimizer = torch.optim.AdamW(
         trainable_params,
         lr=learning_rate,

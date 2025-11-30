@@ -55,9 +55,20 @@ training:
   max_grad_norm: 1
   log_interval: 5
 
-  # LoRA 설정: ref-tuning은 HuggingFace 모델 사용으로 현재 미지원
-  # HuggingFace LoRA 필요 시 PEFT 라이브러리 사용 권장
-  use_lora: false
+  # LoRA 설정 (HuggingFace 모델용)
+  use_lora: true
+  lora:
+    rank: 64
+    alpha: 128.0
+    dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
 
   # Learning rate scheduler
   lr_scheduler:

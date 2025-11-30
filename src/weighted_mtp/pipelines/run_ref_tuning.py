@@ -30,6 +30,7 @@ from weighted_mtp.utils import (
     get_model_size,
     get_system_info,
     save_hf_checkpoint,
+    save_hf_lora_checkpoint,
 )
 from weighted_mtp.runtime import (
     init_distributed,
@@ -43,7 +44,10 @@ from weighted_mtp.runtime import (
 
 
 def load_hf_model(config: DictConfig, device: torch.device) -> torch.nn.Module:
-    """HuggingFace 모델 로드 (학습 가능 상태)
+    """HuggingFace 모델 로드
+
+    use_lora=True: LoRA 적용 (원본 frozen, LoRA만 학습)
+    use_lora=False: Full Fine-tuning
 
     Args:
         config: 모델 설정
@@ -64,6 +68,17 @@ def load_hf_model(config: DictConfig, device: torch.device) -> torch.nn.Module:
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
     ).to(device)
+
+    # LoRA 적용
+    use_lora = getattr(config.training, "use_lora", False)
+    if use_lora:
+        from weighted_mtp.models.lora import apply_lora_to_hf_model
+
+        lora_config = None
+        if hasattr(config.training, "lora"):
+            lora_config = OmegaConf.to_container(config.training.lora, resolve=True)
+
+        apply_lora_to_hf_model(model, lora_config)
 
     model.train()
     return model
@@ -228,6 +243,14 @@ def run_ref_tuning_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Loading model: {config.models.policy.path}")
     model = load_hf_model(config, device)
     tokenizer = load_hf_tokenizer(config)
+
+    # LoRA 설정 확인
+    use_lora = getattr(config.training, "use_lora", False)
+    if use_lora:
+        logger.info("LoRA mode: training LoRA adapters only")
+    else:
+        logger.info("Full fine-tuning mode")
+
     logger.info("Model and tokenizer loaded successfully")
 
     # 6. FSDP wrapping
@@ -513,18 +536,30 @@ def run_ref_tuning_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
         logger.info(f"Validation - Loss: {avg_val_loss:.4f}")
 
-        # Checkpoint 저장 (HuggingFace 형식)
+        # Checkpoint 저장
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}"
 
-            save_hf_checkpoint(
-                model=model,
-                tokenizer=tokenizer,
-                save_dir=checkpoint_path,
-                epoch=current_epoch,
-                val_metrics={"val_loss": avg_val_loss},
-            )
+            if use_lora:
+                # LoRA checkpoint (.pt 파일)
+                checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}.pt"
+                save_hf_lora_checkpoint(
+                    model=model,
+                    checkpoint_path=checkpoint_path,
+                    config=config,
+                    epoch=current_epoch,
+                    val_metrics={"val_loss": avg_val_loss},
+                )
+            else:
+                # HuggingFace 형식 (디렉토리)
+                checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{current_epoch:.2f}"
+                save_hf_checkpoint(
+                    model=model,
+                    tokenizer=tokenizer,
+                    save_dir=checkpoint_path,
+                    epoch=current_epoch,
+                    val_metrics={"val_loss": avg_val_loss},
+                )
 
             barrier()
 
@@ -537,8 +572,6 @@ def run_ref_tuning_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
     # 11. Final checkpoint
     if config.checkpoint.save_final:
-        final_path = checkpoint_dir / "checkpoint_final"
-
         logger.info("--- Final Validation ---")
         final_val_metrics = validate_ref_tuning(
             model=model,
@@ -549,13 +582,26 @@ def run_ref_tuning_training(config: DictConfig) -> tuple[dict[str, float], str]:
         reduced_final = all_reduce_scalars({"val_loss": final_val_metrics["val_loss"]})
         final_val_metrics["val_loss"] = reduced_final["val_loss"]
 
-        save_hf_checkpoint(
-            model=model,
-            tokenizer=tokenizer,
-            save_dir=final_path,
-            epoch=current_epoch,
-            val_metrics=final_val_metrics,
-        )
+        if use_lora:
+            # LoRA checkpoint (.pt 파일)
+            final_path = checkpoint_dir / "checkpoint_final.pt"
+            save_hf_lora_checkpoint(
+                model=model,
+                checkpoint_path=final_path,
+                config=config,
+                epoch=current_epoch,
+                val_metrics=final_val_metrics,
+            )
+        else:
+            # HuggingFace 형식 (디렉토리)
+            final_path = checkpoint_dir / "checkpoint_final"
+            save_hf_checkpoint(
+                model=model,
+                tokenizer=tokenizer,
+                save_dir=final_path,
+                epoch=current_epoch,
+                val_metrics=final_val_metrics,
+            )
 
         barrier()
 

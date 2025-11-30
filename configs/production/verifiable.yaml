@@ -39,6 +39,7 @@ models:
   # Value Model (Critic checkpoint에서 로드, eval only)
   value_model:
     checkpoint_path: storage/checkpoints/critic/lora-critic-pretrain/checkpoint_final.pt
+    base_model_path: storage/models/ref-sheared-llama-2.7b/raw
 
 # 데이터셋 설정
 dataset:
