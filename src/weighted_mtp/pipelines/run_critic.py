@@ -358,6 +358,20 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         "backbone": sum(p.numel() for p in value_model.backbone.parameters() if p.requires_grad),
     }
 
+    # 파라미터 참조 저장 (FSDP wrapping 전에 저장해야 함)
+    # FSDP는 파라미터를 FlatParameter로 병합하므로 wrapping 후에는 원본 접근 불가
+    if use_lora:
+        lora_params = [p for p in value_model.backbone.parameters() if p.requires_grad]
+        value_head_params = list(value_model.value_head.parameters())
+    else:
+        backbone_frozen = getattr(config.training, "backbone_frozen", True)
+        if backbone_frozen:
+            lora_params = []
+            value_head_params = [p for p in value_model.value_head.parameters() if p.requires_grad]
+        else:
+            lora_params = []
+            value_head_params = list(value_model.parameters())
+
     # FSDP wrapping
     value_model = wrap_model_fsdp(
         value_model,
@@ -456,6 +470,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         )
 
     # 6. Optimizer (LoRA/Value Head 하이퍼파라미터 분리)
+    # lora_params, value_head_params는 FSDP wrapping 전에 저장됨 (line 361-373)
     lora_config_full = config.training.get("lora", {})
     value_head_config = config.training.get("value_head", {})
 
@@ -464,18 +479,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     value_head_lr = value_head_config.get("learning_rate", 5e-4)
     value_head_weight_decay = value_head_config.get("weight_decay", 0.01)
 
-    # Parameter groups 구성
+    # Parameter groups 구성 (사전 저장된 파라미터 참조 사용)
     if use_lora:
-        # LoRA 모드: backbone(LoRA) + value_head 분리
-        unwrapped = unwrap_model(value_model)
-
-        # LoRA params: backbone에서 requires_grad=True인 파라미터
-        lora_params = [
-            p for p in unwrapped.backbone.parameters() if p.requires_grad
-        ]
-        # Value head params
-        value_head_params = list(unwrapped.value_head.parameters())
-
         param_groups = [
             {
                 "params": lora_params,
@@ -494,25 +499,20 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         logger.info(f"LoRA params: {sum(p.numel() for p in lora_params):,}, LR={lora_lr}, WD={lora_weight_decay}")
         logger.info(f"Value Head params: {sum(p.numel() for p in value_head_params):,}, LR={value_head_lr}, WD={value_head_weight_decay}")
     else:
-        # Non-LoRA 모드: 기존 동작 유지
-        backbone_frozen = getattr(config.training, "backbone_frozen", True)
-        if backbone_frozen:
-            trainable_params = [
-                p for p in unwrap_model(value_model).value_head.parameters() if p.requires_grad
-            ]
-        else:
-            trainable_params = list(value_model.parameters())
-
         param_groups = [
             {
-                "params": trainable_params,
+                "params": value_head_params,
                 "lr": value_head_lr,
                 "weight_decay": value_head_weight_decay,
+                "name": "value_head",
             }
         ]
 
+        logger.info(f"Value Head params: {sum(p.numel() for p in value_head_params):,}, LR={value_head_lr}, WD={value_head_weight_decay}")
+
     optimizer = torch.optim.AdamW(
         param_groups,
+        lr=lora_lr,  # defaults["lr"]용 (scheduler 로깅에 사용)
         betas=(0.9, 0.95),
     )
 
