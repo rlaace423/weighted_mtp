@@ -9,14 +9,14 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: lora-critic-pretrain
+  name: lora-critic-lambda-return
   description: "Independent Value Model pretraining for TD error calculation"
   stage: critic
   tags:
     - critic
-    - pairwise-ranking
+    - lambda-return
     - mlp-value-head
-    - dropout-0.3
+    - dropout-0.1
     - independent-value-model
 
 # 모델 설정
