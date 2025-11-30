@@ -806,7 +806,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
 
                     logger.info(
                         f"Step {global_step}/{total_optimization_steps}, "
-                        f"Loss: {reduced['loss']:.4f} [λ={current_lam:.2f}], "
+                        f"Loss: {reduced['loss']:.4f} [λ={current_lam:.4f}], "
                         f"Acc: {reduced['pairwise_accuracy']:.3f}, "
                         f"Margin: {reduced['mean_pos'] - reduced['mean_neg']:.4f}, "
                         f"LR: {value_head_current_lr:.2e}"

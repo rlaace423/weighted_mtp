@@ -9,7 +9,7 @@ project:
 
 # 실험 메타정보
 experiment:
-  name: lora-critic-lambda-return
+  name: lora-critic-lambda-0.997
   description: "Independent Value Model pretraining for TD error calculation"
   stage: critic
   tags:
@@ -52,7 +52,7 @@ data_sampling:
 # 학습 설정 (H200 3-GPU 최적화)
 training:
   n_epochs: 2.0
-  batch_size: 32
+  batch_size: 16
   gradient_accumulation_steps: 1  # Effective batch size = 32 × 1 × 3 = 96
 
   # Global 설정 (FSDP 제약으로 분리 불가)
@@ -62,12 +62,12 @@ training:
   # Backbone freeze 설정 (use_lora=true 시 무시됨)
   backbone_frozen: true
 
-  # LoRA 설정 (HuggingFace backbone fine-tuning)
+  # LoRA 설정 (과적합 방지를 위해 축소된 용량)
   use_lora: true
   lora:
-    rank: 64
-    alpha: 128.0
-    dropout: 0.05
+    rank: 16              # 64 → 16 (암기 용량 축소)
+    alpha: 32.0           # 128 → 32 (rank × 2)
+    dropout: 0.1          # 0.05 → 0.1 (규제 강화)
     target_modules:
       - q_proj
       - k_proj
@@ -77,14 +77,14 @@ training:
       - up_proj
       - down_proj
     learning_rate: 1.0e-4
-    weight_decay: 0.01
+    weight_decay: 0.1     # 0.01 → 0.1 (가중치 규제 강화)
 
-  # Value Head 설정 (Random init → scratch training)
+  # Value Head 설정 (강화된 Dropout으로 Head Overfitting 방지)
   value_head:
     type: mlp
-    dropout: 0.1
-    learning_rate: 5.0e-4  # LoRA보다 높은 LR (scratch training)
-    weight_decay: 0.01
+    dropout: 0.3          # 0.2 → 0.3 (Head 규제 강화)
+    learning_rate: 5.0e-4
+    weight_decay: 0.1     # 0.01 → 0.1 (가중치 규제 강화)
 
   # Value loss: λ-Return (토큰별 차별화된 타겟으로 일반화 성능 향상)
   value_loss:
@@ -93,12 +93,12 @@ training:
     bias_init: 0.5          # Value head bias 초기값 (기대값 일치)
 
     # Lambda scheduling (Hold & Decay)
-    # 초기 Pure MC로 방향성 확립 후 점진적으로 TD mixture로 전환
+    # 초기 Pure MC로 방향성 확립 후 아주 천천히 미세 부트스트랩 도입
     lambda_schedule:
       start: 1.0            # 초기 λ (Pure MC, 모든 토큰 타겟=R)
-      end: 0.95             # 최종 λ (TD mixture, 부트스트랩 도입)
-      warmup_steps: 125     # Hold 기간 (λ=1.0 유지, V=0.5 편향 탈출)
-      decay_steps: 125      # Decay 기간 (1.0 → 0.95 선형 감소)
+      end: 0.997            # 최종 λ (거의 Pure MC, 0.1% 부트스트랩)
+      warmup_steps: 300     # Hold 기간 (λ=1.0 유지)
+      decay_steps: 600      # Decay 기간 (1.0 → 0.999 매우 천천히)
 
   # Learning rate scheduler (공유)
   lr_scheduler:
@@ -127,7 +127,7 @@ distributed:
     sharding_strategy: FULL_SHARD
     mixed_precision: true
     cpu_offload: false
-    activation_checkpointing: true
+    activation_checkpointing: false
 
 # 스토리지
 storage:
