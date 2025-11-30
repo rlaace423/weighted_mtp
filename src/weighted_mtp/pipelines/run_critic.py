@@ -360,8 +360,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     logger.info(f"Value Model loaded: {config.models.value_model.path}")
 
     # λ-return bias 초기화 (FSDP wrapping 전에 수행)
-    lambda_config = config.training.value_loss.get("lambda_return", {})
-    bias_init = lambda_config.get("bias_init", None)
+    value_loss_config = config.training.get("value_loss", {})
+    bias_init = value_loss_config.get("bias_init", None)
     if bias_init is not None:
         init_value_head_bias(value_model, bias_init)
         logger.info(f"Value head bias initialized to {bias_init}")
