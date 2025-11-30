@@ -626,8 +626,13 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
     lam_end = lambda_schedule_config.get("end", 0.95)
     lam_warmup_steps = lambda_schedule_config.get("warmup_steps", 250)
     lam_decay_steps = lambda_schedule_config.get("decay_steps", 500)
+
+    # Validation용 λ (Pure MC로 일관된 평가 기준 유지)
+    val_lambda_lam = 1.0
+
     logger.info(f"λ-return: gamma={lambda_gamma}, coef={lambda_coef}")
     logger.info(f"λ-schedule: start={lam_start}, end={lam_end}, warmup_steps={lam_warmup_steps}, decay_steps={lam_decay_steps}")
+    logger.info(f"λ-validation: lam={val_lambda_lam} (Pure MC)")
 
     # Gradient clipping
     max_grad_norm = config.training.get("max_grad_norm", 1.0)
@@ -859,7 +864,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             dataloader=val_loader,
             device=device,
             lambda_gamma=lambda_gamma,
-            lambda_lam=lambda_lam,
+            lambda_lam=val_lambda_lam,
             lambda_coef=lambda_coef,
             return_raw_counts=True,
         )
@@ -964,7 +969,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             dataloader=val_loader,
             device=device,
             lambda_gamma=lambda_gamma,
-            lambda_lam=lambda_lam,
+            lambda_lam=val_lambda_lam,
             lambda_coef=lambda_coef,
             return_raw_counts=True,
         )
