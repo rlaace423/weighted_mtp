@@ -53,15 +53,16 @@ data_sampling:
 training:
   n_epochs: 2.0
   batch_size: 32
-  gradient_accumulation_steps: 1  # Effective batch size = 18 × 2 × 3 = 108
+  gradient_accumulation_steps: 1  # Effective batch size = 32 × 1 × 3 = 96
 
-  # 학습률 (Value Model 전용)
-  learning_rate: 1.0e-4
+  # Global 설정 (FSDP 제약으로 분리 불가)
+  max_grad_norm: 1.0
+  log_interval: 5
 
   # Backbone freeze 설정 (use_lora=true 시 무시됨)
   backbone_frozen: true
 
-  # LoRA 설정 (HuggingFace 모델용)
+  # LoRA 설정 (HuggingFace backbone fine-tuning)
   use_lora: true
   lora:
     rank: 64
@@ -75,13 +76,15 @@ training:
       - gate_proj
       - up_proj
       - down_proj
+    learning_rate: 1.0e-4
+    weight_decay: 0.01
 
-  # Value head 설정
-  value_head_type: mlp
-  dropout: 0.1  # Shortcut Learning 방지
-
-  max_grad_norm: 1.0
-  log_interval: 5
+  # Value Head 설정 (Random init → scratch training)
+  value_head:
+    type: mlp
+    dropout: 0.1
+    learning_rate: 5.0e-4  # LoRA보다 높은 LR (scratch training)
+    weight_decay: 0.01
 
   # Value loss 모드
   value_loss:
@@ -90,7 +93,7 @@ training:
     pairwise_coef: 0
     mc_mse_coef: 1.0
 
-  # Learning rate scheduler
+  # Learning rate scheduler (공유)
   lr_scheduler:
     type: cosine
     warmup_ratio: 0.03

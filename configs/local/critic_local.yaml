@@ -46,15 +46,20 @@ training:
   n_epochs: 0.1
   batch_size: 1  # 메모리 제한 고려
   gradient_accumulation_steps: 2
-  
-  learning_rate: 1.0e-4
-  backbone_frozen: true  # 로컬에서는 value head만 학습
-  
-  value_head_type: mlp
-  dropout: 0.3
-  
+
+  # Global 설정
   max_grad_norm: 1.0
   log_interval: 5
+
+  backbone_frozen: true  # 로컬에서는 value head만 학습
+  use_lora: false
+
+  # Value Head 설정 (Non-LoRA 모드에서 사용)
+  value_head:
+    type: mlp
+    dropout: 0.3
+    learning_rate: 1.0e-4
+    weight_decay: 0.01
 
   value_loss:
     use_pairwise: false

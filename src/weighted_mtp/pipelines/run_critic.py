@@ -63,15 +63,21 @@ def load_value_model(
     Returns:
         ValueModel 인스턴스
     """
-    # Value head 설정
-    value_head_type = getattr(config.training, "value_head_type", "mlp")
-    dropout = getattr(config.training, "dropout", 0.0)
+    # Value head 설정 (training.value_head에서 읽기)
+    value_head_config = config.training.get("value_head", {})
+    value_head_type = value_head_config.get("type", "mlp")
+    dropout = value_head_config.get("dropout", 0.0)
 
-    # LoRA 설정
+    # LoRA 설정 (learning_rate, weight_decay 제외하고 전달)
     use_lora = getattr(config.training, "use_lora", False)
     lora_config = None
     if use_lora and hasattr(config.training, "lora"):
-        lora_config = OmegaConf.to_container(config.training.lora, resolve=True)
+        lora_full = OmegaConf.to_container(config.training.lora, resolve=True)
+        # LoRA 모델 설정만 추출 (학습 하이퍼파라미터 제외)
+        lora_config = {
+            k: v for k, v in lora_full.items()
+            if k not in ("learning_rate", "weight_decay")
+        }
 
     # Value Model 로드
     value_model = ValueModel.from_pretrained(
@@ -449,17 +455,46 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
             }
         )
 
-    # 6. Optimizer
-    learning_rate = config.training.get("learning_rate", 1e-4)
+    # 6. Optimizer (LoRA/Value Head 하이퍼파라미터 분리)
+    lora_config_full = config.training.get("lora", {})
+    value_head_config = config.training.get("value_head", {})
 
-    # trainable params 설정:
-    # - use_lora=True: LoRA + value_head (requires_grad=True인 파라미터)
-    # - use_lora=False, backbone_frozen=True: value_head만
-    # - use_lora=False, backbone_frozen=False: 전체 모델
+    lora_lr = lora_config_full.get("learning_rate", 1e-4)
+    lora_weight_decay = lora_config_full.get("weight_decay", 0.01)
+    value_head_lr = value_head_config.get("learning_rate", 5e-4)
+    value_head_weight_decay = value_head_config.get("weight_decay", 0.01)
+
+    # Parameter groups 구성
     if use_lora:
-        # LoRA 모드: requires_grad=True인 모든 파라미터 (LoRA + value_head)
-        trainable_params = [p for p in value_model.parameters() if p.requires_grad]
+        # LoRA 모드: backbone(LoRA) + value_head 분리
+        unwrapped = unwrap_model(value_model)
+
+        # LoRA params: backbone에서 requires_grad=True인 파라미터
+        lora_params = [
+            p for p in unwrapped.backbone.parameters() if p.requires_grad
+        ]
+        # Value head params
+        value_head_params = list(unwrapped.value_head.parameters())
+
+        param_groups = [
+            {
+                "params": lora_params,
+                "lr": lora_lr,
+                "weight_decay": lora_weight_decay,
+                "name": "lora",
+            },
+            {
+                "params": value_head_params,
+                "lr": value_head_lr,
+                "weight_decay": value_head_weight_decay,
+                "name": "value_head",
+            },
+        ]
+
+        logger.info(f"LoRA params: {sum(p.numel() for p in lora_params):,}, LR={lora_lr}, WD={lora_weight_decay}")
+        logger.info(f"Value Head params: {sum(p.numel() for p in value_head_params):,}, LR={value_head_lr}, WD={value_head_weight_decay}")
     else:
+        # Non-LoRA 모드: 기존 동작 유지
         backbone_frozen = getattr(config.training, "backbone_frozen", True)
         if backbone_frozen:
             trainable_params = [
@@ -468,11 +503,17 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
         else:
             trainable_params = list(value_model.parameters())
 
+        param_groups = [
+            {
+                "params": trainable_params,
+                "lr": value_head_lr,
+                "weight_decay": value_head_weight_decay,
+            }
+        ]
+
     optimizer = torch.optim.AdamW(
-        trainable_params,
-        lr=learning_rate,
+        param_groups,
         betas=(0.9, 0.95),
-        weight_decay=0.01,
     )
 
     # 7. Training loop
@@ -668,7 +709,10 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                 # Step-level logging
                 if global_step % config.training.log_interval == 0:
                     gpu_metrics = gpu_monitor.get_metrics()
-                    current_lr = optimizer.param_groups[0]["lr"]
+
+                    # 분리된 LR 추출
+                    lora_current_lr = optimizer.param_groups[0]["lr"]
+                    value_head_current_lr = optimizer.param_groups[1]["lr"] if len(optimizer.param_groups) > 1 else lora_current_lr
 
                     batch_pairwise_acc = pairwise_metrics["pairwise_accuracy"]
                     batch_mean_pos = pairwise_metrics["mean_pos"]
@@ -687,7 +731,8 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                                 {
                                     "train/loss": reduced["loss"],
                                     "train/grad_norm": grad_clip_stats["grad_norm_post_clip"],
-                                    "train/learning_rate": current_lr,
+                                    "train/lora_lr": lora_current_lr,
+                                    "train/value_head_lr": value_head_current_lr,
                                     "train/pairwise_accuracy": reduced["pairwise_accuracy"],
                                     "value/mean_pos": reduced["mean_pos"],
                                     "value/mean_neg": reduced["mean_neg"],
@@ -701,7 +746,7 @@ def run_critic_training(config: DictConfig) -> tuple[dict[str, float], str]:
                         f"Loss: {reduced['loss']:.4f}, "
                         f"Pairwise Acc: {reduced['pairwise_accuracy']:.3f}, "
                         f"Margin: {reduced['mean_pos'] - reduced['mean_neg']:.4f}, "
-                        f"LR: {current_lr:.2e}"
+                        f"LoRA LR: {lora_current_lr:.2e}, VH LR: {value_head_current_lr:.2e}"
                     )
 
         # Period 종료
